@@ -16,6 +16,17 @@ import {
   PROJECT_DEFAULT_CARD_IDS,
 } from "./data/demo";
 import { buildContext } from "./lib/context";
+import {
+  activeProposalsForProject,
+  buildAttentionMetrics,
+  closeProjectSession,
+  ensureProjectSession,
+  localDateKey,
+  makeInteractionEvent,
+  processPriorSessions,
+  recoverSessions,
+  SESSION_IDLE_MS,
+} from "./lib/attention";
 import { downloadArtifact, formatAdapters } from "./lib/formats";
 import { incomingEdge, subtreeIds } from "./lib/graph";
 import {
@@ -24,16 +35,22 @@ import {
   streamModel,
   type ProviderHealth,
 } from "./lib/provider";
+import { visibleModelOutput } from "./lib/modelOutput";
 import { preferredProjectCard } from "./lib/projectScope";
 import {
   clearWorkspace,
+  deleteAttentionForProject,
+  loadAttentionState,
   loadWorkspace,
+  saveAttentionState,
   saveWorkspace,
+  type AttentionSnapshot,
   type WorkspaceSnapshot,
 } from "./lib/storage";
 import { EDGE_META } from "./types";
 import type {
   AppSettings,
+  AttentionMetrics,
   BuiltContext,
   Card,
   CardEdge,
@@ -41,9 +58,12 @@ import type {
   ContextSnapshot,
   EdgeType,
   ImportInput,
+  InteractionEvent,
+  Proposal,
   Project,
   ReferenceChip,
   SourceAnchor,
+  SessionBoundary,
   Turn,
   ViewState,
 } from "./types";
@@ -54,6 +74,10 @@ const defaultSettings: AppSettings = {
   model: "claude-opus-5",
   providerBaseUrl: "https://cozai.net/v1",
   providerStatus: "unknown",
+  attentionPaused: false,
+  attentionExperimentStartedAt: Date.now(),
+  attentionPromptedDates: {},
+  attentionPromptHistory: [],
 };
 const defaultView = (): ViewState => ({
   id: "main",
@@ -65,6 +89,66 @@ const defaultView = (): ViewState => ({
   scrollPositions: {},
 });
 
+/** 删除项目或异常中断后，清理不再指向有效项目/卡片的纯视图元数据。 */
+function pruneProjectScopedState(input: {
+  projects: Project[];
+  cards: Card[];
+  view: ViewState;
+  settings: AppSettings;
+}) {
+  const projectIds = new Set(input.projects.map((project) => project.id));
+  const cardIds = new Set(input.cards.map((card) => card.id));
+  const fallbackProjectId = input.projects[0]?.id ?? input.view.activeProjectId;
+  const activeProjectId = projectIds.has(input.view.activeProjectId)
+    ? input.view.activeProjectId
+    : fallbackProjectId;
+  const fallbackCardId = input.cards.find(
+    (card) => card.projectId === activeProjectId && !card.trashed,
+  )?.id;
+  const currentCardId = cardIds.has(input.view.currentCardId)
+    ? input.view.currentCardId
+    : (fallbackCardId ?? input.view.currentCardId);
+  const belongsToLiveProject = (id: string) => projectIds.has(id);
+  const belongsToLiveCard = (id: string) => cardIds.has(id);
+  const promptDates = Object.fromEntries(
+    Object.entries(input.settings.attentionPromptedDates ?? {}).filter(([id]) =>
+      belongsToLiveProject(id),
+    ),
+  );
+  const promptHistory = (input.settings.attentionPromptHistory ?? []).filter(
+    (entry) => belongsToLiveProject(entry.slice(0, entry.lastIndexOf(":"))),
+  );
+  return {
+    view: {
+      ...input.view,
+      activeProjectId,
+      currentCardId,
+      drafts: Object.fromEntries(
+        Object.entries(input.view.drafts).filter(([id]) =>
+          belongsToLiveProject(id),
+        ),
+      ),
+      lastCardByProject: Object.fromEntries(
+        Object.entries(input.view.lastCardByProject).filter(
+          ([id, cardId]) =>
+            belongsToLiveProject(id) && belongsToLiveCard(cardId),
+        ),
+      ),
+      collapsed: input.view.collapsed.filter(belongsToLiveCard),
+      scrollPositions: Object.fromEntries(
+        Object.entries(input.view.scrollPositions).filter(([id]) =>
+          belongsToLiveCard(id),
+        ),
+      ),
+    },
+    settings: {
+      ...input.settings,
+      attentionPromptedDates: promptDates,
+      attentionPromptHistory: promptHistory,
+    },
+  };
+}
+
 export interface CreateCardInput {
   type: EdgeType;
   sourceCardId: string;
@@ -73,6 +157,11 @@ export interface CreateCardInput {
   sourceBlockText?: string;
   title: string;
   seedTurns?: Turn[];
+  /** 建卡来源不影响关系语义，只用于事件和后续实验统计。 */
+  origin?: Card["origin"];
+  proposalId?: string;
+  /** branch 的冻结历史截止点；null 表示不继承任何旧轮次。 */
+  contextThroughTurnId?: string | null;
 }
 
 interface Toast {
@@ -89,6 +178,14 @@ interface Ctx {
   edges: CardEdge[];
   anchors: SourceAnchor[];
   snapshots: ContextSnapshot[];
+  interactionEvents: InteractionEvent[];
+  sessions: SessionBoundary[];
+  proposals: Proposal[];
+  activeProposals: Proposal[];
+  attentionMetrics: AttentionMetrics;
+  attentionPaused: boolean;
+  morningPrompt: { projectId: string; count: number } | null;
+  proposalTrayOpen: boolean;
   currentCardId: string;
   references: ReferenceChip[];
   draft: string;
@@ -107,6 +204,12 @@ interface Ctx {
   deleteProject: (id: string) => void;
   setCurrentCard: (id: string) => void;
   createCard: (input: CreateCardInput) => string;
+  renameCard: (id: string, title: string) => void;
+  rerouteEditedQuestion: (
+    cardId: string,
+    turnId: string,
+    text: string,
+  ) => string;
   deleteCard: (id: string) => void;
   toggleFavoriteCard: (id: string) => void;
   toggleCollapse: (id: string) => void;
@@ -116,6 +219,12 @@ interface Ctx {
     cacheKey: string,
     entry: ConceptPreviewCacheEntry,
   ) => void;
+  recordConceptPreviewOpened: (input: {
+    cardId: string;
+    turnId?: string;
+    concept: string;
+  }) => void;
+  recordCardDwell: (cardId: string) => void;
   addReference: (anchor: SourceAnchor, sourceTitle: string) => void;
   removeReference: (id: string) => void;
   clearReferences: () => void;
@@ -131,6 +240,11 @@ interface Ctx {
   exportProject: (format: "md-dir" | "canvas" | "bundle") => Promise<void>;
   exportAllBackup: () => Promise<void>;
   clearLocalData: () => Promise<void>;
+  openProposal: (id: string) => void;
+  dismissProposal: (id: string) => void;
+  setProposalTrayOpen: (open: boolean) => void;
+  dismissMorningPrompt: () => void;
+  setAttentionPaused: (paused: boolean) => void;
   showToast: (toast: Omit<Toast, "id">) => void;
   dismissToast: () => void;
 }
@@ -143,6 +257,7 @@ export const useStore = () => {
 };
 
 function seedSnapshot(): WorkspaceSnapshot {
+  const now = Date.now();
   return {
     projects: DEMO_PROJECTS,
     cards: DEMO_CARDS,
@@ -151,7 +266,13 @@ function seedSnapshot(): WorkspaceSnapshot {
     snapshots: [],
     references: DEMO_REFERENCES,
     view: defaultView(),
-    settings: { ...defaultSettings, seededAt: Date.now() },
+    settings: {
+      ...defaultSettings,
+      seededAt: now,
+      attentionExperimentStartedAt: now,
+      attentionPromptedDates: {},
+      attentionPromptHistory: [],
+    },
   };
 }
 
@@ -179,6 +300,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
   const [view, setView] = useState<ViewState>(seed.view);
   const [settings, setSettings] = useState<AppSettings>(seed.settings);
+  const [interactionEvents, setInteractionEvents] = useState<
+    InteractionEvent[]
+  >([]);
+  const [sessions, setSessions] = useState<SessionBoundary[]>([]);
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [morningPrompt, setMorningPrompt] = useState<{
+    projectId: string;
+    count: number;
+  } | null>(null);
+  const [proposalTrayOpen, setProposalTrayOpen] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [lastCreated, setLastCreated] = useState<{
@@ -189,8 +320,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const controllerRef = useRef<AbortController | null>(null);
   const toastTimer = useRef<number | null>(null);
   const persistTimer = useRef<number | null>(null);
+  const attentionPersistTimer = useRef<number | null>(null);
   const lastPersistedAt = useRef(0);
   const latestRef = useRef<WorkspaceSnapshot>(seed);
+  const attentionRef = useRef<AttentionSnapshot>({
+    events: [],
+    sessions: [],
+    proposals: [],
+  });
+  const hiddenAtRef = useRef<number | null>(null);
 
   const activeProjectId = view.activeProjectId;
   const currentCardId = view.currentCardId;
@@ -213,21 +351,124 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           message: settings.providerMessage ?? "",
         };
 
+  const activeProposals = useMemo(
+    () => activeProposalsForProject(proposals, activeProjectId),
+    [activeProjectId, proposals],
+  );
+  const attentionMetrics = useMemo(
+    () =>
+      buildAttentionMetrics({
+        events: interactionEvents,
+        proposals,
+        cards,
+        settings,
+        now: Date.now(),
+      }),
+    [cards, interactionEvents, proposals, settings],
+  );
+
   useEffect(() => {
     let active = true;
     void (async () => {
-      const saved = await loadWorkspace();
+      const [saved, savedAttention] = await Promise.all([
+        loadWorkspace(),
+        loadAttentionState(),
+      ]);
       if (!active) return;
+      const now = Date.now();
       const next = saved ?? seed;
       if (!saved) await saveWorkspace(seed);
+      const withDefaults: AppSettings = {
+        ...next.settings,
+        attentionPaused: next.settings.attentionPaused ?? false,
+        attentionExperimentStartedAt:
+          next.settings.attentionExperimentStartedAt ??
+          next.settings.seededAt ??
+          now,
+        attentionPromptedDates: next.settings.attentionPromptedDates ?? {},
+        attentionPromptHistory: next.settings.attentionPromptHistory ?? [],
+      };
+      const pruned = pruneProjectScopedState({
+        projects: next.projects,
+        cards: next.cards,
+        view: next.view,
+        settings: withDefaults,
+      });
+      const validProjectIds = new Set(
+        next.projects.map((project) => project.id),
+      );
+      const survivingAttention: AttentionSnapshot = {
+        events: savedAttention.events.filter((event) =>
+          validProjectIds.has(event.projectId),
+        ),
+        sessions: savedAttention.sessions.filter((session) =>
+          validProjectIds.has(session.projectId),
+        ),
+        proposals: savedAttention.proposals.filter((proposal) =>
+          validProjectIds.has(proposal.projectId),
+        ),
+      };
+      const nextSettings = pruned.settings;
+      const recovered = recoverSessions(survivingAttention.sessions, now);
+      const processed = nextSettings.attentionPaused
+        ? {
+            sessions: recovered,
+            proposals: survivingAttention.proposals,
+            generated: [] as Proposal[],
+          }
+        : processPriorSessions({
+            sessions: recovered,
+            proposals: survivingAttention.proposals,
+            events: survivingAttention.events,
+            cards: next.cards,
+            anchors: next.anchors,
+            now,
+            createId: uid,
+          });
+      const todaysActive = activeProposalsForProject(
+        processed.proposals,
+        pruned.view.activeProjectId,
+      );
+      const today = localDateKey(now);
+      const shouldPrompt =
+        !nextSettings.attentionPaused &&
+        todaysActive.length > 0 &&
+        nextSettings.attentionPromptedDates?.[pruned.view.activeProjectId] !==
+          today;
+      const finalSettings = shouldPrompt
+        ? {
+            ...nextSettings,
+            attentionPromptedDates: {
+              ...nextSettings.attentionPromptedDates,
+              [pruned.view.activeProjectId]: today,
+            },
+            attentionPromptHistory: [
+              ...(nextSettings.attentionPromptHistory ?? []),
+              `${pruned.view.activeProjectId}:${today}`,
+            ],
+          }
+        : nextSettings;
       setProjects(next.projects);
       setCards(next.cards);
       setEdges(next.edges);
       setAnchors(next.anchors);
       setSnapshots(next.snapshots);
       setReferenceStore(next.references);
-      setView(next.view);
-      setSettings(next.settings);
+      setView(pruned.view);
+      setSettings(finalSettings);
+      attentionRef.current = {
+        events: survivingAttention.events,
+        sessions: processed.sessions,
+        proposals: processed.proposals,
+      };
+      setInteractionEvents(survivingAttention.events);
+      setSessions(processed.sessions);
+      setProposals(processed.proposals);
+      if (shouldPrompt)
+        setMorningPrompt({
+          projectId: pruned.view.activeProjectId,
+          count: todaysActive.length,
+        });
       setHydrated(true);
       void navigator.storage?.persist?.();
     })();
@@ -273,6 +514,29 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   useEffect(
     () => () => {
       if (persistTimer.current) window.clearTimeout(persistTimer.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const snapshot = {
+      events: interactionEvents,
+      sessions,
+      proposals,
+    };
+    attentionRef.current = snapshot;
+    if (!hydrated) return;
+    if (attentionPersistTimer.current) return;
+    attentionPersistTimer.current = window.setTimeout(() => {
+      attentionPersistTimer.current = null;
+      void saveAttentionState(attentionRef.current);
+    }, 120);
+  }, [hydrated, interactionEvents, proposals, sessions]);
+
+  useEffect(
+    () => () => {
+      if (attentionPersistTimer.current)
+        window.clearTimeout(attentionPersistTimer.current);
     },
     [],
   );
@@ -325,6 +589,179 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       ),
     [],
   );
+
+  const commitAttention = useCallback((next: AttentionSnapshot) => {
+    attentionRef.current = next;
+    setInteractionEvents(next.events);
+    setSessions(next.sessions);
+    setProposals(next.proposals);
+  }, []);
+
+  /**
+   * 行为记录是唯一开启会话的入口。暂停时完全不写事件，也不在恢复后补算。
+   */
+  const recordInteraction = useCallback(
+    (
+      input: Omit<
+        Parameters<typeof makeInteractionEvent>[0],
+        "sessionId" | "createdAt"
+      >,
+    ) => {
+      if (!hydrated || settings.attentionPaused) return undefined;
+      const now = Date.now();
+      const current = attentionRef.current;
+      const transition = ensureProjectSession(
+        current.sessions,
+        input.projectId,
+        now,
+        uid,
+      );
+      const event = makeInteractionEvent(
+        { ...input, sessionId: transition.session.id, createdAt: now },
+        uid,
+      );
+      commitAttention({
+        events: [...current.events, event],
+        sessions: transition.sessions,
+        proposals: current.proposals,
+      });
+      return event;
+    },
+    [commitAttention, hydrated, settings.attentionPaused],
+  );
+
+  const closeAttentionSession = useCallback(
+    (
+      projectId: string,
+      reason:
+        "project-switch" | "idle" | "hidden-idle" | "pagehide" | "date-change",
+    ) => {
+      const current = attentionRef.current;
+      const nextSessions = closeProjectSession(
+        current.sessions,
+        projectId,
+        Date.now(),
+        reason,
+      );
+      if (nextSessions !== current.sessions)
+        commitAttention({ ...current, sessions: nextSessions });
+    },
+    [commitAttention],
+  );
+
+  const processAttention = useCallback(
+    (now = Date.now(), projectId = activeProjectId) => {
+      if (!hydrated || settings.attentionPaused) return;
+      const current = attentionRef.current;
+      const result = processPriorSessions({
+        sessions: recoverSessions(current.sessions, now),
+        proposals: current.proposals,
+        events: current.events,
+        cards,
+        anchors,
+        now,
+        createId: uid,
+      });
+      commitAttention({
+        events: current.events,
+        sessions: result.sessions,
+        proposals: result.proposals,
+      });
+      const active = activeProposalsForProject(result.proposals, projectId);
+      const today = localDateKey(now);
+      if (
+        active.length &&
+        settings.attentionPromptedDates?.[projectId] !== today
+      ) {
+        setSettings((currentSettings) => ({
+          ...currentSettings,
+          attentionPromptedDates: {
+            ...currentSettings.attentionPromptedDates,
+            [projectId]: today,
+          },
+          attentionPromptHistory: [
+            ...(currentSettings.attentionPromptHistory ?? []),
+            `${projectId}:${today}`,
+          ],
+        }));
+        setMorningPrompt({ projectId, count: active.length });
+      }
+    },
+    [
+      activeProjectId,
+      anchors,
+      cards,
+      commitAttention,
+      hydrated,
+      settings.attentionPaused,
+      settings.attentionPromptedDates,
+    ],
+  );
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const checkpoint = () => {
+      if (settings.attentionPaused) return;
+      const current = attentionRef.current;
+      const active = current.sessions
+        .filter(
+          (session) =>
+            session.projectId === activeProjectId && !session.endedAt,
+        )
+        .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
+      if (!active) return;
+      const next = {
+        ...active,
+        lastActiveAt: Date.now(),
+      };
+      commitAttention({
+        ...current,
+        sessions: current.sessions.map((session) =>
+          session.id === next.id ? next : session,
+        ),
+      });
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        hiddenAtRef.current = Date.now();
+        checkpoint();
+        return;
+      }
+      const hiddenAt = hiddenAtRef.current;
+      hiddenAtRef.current = null;
+      if (!hiddenAt) return;
+      const now = Date.now();
+      if (
+        now - hiddenAt >= SESSION_IDLE_MS ||
+        localDateKey(hiddenAt) !== localDateKey(now)
+      )
+        closeAttentionSession(activeProjectId, "hidden-idle");
+      processAttention(now, activeProjectId);
+    };
+    const onPageHide = () => {
+      closeAttentionSession(activeProjectId, "pagehide");
+      void saveAttentionState(attentionRef.current);
+    };
+    // 即使页面一直开着也要让 30 分钟空闲、72 小时冷却和 7 天清理自然推进；
+    // 这里只跑本地状态机，绝不会触发任何模型请求。
+    const maintenanceTimer = window.setInterval(() => {
+      processAttention(Date.now(), activeProjectId);
+    }, 60_000);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.clearInterval(maintenanceTimer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+  }, [
+    activeProjectId,
+    closeAttentionSession,
+    commitAttention,
+    hydrated,
+    processAttention,
+    settings.attentionPaused,
+  ]);
 
   const stopStream = useCallback(() => {
     controllerRef.current?.abort();
@@ -435,6 +872,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setStreamingTurnId(aiId);
       const controller = new AbortController();
       controllerRef.current = controller;
+      let rawAnswer = "";
       let answer = "";
       try {
         const built = buildContext({
@@ -450,7 +888,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           signal: controller.signal,
         })) {
           if (event.type !== "token") continue;
-          answer += event.text;
+          rawAnswer += event.text;
+          const nextAnswer = visibleModelOutput(rawAnswer);
+          if (nextAnswer === answer) continue;
+          answer = nextAnswer;
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
@@ -459,6 +900,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }));
         }
         if (!controller.signal.aborted) {
+          if (!answer.trim())
+            throw new Error("模型没有返回可显示的最终文本，请重试。");
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
@@ -509,6 +952,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     (id: string) => {
       const card = cards.find((candidate) => candidate.id === id);
       if (!card || card.trashed || card.projectId !== activeProjectId) return;
+      const alreadySeenInAnotherSession = interactionEvents.some(
+        (event) =>
+          event.projectId === activeProjectId &&
+          (event.targetCardId === id || event.sourceCardId === id) &&
+          event.sessionId !==
+            attentionRef.current.sessions
+              .filter(
+                (session) =>
+                  session.projectId === activeProjectId && !session.endedAt,
+              )
+              .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0]?.id,
+      );
+      const reopenedInCurrentSession = interactionEvents.some((event) => {
+        const currentSessionId = attentionRef.current.sessions
+          .filter(
+            (session) =>
+              session.projectId === activeProjectId && !session.endedAt,
+          )
+          .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0]?.id;
+        return (
+          event.type === "card-reopened" &&
+          event.targetCardId === id &&
+          event.sessionId === currentSessionId
+        );
+      });
       setView((current) => ({
         ...current,
         currentCardId: id,
@@ -518,8 +986,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         },
       }));
       updateCard(id, (current) => ({ ...current, unread: false }));
+      if (alreadySeenInAnotherSession && !reopenedInCurrentSession)
+        recordInteraction({
+          projectId: activeProjectId,
+          type: "card-reopened",
+          targetCardId: id,
+        });
     },
-    [activeProjectId, cards, updateCard],
+    [activeProjectId, cards, interactionEvents, recordInteraction, updateCard],
   );
 
   const createCard = useCallback(
@@ -530,13 +1004,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const cardId = uid("card");
       const edgeId = uid("edge");
       const anchorId = input.sourceText ? uid("anchor") : undefined;
+      const branchCutoff =
+        input.contextThroughTurnId !== undefined
+          ? input.contextThroughTurnId
+          : input.sourceTurnId;
       const sourceTurns =
-        input.type === "branch" && input.sourceTurnId
-          ? source.turns.slice(
-              0,
-              source.turns.findIndex((turn) => turn.id === input.sourceTurnId) +
-                1,
-            )
+        input.type === "branch"
+          ? branchCutoff
+            ? source.turns.slice(
+                0,
+                Math.max(
+                  0,
+                  source.turns.findIndex((turn) => turn.id === branchCutoff) +
+                    1,
+                ),
+              )
+            : []
           : undefined;
       const snapshotId = uid("snapshot");
       const snapshot: ContextSnapshot = {
@@ -588,6 +1071,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         createdAt: Date.now(),
         concepts: [],
         turns: input.seedTurns ?? [],
+        origin: input.origin ?? "manual",
+        proposalId: input.proposalId,
       };
       const edge: CardEdge = {
         id: edgeId,
@@ -599,6 +1084,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         sourceBlockText: input.sourceBlockText,
         sourceAnchorId: anchorId,
         contextSnapshotId: snapshotId,
+        contextCutoffTurnId: input.contextThroughTurnId,
         contextPolicy: EDGE_META[input.type].policy,
       };
       const nextCards = [...cards, newCard];
@@ -615,6 +1101,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         },
       }));
       setLastCreated({ cardId, type: input.type });
+      recordInteraction({
+        projectId: activeProjectId,
+        type: "card-created",
+        targetCardId: cardId,
+        sourceCardId: source.id,
+        sourceAnchorId: anchorId,
+        relation: input.type,
+      });
+      if (input.origin === "concept-promotion")
+        recordInteraction({
+          projectId: activeProjectId,
+          type: "concept-promoted",
+          targetCardId: cardId,
+          sourceCardId: source.id,
+          sourceAnchorId: anchorId,
+        });
+      if (input.origin === "question-reroute")
+        recordInteraction({
+          projectId: activeProjectId,
+          type: "question-rerouted",
+          targetCardId: cardId,
+          sourceCardId: source.id,
+          targetTurnId: input.sourceTurnId,
+          relation: "branch",
+        });
       const prompt =
         newCard.turns.length === 1 && newCard.turns[0].role === "user"
           ? newCard.turns[0].content
@@ -632,7 +1143,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }, 0);
       return cardId;
     },
-    [activeProjectId, cards, edges, snapshots, streamAnswer],
+    [activeProjectId, cards, edges, recordInteraction, snapshots, streamAnswer],
   );
 
   const send = useCallback(
@@ -664,6 +1175,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         ...current,
         drafts: { ...current.drafts, [activeProjectId]: "" },
       }));
+      // 引用只有真正随一次提问送出时才是强信号；单纯加到输入器不计入。
+      activeReferences.forEach((reference) =>
+        recordInteraction({
+          projectId: activeProjectId,
+          type: "reference-sent",
+          targetCardId: card.id,
+          sourceCardId: reference.anchor.cardId,
+          targetTurnId: reference.anchor.turnId,
+          sourceAnchorId: reference.anchor.id,
+        }),
+      );
       void streamAnswer({
         cardId: card.id,
         cardsSnapshot: nextCards,
@@ -675,6 +1197,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       cards,
       currentCardId,
       references,
+      recordInteraction,
       streamAnswer,
       streamingTurnId,
     ],
@@ -695,6 +1218,110 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     streamAnswer,
     streamingTurnId,
   ]);
+
+  const openProposal = useCallback(
+    (id: string) => {
+      const current = attentionRef.current;
+      const proposal = current.proposals.find(
+        (candidate) =>
+          candidate.id === id &&
+          candidate.projectId === activeProjectId &&
+          ["queued", "opened"].includes(candidate.status),
+      );
+      if (!proposal) return;
+      const parent = cards.find(
+        (card) =>
+          card.id === proposal.suggestedParentCardId &&
+          card.projectId === activeProjectId &&
+          !card.trashed,
+      );
+      if (!parent) {
+        showToast({ text: "这条提案的来源卡片已不存在。" });
+        return;
+      }
+      const anchor = proposal.sourceAnchorIds
+        .map((anchorId) => anchors.find((item) => item.id === anchorId))
+        .find(Boolean);
+      const sourceTurnId =
+        anchor?.turnId ?? parent.turns[parent.turns.length - 1]?.id;
+      const cardId = createCard({
+        type: proposal.suggestedRelation,
+        sourceCardId: parent.id,
+        sourceTurnId,
+        // 由提案物化时也冻结来源；branch 默认继承到当前来源轮次。
+        contextThroughTurnId:
+          proposal.suggestedRelation === "branch"
+            ? (sourceTurnId ?? null)
+            : undefined,
+        sourceText: anchor?.exact ?? anchor?.text,
+        sourceBlockText: anchor?.blockText,
+        title: proposal.title,
+        origin: "proposal",
+        proposalId: proposal.id,
+        seedTurns: [
+          {
+            id: uid("turn"),
+            role: "user",
+            content: proposal.explorationQuestion,
+            createdAt: Date.now(),
+            status: "complete",
+          },
+        ],
+      });
+      const afterCreate = attentionRef.current;
+      commitAttention({
+        ...afterCreate,
+        proposals: afterCreate.proposals.map((candidate) =>
+          candidate.id === proposal.id
+            ? {
+                ...candidate,
+                status: "accepted",
+                acceptedCardId: cardId,
+              }
+            : candidate,
+        ),
+      });
+      setMorningPrompt(null);
+      setProposalTrayOpen(false);
+      showToast({ text: "已把幽灵分支变成正式卡片，正在生成回答。" });
+    },
+    [activeProjectId, anchors, cards, commitAttention, createCard, showToast],
+  );
+
+  const dismissProposal = useCallback(
+    (id: string) => {
+      const current = attentionRef.current;
+      const proposal = current.proposals.find(
+        (candidate) =>
+          candidate.id === id && candidate.projectId === activeProjectId,
+      );
+      if (!proposal) return;
+      commitAttention({
+        ...current,
+        proposals: current.proposals.map((candidate) =>
+          candidate.id === id
+            ? {
+                ...candidate,
+                status: "dismissed",
+                dismissedAt: Date.now(),
+              }
+            : candidate,
+        ),
+      });
+      showToast({ text: "已忽略这条方向；不会自动创建卡片。" });
+    },
+    [activeProjectId, commitAttention, showToast],
+  );
+
+  const dismissMorningPrompt = useCallback(() => setMorningPrompt(null), []);
+  const setAttentionPaused = useCallback(
+    (paused: boolean) => {
+      if (paused) closeAttentionSession(activeProjectId, "pagehide");
+      setSettings((current) => ({ ...current, attentionPaused: paused }));
+      if (paused) setMorningPrompt(null);
+    },
+    [activeProjectId, closeAttentionSession],
+  );
 
   const deleteCard = useCallback(
     (id: string) => {
@@ -745,6 +1372,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       )
         return;
       stopStream();
+      closeAttentionSession(activeProjectId, "project-switch");
       const nextCard = preferredProjectCard(
         cards,
         id,
@@ -757,8 +1385,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         currentCardId: nextCard.id,
         lastCardByProject: { ...current.lastCardByProject, [id]: nextCard.id },
       }));
+      processAttention(Date.now(), id);
     },
-    [activeProjectId, cards, projects, stopStream, view.lastCardByProject],
+    [
+      activeProjectId,
+      cards,
+      closeAttentionSession,
+      processAttention,
+      projects,
+      stopStream,
+      view.lastCardByProject,
+    ],
   );
 
   const contextForCurrent = useCallback(
@@ -786,9 +1423,76 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [view.scrollPositions],
   );
   const toggleFavoriteCard = useCallback(
-    (id: string) =>
-      updateCard(id, (card) => ({ ...card, favorite: !card.favorite })),
-    [updateCard],
+    (id: string) => {
+      const card = cards.find(
+        (candidate) =>
+          candidate.id === id && candidate.projectId === activeProjectId,
+      );
+      if (!card) return;
+      const active = !card.favorite;
+      updateCard(id, (current) => ({ ...current, favorite: active }));
+      recordInteraction({
+        projectId: activeProjectId,
+        type: "favorite-set",
+        targetCardId: id,
+        sourceCardId: id,
+        active,
+      });
+    },
+    [activeProjectId, cards, recordInteraction, updateCard],
+  );
+  const renameCard = useCallback(
+    (id: string, title: string) => {
+      const clean = title.replace(/\s+/g, " ").trim().slice(0, 80);
+      const card = cards.find(
+        (candidate) =>
+          candidate.id === id && candidate.projectId === activeProjectId,
+      );
+      if (!card || !clean || clean === card.title) return;
+      updateCard(id, (current) => ({ ...current, title: clean }));
+      // ContextSnapshot already holds sourceTitle; renaming must never rewrite it.
+      recordInteraction({
+        projectId: activeProjectId,
+        type: "title-edited",
+        targetCardId: id,
+        sourceCardId: id,
+      });
+    },
+    [activeProjectId, cards, recordInteraction, updateCard],
+  );
+  const rerouteEditedQuestion = useCallback(
+    (cardId: string, turnId: string, text: string) => {
+      const card = cards.find(
+        (candidate) =>
+          candidate.id === cardId && candidate.projectId === activeProjectId,
+      );
+      const clean = text.trim();
+      const turnIndex =
+        card?.turns.findIndex((turn) => turn.id === turnId) ?? -1;
+      const sourceTurn = turnIndex >= 0 ? card?.turns[turnIndex] : undefined;
+      if (!card || !sourceTurn || sourceTurn.role !== "user" || !clean)
+        throw new Error("只能从已有用户问题创建改道分支。");
+      const priorTurnId =
+        turnIndex > 0 ? (card.turns[turnIndex - 1]?.id ?? null) : null;
+      return createCard({
+        type: "branch",
+        sourceCardId: card.id,
+        sourceTurnId: sourceTurn.id,
+        contextThroughTurnId: priorTurnId,
+        title: `${card.title} · 改写路径`,
+        origin: "question-reroute",
+        seedTurns: [
+          {
+            id: uid("turn"),
+            role: "user",
+            content: clean,
+            createdAt: Date.now(),
+            status: "complete",
+          },
+        ],
+      });
+    },
+    [activeProjectId, cards, createCard],
   );
   const markRead = useCallback(
     (id: string) => updateCard(id, (card) => ({ ...card, unread: false })),
@@ -802,6 +1506,48 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }));
     },
     [updateCard],
+  );
+  const recordConceptPreviewOpened = useCallback(
+    ({
+      cardId,
+      turnId,
+      concept,
+    }: {
+      cardId: string;
+      turnId?: string;
+      concept: string;
+    }) => {
+      const card = cards.find(
+        (candidate) =>
+          candidate.id === cardId && candidate.projectId === activeProjectId,
+      );
+      if (!card) return;
+      recordInteraction({
+        projectId: activeProjectId,
+        type: "concept-preview-opened",
+        targetCardId: cardId,
+        sourceCardId: cardId,
+        targetTurnId: turnId,
+        concept,
+      });
+    },
+    [activeProjectId, cards, recordInteraction],
+  );
+  const recordCardDwell = useCallback(
+    (cardId: string) => {
+      const card = cards.find(
+        (candidate) =>
+          candidate.id === cardId && candidate.projectId === activeProjectId,
+      );
+      if (!card || document.visibilityState !== "visible") return;
+      recordInteraction({
+        projectId: activeProjectId,
+        type: "card-dwell",
+        targetCardId: cardId,
+        sourceCardId: cardId,
+      });
+    },
+    [activeProjectId, cards, recordInteraction],
   );
   const toggleCollapse = useCallback(
     (id: string) =>
@@ -921,6 +1667,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const project = projects.find((candidate) => candidate.id === id);
       if (!project) return;
       const snapshot = latestRef.current;
+      const attentionSnapshot = attentionRef.current;
       const removedCardIds = new Set(
         cards.filter((card) => card.projectId === id).map((card) => card.id),
       );
@@ -949,15 +1696,46 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setReferenceStore((current) =>
         current.filter((reference) => reference.projectId !== id),
       );
-      if (activeProjectId === id && next) {
-        const nextCard = preferredProjectCard(cards, next.id);
-        if (nextCard)
-          setView((current) => ({
-            ...current,
-            activeProjectId: next.id,
-            currentCardId: nextCard.id,
-          }));
-      }
+      commitAttention({
+        events: attentionSnapshot.events.filter(
+          (event) => event.projectId !== id,
+        ),
+        sessions: attentionSnapshot.sessions.filter(
+          (session) => session.projectId !== id,
+        ),
+        proposals: attentionSnapshot.proposals.filter(
+          (proposal) => proposal.projectId !== id,
+        ),
+      });
+      void deleteAttentionForProject(id);
+      const nextCards = cards.filter((card) => card.projectId !== id);
+      const nextCard = next
+        ? preferredProjectCard(nextCards, next.id)
+        : undefined;
+      setView((current) => {
+        const cleaned = pruneProjectScopedState({
+          projects: remaining,
+          cards: nextCards,
+          view: current,
+          settings: defaultSettings,
+        }).view;
+        return activeProjectId === id && nextCard
+          ? {
+              ...cleaned,
+              activeProjectId: next.id,
+              currentCardId: nextCard.id,
+            }
+          : cleaned;
+      });
+      setSettings(
+        (current) =>
+          pruneProjectScopedState({
+            projects: remaining,
+            cards: nextCards,
+            view: defaultView(),
+            settings: current,
+          }).settings,
+      );
       showToast({
         text: `项目已移入回收站 · ${project.name}`,
         actionLabel: "撤销",
@@ -970,11 +1748,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           setReferenceStore(snapshot.references);
           setView(snapshot.view);
           setSettings(snapshot.settings);
+          commitAttention(attentionSnapshot);
+          void saveAttentionState(attentionSnapshot);
           dismissToast();
         },
       });
     },
-    [activeProjectId, cards, dismissToast, edges, projects, showToast],
+    [
+      activeProjectId,
+      cards,
+      commitAttention,
+      dismissToast,
+      edges,
+      projects,
+      showToast,
+    ],
   );
 
   const portable = useCallback(
@@ -1145,6 +1933,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setReferenceStore(next.references);
     setView(next.view);
     setSettings(next.settings);
+    attentionRef.current = { events: [], sessions: [], proposals: [] };
+    setInteractionEvents([]);
+    setSessions([]);
+    setProposals([]);
+    setMorningPrompt(null);
+    setProposalTrayOpen(false);
     showToast({ text: "已清除本地数据，并恢复示例项目。" });
   }, [showToast]);
 
@@ -1156,6 +1950,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       edges,
       anchors,
       snapshots,
+      interactionEvents,
+      sessions,
+      proposals,
+      activeProposals,
+      attentionMetrics,
+      attentionPaused: Boolean(settings.attentionPaused),
+      morningPrompt,
+      proposalTrayOpen,
       currentCardId,
       references,
       draft,
@@ -1173,11 +1975,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       deleteProject,
       setCurrentCard,
       createCard,
+      renameCard,
+      rerouteEditedQuestion,
       deleteCard,
       toggleFavoriteCard,
       toggleCollapse,
       markRead,
       cacheConceptPreview,
+      recordConceptPreviewOpened,
+      recordCardDwell,
       addReference,
       removeReference,
       clearReferences,
@@ -1193,6 +1999,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       exportProject,
       exportAllBackup,
       clearLocalData,
+      openProposal,
+      dismissProposal,
+      setProposalTrayOpen,
+      dismissMorningPrompt,
+      setAttentionPaused,
       showToast,
       dismissToast,
     }),
@@ -1203,6 +2014,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       edges,
       anchors,
       snapshots,
+      interactionEvents,
+      sessions,
+      proposals,
+      activeProposals,
+      attentionMetrics,
+      settings.attentionPaused,
+      morningPrompt,
+      proposalTrayOpen,
       currentCardId,
       references,
       draft,
@@ -1220,11 +2039,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       deleteProject,
       setCurrentCard,
       createCard,
+      renameCard,
+      rerouteEditedQuestion,
       deleteCard,
       toggleFavoriteCard,
       toggleCollapse,
       markRead,
       cacheConceptPreview,
+      recordConceptPreviewOpened,
+      recordCardDwell,
       addReference,
       removeReference,
       clearReferences,
@@ -1240,6 +2063,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       exportProject,
       exportAllBackup,
       clearLocalData,
+      openProposal,
+      dismissProposal,
+      setProposalTrayOpen,
+      dismissMorningPrompt,
+      setAttentionPaused,
       showToast,
       dismissToast,
     ],

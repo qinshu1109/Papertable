@@ -23,7 +23,12 @@ const projectInstruction =
 const toMessages = (card: Card, pendingUserText?: string): LlmMessage[] => {
   const messages: LlmMessage[] = card.turns
     .filter((turn) => turn.status !== "error" && turn.status !== "stopped")
-    .map((turn) => ({ role: turn.role, content: turn.content }));
+    // Card 的内部角色叫 `ai`，但 OpenAI-compatible API 只接受 `assistant`。
+    // 首轮没有 AI 历史时这个问题不会出现，因此必须在这里做唯一的边界转换。
+    .map((turn) => ({
+      role: turn.role === "ai" ? "assistant" : "user",
+      content: turn.content,
+    }));
   if (pendingUserText)
     messages.push({ role: "user", content: pendingUserText });
   return messages;

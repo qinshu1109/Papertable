@@ -1,7 +1,14 @@
 import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clearWorkspace, db, loadWorkspace, saveWorkspace } from "./storage";
+import {
+  clearWorkspace,
+  db,
+  loadAttentionState,
+  loadWorkspace,
+  saveAttentionState,
+  saveWorkspace,
+} from "./storage";
 import type { WorkspaceSnapshot } from "./storage";
 
 const snapshot = (): WorkspaceSnapshot => ({
@@ -52,4 +59,63 @@ test("IndexedDB restores cards, drafts and scroll positions", async () => {
   assert.equal(restored?.view.scrollPositions.c, 120);
   await clearWorkspace();
   assert.equal(await loadWorkspace(), null);
+});
+
+test("v3 attention tables survive ordinary workspace snapshots and clear with local data", async () => {
+  await db.delete();
+  await db.open();
+  await saveWorkspace(snapshot());
+  await saveAttentionState({
+    events: [
+      {
+        id: "event-1",
+        projectId: "p",
+        sessionId: "session-1",
+        type: "title-edited",
+        createdAt: 10,
+        targetCardId: "c",
+      },
+    ],
+    sessions: [
+      {
+        id: "session-1",
+        projectId: "p",
+        localDate: "2026-07-26",
+        startedAt: 1,
+        lastActiveAt: 10,
+      },
+    ],
+    proposals: [
+      {
+        id: "proposal-1",
+        projectId: "p",
+        sessionId: "session-1",
+        title: "方向",
+        explorationQuestion: "接下来先验证什么？",
+        reason: "测试",
+        sourceAnchorIds: [],
+        suggestedParentCardId: "c",
+        suggestedRelation: "child",
+        evidence: "human-signals",
+        status: "queued",
+        candidateKey: "card:c",
+        signalScore: 6,
+        signalEventIds: ["event-1"],
+        createdAt: 10,
+        lastSignalAt: 10,
+        expiresAt: 20,
+        purgeAt: 30,
+      },
+    ],
+  });
+  // This exercises the old whole-workspace auto-save path after v3 migration.
+  await saveWorkspace(snapshot());
+  const attention = await loadAttentionState();
+  assert.equal(attention.events.length, 1);
+  assert.equal(attention.sessions.length, 1);
+  assert.equal(attention.proposals.length, 1);
+  assert.equal(db.verno, 3);
+  await clearWorkspace();
+  const cleared = await loadAttentionState();
+  assert.deepEqual(cleared, { events: [], sessions: [], proposals: [] });
 });

@@ -4,8 +4,11 @@ import type {
   Card,
   CardEdge,
   ContextSnapshot,
+  InteractionEvent,
+  Proposal,
   Project,
   ReferenceChip,
+  SessionBoundary,
   SourceAnchor,
   Turn,
   ViewState,
@@ -24,6 +27,13 @@ export interface WorkspaceSnapshot {
   settings: AppSettings;
 }
 
+/** 注意力实验独立存储，避免普通工作区快照擦掉 append-only 行为事件。 */
+export interface AttentionSnapshot {
+  events: InteractionEvent[];
+  sessions: SessionBoundary[];
+  proposals: Proposal[];
+}
+
 class PapertableDb extends Dexie {
   projects!: Table<Project, string>;
   cards!: Table<CardRecord, string>;
@@ -34,6 +44,9 @@ class PapertableDb extends Dexie {
   references!: Table<ReferenceChip, string>;
   view!: Table<ViewState, string>;
   settings!: Table<AppSettings, string>;
+  interactionEvents!: Table<InteractionEvent, string>;
+  sessionBoundaries!: Table<SessionBoundary, string>;
+  proposals!: Table<Proposal, string>;
 
   constructor() {
     super("papertable-web-v1");
@@ -53,6 +66,19 @@ class PapertableDb extends Dexie {
     // Existing v1 cards already remain valid because the cache field is optional.
     this.version(2)
       .stores(schema)
+      .upgrade(() => undefined);
+    // v3 introduces the append-only attention experiment tables. Existing
+    // workspace tables stay untouched, so v2 users retain every card/turn.
+    this.version(3)
+      .stores({
+        ...schema,
+        interactionEvents:
+          "id, projectId, sessionId, createdAt, type, targetCardId, sourceCardId",
+        sessionBoundaries:
+          "id, projectId, localDate, startedAt, lastActiveAt, endedAt, processedAt",
+        proposals:
+          "id, projectId, sessionId, status, createdAt, expiresAt, purgeAt, candidateKey",
+      })
       .upgrade(() => undefined);
   }
 }
@@ -107,40 +133,106 @@ export async function loadWorkspace(): Promise<WorkspaceSnapshot | null> {
 }
 
 export async function saveWorkspace(snapshot: WorkspaceSnapshot) {
-  await db.transaction("rw", db.tables, async () => {
-    await Promise.all([
-      db.projects.clear(),
-      db.cards.clear(),
-      db.turns.clear(),
-      db.edges.clear(),
-      db.anchors.clear(),
-      db.snapshots.clear(),
-      db.references.clear(),
-      db.view.clear(),
-    ]);
-    await db.projects.bulkPut(snapshot.projects);
-    await db.cards.bulkPut(
-      snapshot.cards.map(({ turns, ...card }) => {
-        void turns;
-        return card;
-      }),
-    );
-    await db.turns.bulkPut(
-      snapshot.cards.flatMap((card) =>
-        card.turns.map((turn) => ({ ...turn, cardId: card.id })),
-      ),
-    );
-    await db.edges.bulkPut(snapshot.edges);
-    await db.anchors.bulkPut(
-      snapshot.anchors.filter(
-        (anchor): anchor is SourceAnchor & { id: string } => Boolean(anchor.id),
-      ),
-    );
-    await db.snapshots.bulkPut(snapshot.snapshots);
-    await db.references.bulkPut(snapshot.references);
-    await db.view.put(snapshot.view);
-    await db.settings.put(snapshot.settings);
-  });
+  // Deliberately list the legacy business tables. `interactionEvents` is
+  // append-only and must never be cleared by ordinary auto-save snapshots.
+  await db.transaction(
+    "rw",
+    [
+      db.projects,
+      db.cards,
+      db.turns,
+      db.edges,
+      db.anchors,
+      db.snapshots,
+      db.references,
+      db.view,
+      db.settings,
+    ],
+    async () => {
+      await Promise.all([
+        db.projects.clear(),
+        db.cards.clear(),
+        db.turns.clear(),
+        db.edges.clear(),
+        db.anchors.clear(),
+        db.snapshots.clear(),
+        db.references.clear(),
+        db.view.clear(),
+      ]);
+      await db.projects.bulkPut(snapshot.projects);
+      await db.cards.bulkPut(
+        snapshot.cards.map(({ turns, ...card }) => {
+          void turns;
+          return card;
+        }),
+      );
+      await db.turns.bulkPut(
+        snapshot.cards.flatMap((card) =>
+          card.turns.map((turn) => ({ ...turn, cardId: card.id })),
+        ),
+      );
+      await db.edges.bulkPut(snapshot.edges);
+      await db.anchors.bulkPut(
+        snapshot.anchors.filter(
+          (anchor): anchor is SourceAnchor & { id: string } =>
+            Boolean(anchor.id),
+        ),
+      );
+      await db.snapshots.bulkPut(snapshot.snapshots);
+      await db.references.bulkPut(snapshot.references);
+      await db.view.put(snapshot.view);
+      await db.settings.put(snapshot.settings);
+    },
+  );
+}
+
+export async function loadAttentionState(): Promise<AttentionSnapshot> {
+  const [events, sessions, proposals] = await Promise.all([
+    db.interactionEvents.orderBy("createdAt").toArray(),
+    db.sessionBoundaries.orderBy("startedAt").toArray(),
+    db.proposals.orderBy("createdAt").toArray(),
+  ]);
+  return { events, sessions, proposals };
+}
+
+/**
+ * Events are never cleared by normal saves. Session and proposal tables are
+ * compact state machines, so their current state can be atomically replaced.
+ */
+export async function saveAttentionState(snapshot: AttentionSnapshot) {
+  await db.transaction(
+    "rw",
+    db.interactionEvents,
+    db.sessionBoundaries,
+    db.proposals,
+    async () => {
+      await db.interactionEvents.bulkPut(snapshot.events);
+      await db.sessionBoundaries.clear();
+      await db.proposals.clear();
+      await db.sessionBoundaries.bulkPut(snapshot.sessions);
+      await db.proposals.bulkPut(snapshot.proposals);
+    },
+  );
+}
+
+/** 项目被删除时，实验原始事件也必须随项目一起移除。 */
+export async function deleteAttentionForProject(projectId: string) {
+  await db.transaction(
+    "rw",
+    [db.interactionEvents, db.sessionBoundaries, db.proposals],
+    async () => {
+      const [eventIds, sessionIds, proposalIds] = await Promise.all([
+        db.interactionEvents.where("projectId").equals(projectId).primaryKeys(),
+        db.sessionBoundaries.where("projectId").equals(projectId).primaryKeys(),
+        db.proposals.where("projectId").equals(projectId).primaryKeys(),
+      ]);
+      await Promise.all([
+        db.interactionEvents.bulkDelete(eventIds as string[]),
+        db.sessionBoundaries.bulkDelete(sessionIds as string[]),
+        db.proposals.bulkDelete(proposalIds as string[]),
+      ]);
+    },
+  );
 }
 
 export async function clearWorkspace() {

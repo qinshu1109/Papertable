@@ -39,8 +39,26 @@ buildContext({ cards, edges, snapshots, references, currentCardId });
 - `projects`、`cards`、`turns`、`edges`
 - `anchors`、`snapshots`、`references`
 - `view`、`settings`
+- `interactionEvents`（append-only 行为事件）、`sessionBoundaries`、`proposals`
 
 卡片与轮次分表；写入在同一个 IndexedDB transaction 中替换一致快照。正常变化很快保存，流式生成按最多 500 ms 批量保存；停止后的部分内容保留。未来迁移到 Tauri/SQLite 时，组件和 `buildContext()` 无需修改，只替换 storage adapter。
+
+普通 `saveWorkspace()` 明确只替换业务表，绝不会清掉 append-only 的行为事件。项目删除与“清除本地数据”才会同时删除实验表。
+
+## 注意力提案侧车（第一阶段）
+
+```text
+用户有效行为
+  → InteractionEvent（本机 append-only）
+  → 项目内 SessionBoundary
+  → 次日首次打开时的确定性聚合
+  → Proposal（幽灵分支，不是 Card）
+  → 用户点击后才创建 Card + CardEdge + ContextSnapshot
+```
+
+`src/lib/attention.ts` 是纯函数：它只处理本地时间、事件、卡片和锚点，不调用模型，也不依赖 React、Dexie 或网络。行为候选需要一条强信号或两条中信号；每项目最多五条未处理提案，每次最多展示三条、其中最多一条复用既有概念结果的 `ai-wildcard`。72 小时未处理进入 `cooled`，七天后低信号项移除；一条高信号冷却记录最多保留在本机短期审计中。
+
+Proposal 不进入 `buildContext()`、正式卡片搜索或任何标准 Markdown / JSON Canvas / 项目包导出。`src/lib/memory.ts` 仅提供 `MemoryProvider` / `NoopProvider` 边界；本阶段没有接 MemOS、蒸馏或额外后台模型调用。
 
 ## 模型适配
 
@@ -63,4 +81,4 @@ buildContext({ cards, edges, snapshots, references, currentCardId });
 
 ## 明确不在当前版本
 
-账号、云同步、计费、协作、远程部署、PDF/DOCX/PPTX 解析、RAG、MCP、多分支合并、笔记目录监听和双向同步。它们不能破坏上面的关系、快照、格式和本地优先边界。
+账号、云同步、计费、协作、远程部署、PDF/DOCX/PPTX 解析、RAG、MCP、多分支合并、笔记目录监听和双向同步；也不接 MemOS、临时胶囊、蒸馏或自动写笔记。它们不能破坏上面的关系、快照、格式和本地优先边界。

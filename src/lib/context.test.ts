@@ -121,3 +121,74 @@ test("branch context freezes history through its selected turn and preserves exp
       built.messages[0].content.indexOf("后引用"),
   );
 });
+
+test("editing an old user question reroutes before that question instead of leaking it into the new branch", () => {
+  const original = [
+    ...turns,
+    {
+      id: "u2",
+      role: "user" as const,
+      content: "旧问题，不要带入",
+      createdAt: 3,
+    },
+    {
+      id: "a2",
+      role: "ai" as const,
+      content: "旧回答，不要带入",
+      createdAt: 4,
+    },
+  ];
+  const cards = [
+    card("root", "根", original),
+    card("reroute", "改写路径", [
+      { id: "new-u", role: "user", content: "改写后的问题", createdAt: 5 },
+    ]),
+  ];
+  const edge: CardEdge = {
+    id: "e-reroute",
+    type: "branch",
+    sourceCardId: "root",
+    targetCardId: "reroute",
+    // UI 仍指向被编辑的旧问题，但快照明确截止在它之前。
+    sourceTurnId: "u2",
+    contextCutoffTurnId: "a1",
+    contextPolicy: "history-through-turn",
+    contextSnapshotId: "s-reroute",
+  };
+  const built = buildContext({
+    cards,
+    edges: [edge],
+    snapshots: [
+      {
+        id: "s-reroute",
+        edgeId: "e-reroute",
+        createdAt: 5,
+        sourceTitle: "根",
+        sourceTurns: turns,
+      },
+    ],
+    references: [],
+    currentCardId: "reroute",
+  });
+  assert.match(built.messages[0].content, /父回答/);
+  assert.doesNotMatch(built.messages[0].content, /旧问题，不要带入/);
+  assert.doesNotMatch(built.messages[0].content, /旧回答，不要带入/);
+  assert.equal(
+    built.messages[built.messages.length - 1]?.content,
+    "改写后的问题",
+  );
+});
+
+test("assistant turns use the OpenAI-compatible assistant role on the wire", () => {
+  const built = buildContext({
+    cards: [card("root", "根", turns)],
+    edges: [],
+    snapshots: [],
+    references: [],
+    currentCardId: "root",
+  });
+  assert.deepEqual(
+    built.messages.slice(1).map((message) => message.role),
+    ["user", "assistant"],
+  );
+});

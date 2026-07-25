@@ -45,6 +45,8 @@ pnpm start # 构建后在 http://127.0.0.1:8787 提供网页与本机 API
 - 导入：单个 Markdown、Markdown 文件夹、JSON Canvas + Markdown、无损项目包。
 - 导出：Markdown 文件夹 ZIP、JSON Canvas + Markdown ZIP、无损项目包 ZIP；无损包可恢复关系、上下文快照、锚点、引用和视图状态。
 - 卡片 / 关系树联动、三种关系、删除撤销、独立滚动位置、项目隔离、移动端抽屉和迷你关系导航全部保留。
+- **注意力提案系统（第一阶段）**：本机记录收藏、实际发送的引用、建分支、概念升级、标题/问题编辑、跨会话重访、概念预览与 120 秒有效停留；次日只用确定性规则生成 0–3 条“幽灵分支”，不额外调用模型。幽灵分支是虚线节点，只有点击“开始探索”才物化为正式卡片并生成回答。
+- 提案 72 小时后进入冷却、7 天后清理低信号项；设置页可暂停实验并查看每日信号、提示次数、展开率与二次强信号。第一阶段提供 `NoopProvider` 接口占位，**没有连接 MemOS**。
 
 ## 安全与本地数据
 
@@ -61,6 +63,8 @@ server/
   cozai.mjs             # OpenAI SSE → Papertable token/done/error 适配
 src/
   lib/context.ts        # 与 React、Dexie、模型 SDK 无关的 buildContext()
+  lib/attention.ts      # 会话边界、行为聚合、幽灵分支评分与生命周期（纯本地）
+  lib/memory.ts         # MemoryProvider / NoopProvider 占位，不连接 MemOS
   lib/provider.ts       # 浏览器到本机 API 的客户端
   lib/storage.ts        # Dexie/IndexedDB、版本化 schema 与保存恢复
   lib/formats.ts        # Markdown / JSON Canvas / 无损包格式适配器
@@ -84,6 +88,6 @@ Markdown 和 JSON Canvas 是开放互操作格式；普通 Markdown 双链会被
 
 ## 测试覆盖
 
-`pnpm test` 覆盖：三种上下文的精确内容、引用排序与去重、项目隔离、关系图、IndexedDB 保存恢复、无损包往返，以及上游 SSE 到统一事件的转换和错误映射。`pnpm test:e2e` 显式启动本机假模型，跑桌面流式卡片、停止后恢复和 390px 无横向溢出流程；真实 CozAI 请求不在默认测试中执行，避免消耗额度。
+`pnpm test` 覆盖：三种上下文的精确内容、引用排序与去重、问题编辑改道、项目隔离、关系图、IndexedDB v3 保存恢复、行为信号聚合、提案上限与冷却、无损包往返，以及上游 SSE 到统一事件的转换和错误映射。`pnpm test:e2e` 显式启动本机假模型，跑桌面流式卡片、停止后恢复、390px 无横向溢出，以及“跨日信号 → 幽灵分支 → 按需物化”流程；真实 CozAI 请求不在默认测试中执行，避免消耗额度。
 
 视觉规范见 [DESIGN_NOTES.md](DESIGN_NOTES.md)，架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，安全说明见 [SECURITY.md](SECURITY.md)。

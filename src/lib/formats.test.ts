@@ -87,3 +87,21 @@ test("native project package preserves graph, snapshots and cards", async () => 
   assert.equal(restored.edges[0].contextSnapshotId, "snapshot");
   assert.equal(restored.snapshots[0].sourceText, "问题");
 });
+
+test("normal exports exclude experimental attention events and ghost proposals", async () => {
+  const portable = project() as PortableProject & {
+    proposals?: unknown[];
+    interactionEvents?: unknown[];
+  };
+  portable.proposals = [{ id: "ghost", explorationQuestion: "不应导出" }];
+  portable.interactionEvents = [{ id: "event", type: "title-edited" }];
+  const artifact = await projectBundle(portable);
+  const zip = await JSZip.loadAsync(await artifact.blob.arrayBuffer());
+  const graph = Object.values(zip.files).find((file) =>
+    file.name.endsWith("graph.json"),
+  );
+  assert.ok(graph);
+  const content = await graph!.async("text");
+  assert.doesNotMatch(content, /不应导出/);
+  assert.doesNotMatch(content, /interactionEvents/);
+});

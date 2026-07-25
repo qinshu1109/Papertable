@@ -469,6 +469,19 @@ textarea {
   line-height: 1.35;
   margin: 0 0 7px;
 }
+.card-title-input {
+  width: min(100%, 520px);
+  margin: -3px 0 4px;
+  padding: 3px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  outline: none;
+  background: var(--raised);
+  font-size: 19px;
+  font-weight: 640;
+  line-height: 1.35;
+  color: var(--ink);
+}
 .card-meta {
   display: flex;
   align-items: center;
@@ -588,7 +601,9 @@ textarea {
 }
 .turn-user {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 6px;
   margin-bottom: 20px;
 }
 .bubble {
@@ -601,6 +616,55 @@ textarea {
   line-height: 1.7;
   color: var(--ink);
   box-shadow: 0 1px 2px rgba(52, 43, 38, 0.05);
+}
+.user-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 5px 7px;
+  border-radius: 8px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  opacity: 0;
+  transition:
+    opacity var(--d-fast),
+    background var(--d-fast),
+    color var(--d-fast);
+}
+.turn-user:hover .user-edit-btn,
+.user-edit-btn:focus-visible {
+  opacity: 1;
+}
+.user-edit-btn:hover {
+  background: var(--branch-soft);
+  color: var(--branch);
+}
+.question-editor {
+  width: min(86%, 560px);
+  padding: 8px;
+  border: 1px solid #cdd2df;
+  border-radius: 14px;
+  background: var(--raised);
+}
+.question-editor textarea {
+  display: block;
+  width: 100%;
+  min-height: 70px;
+  border: 0;
+  outline: 0;
+  resize: vertical;
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.65;
+}
+.question-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 6px;
 }
 
 .turn-ai {
@@ -952,6 +1016,7 @@ textarea {
 .graph {
   width: var(--graph-w);
   flex-shrink: 0;
+  position: relative;
   border-left: 1px solid var(--line);
   display: flex;
   flex-direction: column;
@@ -974,6 +1039,133 @@ textarea {
   color: var(--ink-3);
   font-weight: 600;
   text-transform: uppercase;
+}
+.proposal-count {
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  display: grid;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  place-items: center;
+  border-radius: 99px;
+  background: var(--accent);
+  color: #fffaf6;
+  border: 1px solid var(--card);
+  font-size: 8.5px;
+  font-weight: 700;
+}
+.proposal-panel {
+  position: absolute;
+  z-index: 90;
+  top: 51px;
+  right: 10px;
+  left: 10px;
+  max-height: min(560px, calc(100dvh - 92px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--sh-pop);
+}
+.proposal-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 11px 11px 8px 13px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.proposal-panel-head b,
+.proposal-panel-head span {
+  display: block;
+}
+.proposal-panel-head b {
+  font-size: 12.5px;
+}
+.proposal-panel-head span {
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+.proposal-list {
+  padding: 7px;
+  max-height: 480px;
+}
+.proposal-empty {
+  margin: 8px 7px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+.proposal-item {
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  background: var(--raised);
+}
+.proposal-item + .proposal-item {
+  margin-top: 7px;
+}
+.proposal-item-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  justify-content: space-between;
+}
+.proposal-item b {
+  font-size: 12px;
+  line-height: 1.45;
+}
+.proposal-item p {
+  margin: 6px 0 6px;
+  color: var(--ink);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+.proposal-item small {
+  display: block;
+  color: var(--ink-3);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.proposal-evidence {
+  flex-shrink: 0;
+  padding: 2px 5px;
+  border-radius: 99px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.proposal-evidence.human-signals {
+  color: #3f5c47;
+  background: var(--ctx-soft);
+}
+.proposal-evidence.ai-wildcard {
+  color: #6d5729;
+  background: #f3e8c9;
+}
+.proposal-actions {
+  display: flex;
+  gap: 5px;
+  margin-top: 9px;
+}
+.proposal-actions .btn {
+  height: 28px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+.cooled-heading {
+  margin: 12px 4px 6px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+}
+.proposal-item.cooled {
+  opacity: 0.58;
+  border-style: dashed;
 }
 .graph-canvas {
   flex: 1;
@@ -1043,6 +1235,15 @@ textarea {
   font-style: normal;
   opacity: 0.65;
   font-size: 10.5px;
+}
+.session-direction-hint {
+  margin: 0 11px 8px;
+  padding: 6px 8px;
+  border: 1px dashed #cfc5b9;
+  border-radius: 9px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.45;
 }
 
 /* ============================================================
@@ -1558,6 +1759,52 @@ textarea {
 .settings-field input::placeholder {
   color: var(--ink-3);
 }
+.attention-settings {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  background: var(--raised);
+}
+.attention-settings > div {
+  min-width: 0;
+  flex: 1;
+}
+.attention-settings b,
+.attention-settings span {
+  display: block;
+}
+.attention-settings b {
+  color: var(--ink);
+  font-size: 12px;
+}
+.attention-settings span {
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.attention-settings .btn {
+  flex-shrink: 0;
+  height: 29px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+.attention-metrics {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 5px 10px;
+  padding: 10px 4px 0;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.attention-metrics b {
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  font-weight: 620;
+}
 .btn {
   height: 32px;
   padding: 0 15px;
@@ -1677,6 +1924,47 @@ textarea {
   }
 }
 
+/* 次日晨收：非模态，用户可忽略，绝不抢走当前编辑焦点。 */
+.attention-prompt {
+  position: fixed;
+  z-index: 96;
+  right: calc(var(--graph-w) + 22px);
+  bottom: 22px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 540px;
+  padding: 10px 11px 10px 13px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--card);
+  box-shadow: var(--sh-pop);
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.attention-prompt > svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.attention-prompt > span {
+  flex: 1;
+}
+.attention-prompt button {
+  flex-shrink: 0;
+  padding: 5px 7px;
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-size: 11.5px;
+}
+.attention-prompt button:first-of-type {
+  color: #fffaf6;
+  background: var(--accent);
+}
+.attention-prompt button:last-of-type:hover {
+  background: var(--sunken);
+}
+
 /* 移动端顶部迷你导航 */
 .mobile-only {
   display: none;
@@ -1685,6 +1973,9 @@ textarea {
   display: none;
 }
 .drawer-scrim {
+  display: none;
+}
+.mobile-proposal-sheet {
   display: none;
 }
 
@@ -1791,6 +2082,47 @@ textarea {
     border-radius: 99px;
     flex-shrink: 0;
   }
+  .mobile-proposal-sheet {
+    position: fixed;
+    z-index: 115;
+    right: 10px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    left: 10px;
+    display: flex;
+    max-height: min(62dvh, 520px);
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--card);
+    box-shadow: var(--sh-pop);
+  }
+  .mobile-proposal-sheet-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 11px 11px 8px 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .mobile-proposal-sheet-head b,
+  .mobile-proposal-sheet-head span {
+    display: block;
+  }
+  .mobile-proposal-sheet-head b {
+    font-size: 13px;
+  }
+  .mobile-proposal-sheet-head span {
+    margin-top: 2px;
+    color: var(--ink-3);
+    font-size: 10.5px;
+  }
+  .mobile-proposal-list {
+    padding: 8px;
+  }
+  .mobile-proposal-list > p {
+    color: var(--ink-3);
+    font-size: 12px;
+  }
 
   .stage {
     padding: 8px 12px 6px;
@@ -1889,6 +2221,12 @@ textarea {
     display: flex;
     flex-direction: column;
   }
+  .user-edit-btn {
+    opacity: 1;
+  }
+  .question-editor {
+    width: 100%;
+  }
   .ctx-panel {
     width: calc(100vw - 24px);
     left: 0;
@@ -1922,6 +2260,17 @@ textarea {
   }
   .toast {
     bottom: calc(96px + env(safe-area-inset-bottom));
+  }
+  .attention-prompt {
+    right: 10px;
+    bottom: calc(82px + env(safe-area-inset-bottom));
+    left: 10px;
+    max-width: none;
+    flex-wrap: wrap;
+  }
+  .attention-prompt > span {
+    min-width: 0;
+    flex: 1 1 250px;
   }
 }
 

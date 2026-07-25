@@ -13,6 +13,7 @@ import {
   Check,
   Copy,
   CornerDownRight,
+  Edit3,
   GitBranch,
   MoreHorizontal,
   Quote,
@@ -57,10 +58,14 @@ export function CardStage() {
     currentCardId,
     setCurrentCard,
     createCard,
+    renameCard,
+    rerouteEditedQuestion,
     deleteCard,
     toggleFavoriteCard,
     addReference,
     cacheConceptPreview,
+    recordConceptPreviewOpened,
+    recordCardDwell,
     rememberCardScroll,
     cardScroll,
     retryLast,
@@ -86,7 +91,52 @@ export function CardStage() {
   const [spawnText, setSpawnText] = useState("");
   const [flashTurn, setFlashTurn] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
   const prevCard = useRef(currentCardId);
+  const dwellRecordRef = useRef(recordCardDwell);
+
+  useEffect(() => {
+    dwellRecordRef.current = recordCardDwell;
+  }, [recordCardDwell]);
+
+  /* 只统计页面前台状态下的连续有效阅读，后台挂起不算。 */
+  useEffect(() => {
+    let elapsed = 0;
+    let startedAt: number | null = null;
+    let timer: number | null = null;
+    let recorded = false;
+    const clearTimer = () => {
+      if (timer) window.clearTimeout(timer);
+      timer = null;
+    };
+    const start = () => {
+      if (recorded || document.visibilityState !== "visible") return;
+      startedAt = Date.now();
+      timer = window.setTimeout(
+        () => {
+          recorded = true;
+          dwellRecordRef.current(currentCardId);
+        },
+        Math.max(0, 120_000 - elapsed),
+      );
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        if (startedAt) elapsed += Date.now() - startedAt;
+        startedAt = null;
+        clearTimer();
+      } else {
+        start();
+      }
+    };
+    start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearTimer();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [currentCardId]);
 
   /* ---------- 每张卡片独立滚动位置 ---------- */
   useLayoutEffect(() => {
@@ -210,6 +260,7 @@ export function CardStage() {
       sourceText: opts?.text,
       sourceBlockText: opts?.blockText,
       title,
+      origin: opts?.text ? "selection" : "manual",
       seedTurns: [
         {
           id: `t-${Date.now()}`,
@@ -232,6 +283,7 @@ export function CardStage() {
       type: "divergent",
       sourceCardId: card.id,
       title: topic.slice(0, 26),
+      origin: "manual",
       seedTurns: [
         {
           id: `t-${Date.now()}`,
@@ -250,6 +302,7 @@ export function CardStage() {
       sourceCardId: card.id,
       sourceTurnId: turnId,
       title: `${card.title} · 另一条路径`,
+      origin: "manual",
       seedTurns: [
         {
           id: `t-${Date.now()}`,
@@ -280,6 +333,10 @@ export function CardStage() {
       ? EDGE_META[lastCreated.type].enterFrom
       : { x: 0, y: 18, rotate: 0 };
   const aiTurns = card.turns.filter((t) => t.role === "ai");
+  const commitTitle = () => {
+    renameCard(card.id, titleDraft);
+    setEditingTitle(false);
+  };
 
   return (
     <div className="stage">
@@ -347,7 +404,31 @@ export function CardStage() {
           >
             <header className="card-head">
               <div style={{ flex: 1, minWidth: 0 }}>
-                <h1 className="card-title">{card.title}</h1>
+                {editingTitle ? (
+                  <input
+                    className="card-title-input"
+                    value={titleDraft}
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    onBlur={commitTitle}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") commitTitle();
+                      if (event.key === "Escape") setEditingTitle(false);
+                    }}
+                    aria-label="编辑卡片标题"
+                    autoFocus
+                  />
+                ) : (
+                  <h1
+                    className="card-title"
+                    onDoubleClick={() => {
+                      setTitleDraft(card.title);
+                      setEditingTitle(true);
+                    }}
+                    title="双击编辑标题"
+                  >
+                    {card.title}
+                  </h1>
+                )}
                 <div className="card-meta">
                   <span className={`rel-pill ${inEdge ? inEdge.type : "root"}`}>
                     {inEdge ? (
@@ -371,16 +452,30 @@ export function CardStage() {
                     >
                       <ArrowUpLeft size={11} />
                       <span>
-                        {inEdge?.type === "branch" && inEdge.sourceTurnId
-                          ? `从第 ${
-                              cards
-                                .find((c) => c.id === inEdge.sourceCardId)!
-                                .turns.filter((t) => t.role === "ai")
-                                .findIndex(
-                                  (t) => t.id === inEdge.sourceTurnId,
-                                ) + 1
-                            } 轮改道：${sourceCard.title}`
-                          : `${meta.verb}：${sourceCard.title}`}
+                        {(() => {
+                          if (inEdge?.type !== "branch" || !inEdge.sourceTurnId)
+                            return `${meta.verb}：${sourceCard.title}`;
+                          const sourceTurn = sourceCard.turns.find(
+                            (turn) => turn.id === inEdge.sourceTurnId,
+                          );
+                          if (sourceTurn?.role === "user") {
+                            const questionNumber = sourceCard.turns
+                              .slice(
+                                0,
+                                sourceCard.turns.findIndex(
+                                  (turn) => turn.id === sourceTurn.id,
+                                ) + 1,
+                              )
+                              .filter((turn) => turn.role === "user").length;
+                            return `从第 ${questionNumber} 个问题改道：${sourceCard.title}`;
+                          }
+                          const turnNumber = sourceCard.turns
+                            .filter((turn) => turn.role === "ai")
+                            .findIndex(
+                              (turn) => turn.id === inEdge.sourceTurnId,
+                            );
+                          return `从第 ${turnNumber + 1} 轮改道：${sourceCard.title}`;
+                        })()}
                       </span>
                     </button>
                   )}
@@ -422,6 +517,17 @@ export function CardStage() {
                         onClick={() => setMenuOpen(false)}
                       />
                       <div className="menu" style={{ top: 34, right: 0 }}>
+                        <button
+                          className="menu-item"
+                          onClick={() => {
+                            setTitleDraft(card.title);
+                            setEditingTitle(true);
+                            setMenuOpen(false);
+                          }}
+                        >
+                          <Edit3 size={14} />
+                          编辑标题
+                        </button>
                         <button
                           className="menu-item"
                           onClick={() => {
@@ -493,6 +599,11 @@ export function CardStage() {
                     streaming={streamingTurnId === turn.id}
                     selectionActive={sel?.turnId === turn.id}
                     onConcept={(term, blockText, el) => {
+                      recordConceptPreviewOpened({
+                        cardId: card.id,
+                        turnId: turn.id,
+                        concept: term,
+                      });
                       const r = el.getBoundingClientRect();
                       setConcept({
                         term,
@@ -535,6 +646,18 @@ export function CardStage() {
                       )
                     }
                     onCopy={() => copy(turn.content, turn.id)}
+                    onEditQuestion={(text) => {
+                      try {
+                        rerouteEditedQuestion(card.id, turn.id, text);
+                      } catch (error) {
+                        showToast({
+                          text:
+                            error instanceof Error
+                              ? error.message
+                              : "无法创建改道分支。",
+                        });
+                      }
+                    }}
                     onRetry={retryLast}
                     copied={copied === turn.id}
                   />
@@ -790,6 +913,7 @@ export function CardStage() {
               sourceText: term,
               sourceBlockText: concept.blockText,
               title: term,
+              origin: "concept-promotion",
               seedTurns: [
                 {
                   id: `t-${Date.now()}-u`,
@@ -828,6 +952,7 @@ function TurnBlock({
   onBranch,
   onQuote,
   onCopy,
+  onEditQuestion,
   onRetry,
   copied,
 }: {
@@ -843,15 +968,61 @@ function TurnBlock({
   onBranch: () => void;
   onQuote: () => void;
   onCopy: () => void;
+  onEditQuestion: (text: string) => void;
   onRetry: () => void;
   copied: boolean;
 }) {
   const [more, setMore] = useState(false);
+  const [editingQuestion, setEditingQuestion] = useState(false);
+  const [questionDraft, setQuestionDraft] = useState("");
 
   if (turn.role === "user") {
     return (
       <div className="turn-user" id={`turn-${turn.id}`}>
-        <div className="bubble">{turn.content}</div>
+        {editingQuestion ? (
+          <div className="question-editor">
+            <textarea
+              value={questionDraft}
+              onChange={(event) => setQuestionDraft(event.target.value)}
+              autoFocus
+              aria-label="编辑旧问题并改道"
+            />
+            <div className="question-editor-actions">
+              <button
+                className="tt-btn"
+                onClick={() => setEditingQuestion(false)}
+              >
+                取消
+              </button>
+              <button
+                className="tt-btn c-branch"
+                disabled={!questionDraft.trim()}
+                onClick={() => {
+                  onEditQuestion(questionDraft);
+                  setEditingQuestion(false);
+                }}
+              >
+                <GitBranch size={13} />
+                保存并改道
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="bubble">{turn.content}</div>
+            <button
+              className="user-edit-btn"
+              title="保留原问题，修改后从这里改道"
+              onClick={() => {
+                setQuestionDraft(turn.content);
+                setEditingQuestion(true);
+              }}
+            >
+              <Edit3 size={12} />
+              编辑并改道
+            </button>
+          </>
+        )}
       </div>
     );
   }

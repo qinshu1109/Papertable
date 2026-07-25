@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Menu, PanelRightOpen } from "lucide-react";
+import { Menu, Sparkles, X } from "lucide-react";
 import { useStore } from "./store";
 import { ProjectSidebar } from "./components/ProjectSidebar";
 import { CardStage } from "./components/CardStage";
@@ -14,6 +14,7 @@ import {
 import { EDGE_META } from "./types";
 import { incomingEdge, layoutGraph, pathToRoot } from "./lib/graph";
 import { scopeProject } from "./lib/projectScope";
+import { proposalEvidenceLabel } from "./lib/attention";
 
 export function App() {
   const {
@@ -25,7 +26,13 @@ export function App() {
     collapsed,
     toast,
     dismissToast,
-    showToast,
+    activeProposals,
+    morningPrompt,
+    proposalTrayOpen,
+    setProposalTrayOpen,
+    dismissMorningPrompt,
+    openProposal,
+    dismissProposal,
   } = useStore();
   const [sbCollapsed, setSbCollapsed] = useState(false);
   const [drawer, setDrawer] = useState(false);
@@ -164,13 +171,15 @@ export function App() {
             })}
           </div>
           <button
-            className="icon-btn"
-            onClick={() =>
-              showToast({ text: "移动端使用顶部横向迷你导航替代右侧关系图" })
-            }
-            aria-label="关系图说明"
+            className={`icon-btn${activeProposals.length ? " active" : ""}`}
+            onClick={() => setProposalTrayOpen(true)}
+            aria-label={`查看幽灵分支，共 ${activeProposals.length} 条`}
+            title="查看幽灵分支"
           >
-            <PanelRightOpen size={16} />
+            <Sparkles size={16} />
+            {activeProposals.length > 0 && (
+              <span className="proposal-count">{activeProposals.length}</span>
+            )}
           </button>
         </div>
 
@@ -180,11 +189,90 @@ export function App() {
 
       <GraphNavigator />
 
+      {proposalTrayOpen && (
+        <div
+          className="mobile-proposal-sheet"
+          role="dialog"
+          aria-label="幽灵分支"
+        >
+          <div className="mobile-proposal-sheet-head">
+            <div>
+              <b>幽灵分支</b>
+              <span>点击后才会创建正式卡片</span>
+            </div>
+            <button
+              className="icon-btn"
+              onClick={() => setProposalTrayOpen(false)}
+              aria-label="关闭幽灵分支"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="mobile-proposal-list scroll-y">
+            {activeProposals.length === 0 ? (
+              <p>当前没有可展开的幽灵分支。</p>
+            ) : (
+              activeProposals.map((proposal) => (
+                <article className="proposal-item" key={proposal.id}>
+                  <b>{proposal.title}</b>
+                  <p>{proposal.explorationQuestion}</p>
+                  <small>
+                    {proposalEvidenceLabel(proposal.evidence)} ·{" "}
+                    {proposal.reason}
+                  </small>
+                  <div className="proposal-actions">
+                    <button
+                      className="btn primary"
+                      onClick={() => openProposal(proposal.id)}
+                    >
+                      开始探索
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => dismissProposal(proposal.id)}
+                    >
+                      忽略
+                    </button>
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {modal === "import" && <ImportDialog onClose={() => setModal(null)} />}
       {modal === "export" && <ExportDialog onClose={() => setModal(null)} />}
       {modal === "settings" && (
         <SettingsDialog onClose={() => setModal(null)} />
       )}
+
+      <AnimatePresence>
+        {morningPrompt && (
+          <motion.aside
+            className="attention-prompt"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.22 }}
+            aria-label="次日探索提示"
+          >
+            <Sparkles size={15} />
+            <span>
+              昨晚有 {morningPrompt.count} 个方向可能值得继续 · 先看一眼再决定
+            </span>
+            <button
+              onClick={() => {
+                setProposalTrayOpen(true);
+                dismissMorningPrompt();
+              }}
+            >
+              查看幽灵分支
+            </button>
+            <button onClick={dismissMorningPrompt}>今天忽略</button>
+          </motion.aside>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {toast && (

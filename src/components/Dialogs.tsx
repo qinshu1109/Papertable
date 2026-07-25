@@ -291,6 +291,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     exportAllBackup,
     clearLocalData,
     showToast,
+    attentionMetrics,
+    attentionPaused,
+    setAttentionPaused,
   } = useStore();
   const [testing, setTesting] = useState(false);
   const [savingConnection, setSavingConnection] = useState(false);
@@ -444,6 +447,43 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           密钥只提交给 127.0.0.1 的本机服务，页面不会回显、保存到 IndexedDB
           或打包进导出文件。保存后会写入未提交的 .env.local；接口地址仅接受
           HTTPS 或本机 HTTP。
+        </p>
+        <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
+          注意力实验
+        </div>
+        <div className="attention-settings">
+          <div>
+            <b>
+              {attentionPaused
+                ? "实验已暂停"
+                : `第 ${attentionMetrics.dayIndex} 天`}
+            </b>
+            <span>
+              暂停后不记录行为、不生成提案，也不会补算暂停期间的动作。
+            </span>
+          </div>
+          <button
+            className={`btn${attentionPaused ? " primary" : ""}`}
+            onClick={() => setAttentionPaused(!attentionPaused)}
+          >
+            {attentionPaused ? "恢复实验" : "暂停实验"}
+          </button>
+        </div>
+        <div className="attention-metrics" aria-label="注意力实验统计">
+          <span>今日强 / 中 / 弱</span>
+          <b>
+            {attentionMetrics.today.strong} / {attentionMetrics.today.medium} /{" "}
+            {attentionMetrics.today.weak}
+          </b>
+          <span>晨间提示</span>
+          <b>{attentionMetrics.promptCount} 次</b>
+          <span>主动展开率</span>
+          <b>{Math.round(attentionMetrics.openedRate * 100)}%</b>
+          <span>二次强信号卡片</span>
+          <b>{attentionMetrics.secondaryStrongSignalCount} 张</b>
+        </div>
+        <p className="note-line">
+          这里只统计本机行为；第一阶段不连接 MemOS，也不会为提案额外调用模型。
         </p>
         <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
           本地数据

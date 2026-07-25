@@ -148,6 +148,18 @@ function assemble(
 export function projectBundle(project: PortableProject) {
   const zip = new JSZip();
   const root = safeName(project.project.name);
+  // Whitelist the portable contract. Experimental event/session/proposal data
+  // must never leak even if an in-memory caller accidentally attaches it.
+  const payload: PortableProject = {
+    version: project.version,
+    project: project.project,
+    cards: project.cards,
+    edges: project.edges,
+    anchors: project.anchors,
+    snapshots: project.snapshots,
+    references: project.references,
+    viewState: project.viewState,
+  };
   zip.file(
     `${root}/manifest.json`,
     JSON.stringify(
@@ -160,7 +172,7 @@ export function projectBundle(project: PortableProject) {
       2,
     ),
   );
-  zip.file(`${root}/graph.json`, JSON.stringify(project, null, 2));
+  zip.file(`${root}/graph.json`, JSON.stringify(payload, null, 2));
   for (const card of project.cards)
     zip.file(
       `${root}/cards/${safeName(card.title)}-${card.id.slice(-8)}.md`,
