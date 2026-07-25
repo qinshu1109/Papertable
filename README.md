@@ -1,0 +1,89 @@
+# 纸桌 Papertable
+
+一个本地优先的图结构知识探索网页：中央卡片堆叠负责阅读当前路径，右侧关系图负责浏览整个项目；深挖、发散、改道不是视觉方向，而是三种明确的上下文继承规则。
+
+## 启动
+
+需要 Node.js 24 和 pnpm 11。
+
+```bash
+pnpm install
+pnpm dev
+```
+
+打开 <http://127.0.0.1:5173>，进入「设置」即可填写接口地址、模型和轮换后的 API 密钥。密钥只会提交给只监听 `127.0.0.1:8787` 的本机服务，保存到未提交的 `.env.local`；浏览器不会收到或保存它。
+
+也可以在启动前手动创建配置：
+
+```bash
+cp .env.example .env.local
+# 编辑 .env.local，填写轮换后的 COZAI_API_KEY
+```
+
+常用检查：
+
+```bash
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm test:e2e
+pnpm build
+pnpm start # 构建后在 http://127.0.0.1:8787 提供网页与本机 API
+```
+
+## 已实现的完整链路
+
+- CozAI 的 `claude-opus-5`：流式回答、停止、超时、断线和可读错误提示；401、429、5xx 不会静默回退为假回答。
+- 三种真实上下文：
+  - **深挖**：来源主题 + 冻结的精确选区，不带父卡完整历史；
+  - **发散**：只带来源主题；
+  - **改道**：只带来源卡片到指定轮次为止的冻结历史。
+- 输入器的「本次上下文」直接读取实际 `buildContext()` 结果，显示带入与排除的内容。
+- IndexedDB 自动保存项目、卡片、轮次、边、锚点、快照、引用、草稿、阅读位置和折叠状态。生成中至少每 500 ms 保存一次；中断后保留已生成文本并标记为已停止。
+- 点击文本选区可深挖、引用或复制；概念解释浮层使用真实模型流式回答，按「概念 + 来源版本」持久缓存，可升级为正式卡片。
+- 回答后的短标题与概念提取在后台执行，不阻塞继续提问；不会保存或展示模型隐藏推理。
+- 导入：单个 Markdown、Markdown 文件夹、JSON Canvas + Markdown、无损项目包。
+- 导出：Markdown 文件夹 ZIP、JSON Canvas + Markdown ZIP、无损项目包 ZIP；无损包可恢复关系、上下文快照、锚点、引用和视图状态。
+- 卡片 / 关系树联动、三种关系、删除撤销、独立滚动位置、项目隔离、移动端抽屉和迷你关系导航全部保留。
+
+## 安全与本地数据
+
+- `.env.local` 已被 Git 忽略；可由设置页维护。不要把密钥放入代码、浏览器控制台、截图、导出包或提交记录。
+- 贴到聊天中的旧密钥应视为已泄露，请先在 CozAI 轮换，再通过设置页或 `.env.local` 填写新的密钥。
+- 默认数据仅保存在当前浏览器的 IndexedDB；设置页可导出全部备份或经二次确认清除。
+- 对话请求不接受浏览器传入的目标地址；只有设置页可通过本机端点保存 HTTPS（或本机 HTTP）接口地址和模型名，不能被当作开放代理使用。
+
+## 项目结构
+
+```text
+server/
+  index.mjs             # 127.0.0.1 本机 API：健康检查 / 本机设置 / 流式 / 后台生成
+  cozai.mjs             # OpenAI SSE → Papertable token/done/error 适配
+src/
+  lib/context.ts        # 与 React、Dexie、模型 SDK 无关的 buildContext()
+  lib/provider.ts       # 浏览器到本机 API 的客户端
+  lib/storage.ts        # Dexie/IndexedDB、版本化 schema 与保存恢复
+  lib/formats.ts        # Markdown / JSON Canvas / 无损包格式适配器
+  store.tsx             # 业务编排；组件只使用其公开动作
+  components/           # 卡片堆叠、关系树、输入器、概念预览、对话框
+```
+
+## 格式约定
+
+无损项目包是唯一要求完整往返的格式：
+
+```text
+项目名/
+├── manifest.json
+├── graph.json
+├── cards/*.md
+└── assets/
+```
+
+Markdown 和 JSON Canvas 是开放互操作格式；普通 Markdown 双链会被导入为 `reference`，不会被擅自解释为上下文继承边。网页环境会将目录导出为 ZIP 下载；本轮不监听笔记目录，也不做双向同步。
+
+## 测试覆盖
+
+`pnpm test` 覆盖：三种上下文的精确内容、引用排序与去重、项目隔离、关系图、IndexedDB 保存恢复、无损包往返，以及上游 SSE 到统一事件的转换和错误映射。`pnpm test:e2e` 显式启动本机假模型，跑桌面流式卡片、停止后恢复和 390px 无横向溢出流程；真实 CozAI 请求不在默认测试中执行，避免消耗额度。
+
+视觉规范见 [DESIGN_NOTES.md](DESIGN_NOTES.md)，架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，安全说明见 [SECURITY.md](SECURITY.md)。

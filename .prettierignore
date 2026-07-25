@@ -1,0 +1,8 @@
+dist
+node_modules
+playwright-report
+test-results
+*.tsbuildinfo
+pnpm-lock.yaml
+DESIGN_NOTES.md
+index.html
