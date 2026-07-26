@@ -41,6 +41,15 @@ if [[ " $* " != *" --no-install "* ]]; then
   rm -rf "/Applications/Papertable.app"
   cp -R "$APP" /Applications/
   echo "已安装到 /Applications/Papertable.app"
+
+  # 装完就把 target/ 里的 bundle 删掉，**只留一份可启动的**。
+  #
+  # 三份 bundle 共用 bundle id、共用同一个数据库，Spotlight / Dock / Finder 都能
+  # 启动任意一份，而界面上曾经无从分辨。留着它们唯一的作用就是让人误开旧版本。
+  # 二进制本身留在 target/ 里，增量编译不受影响，只是不再是一个可双击的 .app。
+  rm -rf src-tauri/target/release/bundle/macos/Papertable.app \
+         src-tauri/target/debug/bundle/macos/Papertable.app
+  echo "已清除 target/ 下的可启动副本，现在系统里只有一份 Papertable.app"
 fi
 
 echo

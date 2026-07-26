@@ -6,8 +6,26 @@ pnpm desktop:signed     # 构建 release 并 ad-hoc 签名
 pnpm test:rust          # Rust 单元测试
 ```
 
-`desktop:signed` 会构建、ad-hoc 签名，**并覆盖安装到 `/Applications/Papertable.app`**。
-加 `--no-install` 可只构建不安装，产物在 `src-tauri/target/release/bundle/macos/`。
+`desktop:signed` 会构建、ad-hoc 签名、覆盖安装到 `/Applications/Papertable.app`，
+然后**删掉 `target/` 下的 .app**——系统里始终只保留一份可启动的版本，就是最新那份。
+加 `--no-install` 可只构建不安装。
+
+## 为什么必须只留一份
+
+三份 bundle（`/Applications`、`target/release`、`target/debug`）共用同一个
+bundle id `com.papertable.app`、同一个版本号 `0.1.0`、**同一个 SQLite 数据库和同一条
+钥匙串记录**。Spotlight、Dock、Finder 都能启动任意一份，而界面上分辨不出打开的是哪一份。
+
+后果是「改了没生效」这种最难查的现象：应用照常启动、功能都在，只是全是旧代码。
+曾经因此对着三小时前的构建做验收。
+
+三道防线：
+
+1. **构建脚本装完即清**，只留 `/Applications` 那一份可启动。
+2. **设置页显示这一份构建是什么**：git commit（带未提交标记）、构建时间、可执行文件
+   路径。不是从 `/Applications` 启动的会额外显示一条红色警告。
+3. **单实例**：第二次启动聚焦已有窗口，而不是再开一个进程。两份不同版本同时跑在
+   同一个数据库上，是跨进程版的多标签页问题——每个进程各持一份内存基线，互相不可见。
 
 安装这一步一开始是缺的，结果是「改完重新构建」之后打开的仍然是 `/Applications` 里的
 旧版本，而界面上看不出任何异常——只会觉得改动没生效。

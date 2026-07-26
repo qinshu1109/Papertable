@@ -22,6 +22,7 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
 # 手写 rusqlite，不用 tauri-plugin-sql：后者向 JS 暴露 execute(sql, params) 字符串
 # API，一次触及 9 张表的 applyChanges 会变成 N 次 IPC 往返加逐行 JSON 序列化，而且
 # 无法包进一个可回滚的事务——只能把 BEGIN/COMMIT 当字符串发出去然后祈祷。

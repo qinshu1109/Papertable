@@ -9,6 +9,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import type { LlmMessage } from "../../types";
 import type { OutputChannel } from "../modelOutput";
 import type {
+  BuildInfo,
   KeySource,
   ModelTask,
   ProviderConfig,
@@ -17,6 +18,10 @@ import type {
 
 export function getProviderHealth(): Promise<ProviderHealth> {
   return invoke<ProviderHealth>("provider_health");
+}
+
+export function getBuildInfo(): Promise<BuildInfo> {
+  return invoke<BuildInfo>("build_info");
 }
 
 export function getKeySource(): Promise<KeySource> {

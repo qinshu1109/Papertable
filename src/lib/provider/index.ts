@@ -11,6 +11,7 @@ import * as http from "./http";
 import * as tauri from "./tauri";
 
 export type {
+  BuildInfo,
   KeySource,
   ModelTask,
   ProviderConfig,
@@ -21,6 +22,7 @@ const impl = __PAPERTABLE_TARGET__ === "desktop" ? tauri : http;
 
 export const getProviderHealth = impl.getProviderHealth;
 export const getKeySource = impl.getKeySource;
+export const getBuildInfo = impl.getBuildInfo;
 export const getProviderConfig = impl.getProviderConfig;
 export const saveProviderConfig = impl.saveProviderConfig;
 export const streamModel = impl.streamModel;

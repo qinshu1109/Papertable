@@ -26,6 +26,25 @@ export async function getKeySource(): Promise<KeySource> {
   return config.hasApiKey ? "file" : "none";
 }
 
+/** 这一份构建是什么。web 端没有多份 bundle 的问题，返回固定说明。 */
+export interface BuildInfo {
+  version: string;
+  commit: string;
+  builtAt: string;
+  exe: string;
+  installed: boolean;
+}
+
+export function getBuildInfo(): Promise<BuildInfo> {
+  return Promise.resolve({
+    version: "web",
+    commit: "-",
+    builtAt: "-",
+    exe: "浏览器",
+    installed: true,
+  });
+}
+
 export async function getProviderHealth(): Promise<ProviderHealth> {
   const response = await fetch("/api/health", { cache: "no-store" });
   const body = (await response.json()) as ProviderHealth;

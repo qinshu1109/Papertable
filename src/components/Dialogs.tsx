@@ -12,9 +12,11 @@ import {
   X,
 } from "lucide-react";
 import {
+  getBuildInfo,
   getKeySource,
   getProviderConfig,
   saveProviderConfig,
+  type BuildInfo,
   type KeySource,
   type ProviderConfig,
 } from "../lib/provider";
@@ -317,6 +319,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [model, setModel] = useState(provider?.model ?? "claude-opus-5");
   const [apiKey, setApiKey] = useState("");
   const [keySource, setKeySource] = useState<KeySource>("none");
+  const [build, setBuild] = useState<BuildInfo | null>(null);
+  useEffect(() => {
+    void getBuildInfo()
+      .then(setBuild)
+      .catch(() => undefined);
+  }, []);
   useEffect(() => {
     let active = true;
     void getProviderConfig()
@@ -577,6 +585,36 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 })}
               </>
             )}
+          </>
+        )}
+
+        {/*
+          构建标识。三份 bundle 共用 bundle id 和版本号、共用同一个数据库，
+          界面上曾经无从分辨打开的是哪一份——运行了三小时前的旧代码而毫无察觉。
+        */}
+        {build && (
+          <>
+            <div
+              className="fmt-name"
+              style={{ marginTop: 22, marginBottom: 8 }}
+            >
+              这一份构建
+            </div>
+            {!build.installed && (
+              <p
+                className="note-line"
+                style={{ marginTop: 0, color: "var(--danger)" }}
+              >
+                你运行的**不是** /Applications
+                里正式安装的那一份，而是构建产物。
+                它与正式版共用同一个数据库，改动看起来会像没生效。
+              </p>
+            )}
+            <p className="note-line" style={{ marginTop: 0 }}>
+              {build.commit} · 构建于 {build.builtAt}
+              <br />
+              <code>{build.exe}</code>
+            </p>
           </>
         )}
 

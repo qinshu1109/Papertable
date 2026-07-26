@@ -158,6 +158,37 @@ fn save_provider_config(state: State<Provider>, input: Value) -> Result<PublicCo
     Ok(PublicConfig::from(&*guard))
 }
 
+/// 这一份构建是什么。
+///
+/// 存在的理由：ad-hoc 签名下 `/Applications` 里那份和 `target/` 里的构建产物
+/// bundle id 相同、版本号相同、共用同一个数据库，界面上分辨不出打开的是哪一份。
+/// 曾经因此运行了三小时前的旧代码而毫无察觉。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildInfo {
+    version: &'static str,
+    commit: &'static str,
+    built_at: &'static str,
+    /// 可执行文件路径——这是唯一能确凿区分三份 bundle 的东西。
+    exe: String,
+    /// 从 /Applications 启动的才是正式安装的那份。
+    installed: bool,
+}
+
+#[tauri::command]
+fn build_info() -> BuildInfo {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    BuildInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        commit: env!("PAPERTABLE_COMMIT"),
+        built_at: env!("PAPERTABLE_BUILT_AT"),
+        installed: exe.starts_with("/Applications/"),
+        exe,
+    }
+}
+
 /// 密钥存在哪：钥匙串、回落文件，还是没设置。
 #[tauri::command]
 fn provider_key_source(state: State<Provider>) -> Result<KeySource, llm::Error> {
@@ -400,6 +431,15 @@ fn now_millis() -> i64 {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例。两份**不同版本**的 bundle 同时运行在同一个数据库上，是跨进程版的
+        // 多标签页问题：每个进程各持一份内存基线，而它们互相不可见。
+        // 第二次启动时聚焦已有窗口，而不是再开一个。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.webview_windows().values().next() {
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -446,6 +486,7 @@ pub fn run() {
             provider_config,
             save_provider_config,
             provider_key_source,
+            build_info,
             llm_generate,
             llm_stream,
             vault_sync,
