@@ -35,6 +35,7 @@ import {
   streamModel,
   type ProviderHealth,
 } from "./lib/provider";
+import { buildLibraryBackup, backupCounts } from "./lib/backup";
 import { createAnswerGate, visibleModelOutput } from "./lib/modelOutput";
 import { preferredProjectCard } from "./lib/projectScope";
 import {
@@ -316,6 +317,7 @@ interface Ctx {
   importFiles: (format: ImportInput["format"], files: File[]) => Promise<void>;
   exportProject: (format: "md-dir" | "canvas" | "bundle") => Promise<void>;
   exportAllBackup: () => Promise<void>;
+  exportLibraryBackup: () => Promise<void>;
   clearLocalData: () => Promise<void>;
   previewProposal: (id: string) => void;
   materializeProposal: (id: string, finalQuestion: string) => string | null;
@@ -2045,6 +2047,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     },
     [activeProjectId, portable, showToast],
   );
+  /**
+   * 整库备份：一个 JSON 覆盖全部 12 张表。从**库**里读而不是从内存读——交接要交的
+   * 是已经落盘的内容。IndexedDB → SQLite 无法自动迁移，这个文件是唯一的通路。
+   */
+  const exportLibraryBackup = useCallback(async () => {
+    const [workspace, attention] = await Promise.all([
+      loadWorkspace(),
+      loadAttentionState(),
+    ]);
+    if (!workspace) throw new Error("本机还没有可备份的数据。");
+    const backup = buildLibraryBackup({
+      workspace,
+      attention,
+      exportedAt: Date.now(),
+    });
+    const counts = backupCounts(backup);
+    downloadArtifact({
+      filename: `papertable-library-${new Date().toISOString().slice(0, 10)}.json`,
+      blob: new Blob([JSON.stringify(backup)], { type: "application/json" }),
+    });
+    showToast({
+      text: `已导出整库备份：${counts.projects} 个项目 · ${counts.cards} 张卡片 · ${counts.turns} 条轮次。请自己收好，迁移到桌面版时需要它。`,
+    });
+  }, [showToast]);
+
   const exportAllBackup = useCallback(async () => {
     const artifacts = await Promise.all(
       projects.map((project) =>
@@ -2243,6 +2270,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       importFiles,
       exportProject,
       exportAllBackup,
+      exportLibraryBackup,
       clearLocalData,
       previewProposal,
       materializeProposal,
@@ -2311,6 +2339,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       importFiles,
       exportProject,
       exportAllBackup,
+      exportLibraryBackup,
       clearLocalData,
       previewProposal,
       materializeProposal,

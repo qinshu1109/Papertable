@@ -14,9 +14,9 @@ import {
   putAttentionState,
   saveWorkspace,
   seedIfEmpty,
-} from "./storage";
-import { diffAttention, diffWorkspace } from "./delta";
-import type { AttentionSnapshot, WorkspaceSnapshot } from "./delta";
+} from "./index";
+import { diffAttention, diffWorkspace } from "../delta";
+import type { AttentionSnapshot, WorkspaceSnapshot } from "../delta";
 
 const snapshot = (): WorkspaceSnapshot => ({
   projects: [{ id: "p", name: "测试项目", pinned: false, updatedAt: 1 }],

@@ -289,6 +289,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     provider,
     refreshProvider,
     exportAllBackup,
+    exportLibraryBackup,
     clearLocalData,
     showToast,
     attentionMetrics,
@@ -491,6 +492,15 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         <button className="btn" onClick={() => void exportAllBackup()}>
           <Package size={14} />
           导出全部备份
+        </button>
+        <button
+          className="btn"
+          style={{ marginLeft: 8 }}
+          onClick={() => void exportLibraryBackup()}
+          title="一个 JSON 覆盖全部 12 张表，含视图、设置与注意力实验数据。迁移到桌面版时需要它——浏览器的 IndexedDB 无法被桌面应用直接读取。"
+        >
+          <Package size={14} />
+          导出整库 JSON
         </button>
         {!confirmClear ? (
           <button

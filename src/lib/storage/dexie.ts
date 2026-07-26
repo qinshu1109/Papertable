@@ -10,7 +10,7 @@ import type {
   SessionBoundary,
   Turn,
   ViewState,
-} from "../types";
+} from "../../types";
 import {
   type AnchorRecord,
   type AttentionSnapshot,
@@ -24,7 +24,8 @@ import {
   isEmptyAttentionUpsert,
   isEmptyWorkspaceUpsert,
   stripTurns,
-} from "./delta";
+} from "../delta";
+import type { StorageAdapter } from "./types";
 
 export type {
   AnchorRecord,
@@ -421,35 +422,8 @@ export async function clearWorkspace() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// 适配器接缝
-//
-// 刻意很薄：就是 store.tsx 实际用到的那些方法，不多不少。不要加 `query*`——没有
-// 任何东西在查询，store 启动时一次性读全量、此后都在内存里过滤。
-//
-// 迁移到 Tauri/SQLite 时需要重写的只有本文件；`delta.ts` 那套纯粹的增量计算、
-// 以及上面「删除只能来自显式意图」的规则都原样成立。届时 deleteProjectCascade
-// 的六个索引查询会塌缩成一句带 ON DELETE CASCADE 的 DELETE。
-// ---------------------------------------------------------------------------
-
-export interface StorageAdapter {
-  loadWorkspace(): Promise<WorkspaceSnapshot | null>;
-  loadAttentionState(): Promise<AttentionSnapshot>;
-  seedIfEmpty(seed: WorkspaceSnapshot): Promise<WorkspaceSnapshot>;
-  applyChanges(upsert: WorkspaceUpsert): Promise<void>;
-  applyAttentionChanges(upsert: AttentionUpsert): Promise<void>;
-  putAttentionState(snapshot: AttentionSnapshot): Promise<void>;
-  saveWorkspace(snapshot: WorkspaceSnapshot): Promise<void>;
-  deleteProjectCascade(projectId: string): Promise<{
-    workspace: WorkspaceUpsert;
-    attention: AttentionUpsert;
-  }>;
-  deleteReferences(ids: string[]): Promise<void>;
-  deleteProposals(ids: string[]): Promise<void>;
-  clearWorkspace(): Promise<void>;
-}
-
-export const storage: StorageAdapter = {
+/** 这个实现满足 `StorageAdapter`；类型检查在这里替我们盯着。 */
+export const dexieStorage: StorageAdapter = {
   loadWorkspace,
   loadAttentionState,
   seedIfEmpty,

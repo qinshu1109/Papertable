@@ -14,8 +14,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "tsx --test src/**/*.test.ts server/**/*.test.mjs",
-    "test:watch": "tsx --test --watch src/**/*.test.ts server/**/*.test.mjs",
+    "test": "tsx --test \"src/**/*.test.ts\" \"server/**/*.test.mjs\"",
+    "test:watch": "tsx --test --watch \"src/**/*.test.ts\" \"server/**/*.test.mjs\"",
     "test:e2e": "playwright test"
   },
   "dependencies": {
