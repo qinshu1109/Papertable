@@ -290,6 +290,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     refreshProvider,
     exportAllBackup,
     exportLibraryBackup,
+    importLibraryBackup,
     clearLocalData,
     showToast,
     attentionMetrics,
@@ -502,6 +503,32 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <Package size={14} />
           导出整库 JSON
         </button>
+        <label
+          className="btn"
+          style={{ marginLeft: 8, cursor: "pointer" }}
+          title="用整库 JSON 覆盖当前后端的全部数据。导入后会立刻重新读出来逐表比对，结果显示在提示里。"
+        >
+          <Package size={14} />
+          导入整库 JSON
+          <input
+            type="file"
+            accept="application/json,.json"
+            className="sr-only"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (!file) return;
+              void file
+                .text()
+                .then((text) => importLibraryBackup(text))
+                .catch((cause: unknown) =>
+                  showToast({
+                    text: cause instanceof Error ? cause.message : "导入失败。",
+                  }),
+                );
+            }}
+          />
+        </label>
         {!confirmClear ? (
           <button
             className="btn"

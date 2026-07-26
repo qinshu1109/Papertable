@@ -422,6 +422,16 @@ export async function clearWorkspace() {
   );
 }
 
+/** 整体替换本后端内容。Web 端主要用于「从桌面版导回」这类反向场景。 */
+export async function importLibrary(input: {
+  workspace: WorkspaceSnapshot;
+  attention: AttentionSnapshot;
+}): Promise<void> {
+  await clearWorkspace();
+  await saveWorkspace(input.workspace);
+  await putAttentionState(input.attention);
+}
+
 /** 这个实现满足 `StorageAdapter`；类型检查在这里替我们盯着。 */
 export const dexieStorage: StorageAdapter = {
   loadWorkspace,
@@ -435,4 +445,5 @@ export const dexieStorage: StorageAdapter = {
   deleteReferences,
   deleteProposals,
   clearWorkspace,
+  importLibrary,
 };

@@ -40,4 +40,13 @@ export interface StorageAdapter {
   deleteReferences(ids: string[]): Promise<void>;
   deleteProposals(ids: string[]): Promise<void>;
   clearWorkspace(): Promise<void>;
+  /**
+   * 用整库备份整体替换本后端的内容。桌面版首启靠它接手浏览器里的数据。
+   * 放在接口上而不是只给 Tauri 实现，是为了让 store 不必条件引入
+   * `@tauri-apps/api`——否则 web 包会被拖进 Tauri 运行时。
+   */
+  importLibrary(input: {
+    workspace: WorkspaceSnapshot;
+    attention: AttentionSnapshot;
+  }): Promise<void>;
 }

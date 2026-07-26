@@ -35,7 +35,12 @@ import {
   streamModel,
   type ProviderHealth,
 } from "./lib/provider";
-import { buildLibraryBackup, backupCounts } from "./lib/backup";
+import {
+  backupCounts,
+  buildLibraryBackup,
+  diffBackupCounts,
+  parseLibraryBackup,
+} from "./lib/backup";
 import { createAnswerGate, visibleModelOutput } from "./lib/modelOutput";
 import { preferredProjectCard } from "./lib/projectScope";
 import {
@@ -55,6 +60,7 @@ import {
   deleteProposals,
   deleteReferences,
   loadAttentionState,
+  importLibrary,
   loadWorkspace,
   putAttentionState,
   saveWorkspace,
@@ -318,6 +324,9 @@ interface Ctx {
   exportProject: (format: "md-dir" | "canvas" | "bundle") => Promise<void>;
   exportAllBackup: () => Promise<void>;
   exportLibraryBackup: () => Promise<void>;
+  importLibraryBackup: (
+    text: string,
+  ) => Promise<{ equal: boolean; mismatches: string[] }>;
   clearLocalData: () => Promise<void>;
   previewProposal: (id: string) => void;
   materializeProposal: (id: string, finalQuestion: string) => string | null;
@@ -2072,6 +2081,39 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     });
   }, [showToast]);
 
+  /**
+   * 导入整库备份，然后**立刻重新读出来逐表比对**，把结果交给调用方显示在 UI 上。
+   *
+   * 源（web 端的 IndexedDB / 那个备份文件）全程不被修改，所以这一步失败是可回滚的。
+   * 在未经校验的数据上跑桌面版，而浏览器里还留着真本，等于同时存在两份互相分叉的
+   * 库——那比只有一份坏掉的严格更糟。
+   */
+  const importLibraryBackup = useCallback(
+    async (text: string) => {
+      const backup = parseLibraryBackup(text);
+      await importLibrary({
+        workspace: backup.workspace,
+        attention: backup.attention,
+      });
+      const [workspace, attention] = await Promise.all([
+        loadWorkspace(),
+        loadAttentionState(),
+      ]);
+      if (!workspace) throw new Error("导入之后读不回任何内容，请勿继续使用。");
+      const check = diffBackupCounts(
+        backup,
+        buildLibraryBackup({ workspace, attention, exportedAt: Date.now() }),
+      );
+      showToast({
+        text: check.equal
+          ? "导入已校验：每张表的行数都与备份一致。刷新后生效。"
+          : `导入后校验不一致：${check.mismatches.join("；")}。请勿在此数据上继续使用。`,
+      });
+      return check;
+    },
+    [showToast],
+  );
+
   const exportAllBackup = useCallback(async () => {
     const artifacts = await Promise.all(
       projects.map((project) =>
@@ -2271,6 +2313,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       exportProject,
       exportAllBackup,
       exportLibraryBackup,
+      importLibraryBackup,
       clearLocalData,
       previewProposal,
       materializeProposal,
@@ -2340,6 +2383,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       exportProject,
       exportAllBackup,
       exportLibraryBackup,
+      importLibraryBackup,
       clearLocalData,
       previewProposal,
       materializeProposal,

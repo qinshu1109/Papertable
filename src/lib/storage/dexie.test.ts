@@ -14,7 +14,7 @@ import {
   putAttentionState,
   saveWorkspace,
   seedIfEmpty,
-} from "./index";
+} from "./dexie";
 import { diffAttention, diffWorkspace } from "../delta";
 import type { AttentionSnapshot, WorkspaceSnapshot } from "../delta";
 
