@@ -26,9 +26,7 @@ export const tauriVault: VaultBridge = {
     invoke<[string, string | null][]>("vault_resolve_link", { name }),
   indexedCount: () => invoke<number>("vault_indexed_count"),
   conflicts: () => invoke<Conflict[]>("vault_conflicts"),
-  resolveConflict: (cardId) =>
-    invoke<void>("vault_resolve_conflict", { cardId }),
-  stopSyncing: (cardId) => invoke<void>("vault_stop_syncing", { cardId }),
+  resolveConflict: (input) => invoke<string>("vault_resolve_conflict", input),
 };
 
 export type { NoteWrite };

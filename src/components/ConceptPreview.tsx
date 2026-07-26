@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { GripHorizontal, Maximize2, Quote, X } from "lucide-react";
 import { Markdown } from "../lib/markdown";
-import { createAnswerGate } from "../lib/modelOutput";
+import { SENTINEL_INSTRUCTION, createAnswerGate } from "../lib/modelOutput";
 import { streamModel } from "../lib/provider";
 
 export interface ConceptState {
@@ -60,8 +60,7 @@ export function ConceptPreview({
         const messages = [
           {
             role: "system" as const,
-            content:
-              "你是知识概念解释助手。用简洁 Markdown 解释指定概念，结合来源句；不输出隐藏推理。回答约 180–360 个中文字符。",
+            content: `你是知识概念解释助手。用简洁 Markdown 解释指定概念，结合来源句。回答约 180–360 个中文字符。\n${SENTINEL_INSTRUCTION}`,
           },
           {
             role: "user" as const,

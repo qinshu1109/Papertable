@@ -20,5 +20,4 @@ export const webVault: VaultBridge = {
   indexedCount: () => Promise.resolve(0),
   conflicts: () => Promise.resolve([]),
   resolveConflict: unavailable,
-  stopSyncing: unavailable,
 };

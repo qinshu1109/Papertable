@@ -1136,26 +1136,28 @@ pub fn conflicted(conn: &Connection) -> Result<Vec<(String, String)>> {
 }
 
 /// 用户选择「以 Papertable 为准」后清除挂起，下次同步会正常覆盖。
-/// 用户选择「以 Papertable 为准」：标记为下一次同步强制覆盖。
+/// 用户对冲突的裁决。**唯一的分发点**：按钮 → 意图字符串 → 这里，一次映射。
 ///
-/// **不能改成把 `last_written_hash` 置空**。那会让 `write_note` 认为这是一个我们从没
-/// 写过、却已经存在的文件，于是按「绝不接管他人文件」的规则再次隔离——按钮点了、
-/// 提示说会覆盖、下一次同步却又报冲突。意图必须显式表达。
-pub fn clear_conflict(conn: &Connection, card_id: &str) -> Result<()> {
+/// 之前是三层成对结构（两个按钮 → store 两个分支 → bridge 两个方法 → 两个命令 →
+/// 两个 db 函数），任何一层接反都表现为「按钮效果对调」，而且没有一处能证明自己。
+/// 真机验收出现过「点了以 Papertable 为准、库里却是 detached」的现场——四层逐一
+/// 核对都没找到接反的证据。塌成一处映射并把落库后的真实状态**返回给 UI 展示**，
+/// 这类事故要么不再发生，要么一发生就自己现形。
+///
+/// - "papertable" → 'force'：下一次同步无条件覆盖。**不能表达成清空基线**——那正好
+///   落进「无基线 + 文件已存在 → 隔离」的防接管规则，按钮就成了空操作。
+/// - "note" → 'detached'：立墓碑，此后不再同步。
+pub fn resolve_conflict(conn: &Connection, card_id: &str, keep: &str) -> Result<&'static str> {
+    let status = match keep {
+        "papertable" => "force",
+        "note" => "detached",
+        other => return Err(Error(format!("未知的冲突处理方式：{other}"))),
+    };
     conn.execute(
-        "UPDATE sync_state SET status = 'force' WHERE card_id = ?1",
-        params![card_id],
+        "UPDATE sync_state SET status = ?2 WHERE card_id = ?1",
+        params![card_id, status],
     )?;
-    Ok(())
-}
-
-/// 用户选择「保留笔记」：给这张卡片立墓碑，此后不再同步。
-pub fn stop_syncing(conn: &Connection, card_id: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE sync_state SET status = 'detached' WHERE card_id = ?1",
-        params![card_id],
-    )?;
-    Ok(())
+    Ok(status)
 }
 
 // ---------------------------------------------------------------------------
@@ -1392,7 +1394,7 @@ mod tests {
         put_sync_state(&conn, "c", "项目/卡片.md", Some("h1"), 1, "synced").unwrap();
         assert_eq!(sync_hash(&conn, "c").unwrap().as_deref(), Some("h1"));
 
-        stop_syncing(&conn, "c").unwrap();
+        assert_eq!(resolve_conflict(&conn, "c", "note").unwrap(), "detached");
         // 状态查得到，同步循环据此整张跳过。
         let (path, status) = sync_record(&conn, "c").unwrap().unwrap();
         assert_eq!(status, "detached");
@@ -1413,7 +1415,12 @@ mod tests {
         put_sync_state(&conn, "c", "项目/卡片.md", Some("h1"), 1, "conflict").unwrap();
         assert_eq!(conflicted(&conn).unwrap().len(), 1);
 
-        clear_conflict(&conn, "c").unwrap();
+        assert_eq!(
+            resolve_conflict(&conn, "c", "papertable").unwrap(),
+            "force",
+            "返回值要如实反映落库状态，UI 靠它显示结果"
+        );
+        assert!(resolve_conflict(&conn, "c", "别的").is_err());
         assert!(conflicted(&conn).unwrap().is_empty(), "横幅上不该再列它");
         let (_, status) = sync_record(&conn, "c").unwrap().unwrap();
         assert_eq!(status, "force", "同步循环要能看出这是一次强制覆盖");

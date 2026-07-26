@@ -51,8 +51,13 @@ export interface VaultBridge {
   resolveLink(name: string): Promise<[string, string | null][]>;
   indexedCount(): Promise<number>;
   conflicts(): Promise<Conflict[]>;
-  /** 「以 Papertable 为准」：清除挂起，下次同步正常覆盖。 */
-  resolveConflict(cardId: string): Promise<void>;
-  /** 「保留笔记」：给这张卡片立墓碑，此后不再同步。 */
-  stopSyncing(cardId: string): Promise<void>;
+  /**
+   * 冲突裁决。`keep` 原样透传按钮意图，映射只发生在 Rust 侧一处；返回**落库后的
+   * 真实状态**（"force" | "detached"）——提示文案必须基于返回值，不是点击意图。
+   */
+  resolveConflict(input: {
+    vault: string;
+    cardId: string;
+    keep: "papertable" | "note";
+  }): Promise<string>;
 }

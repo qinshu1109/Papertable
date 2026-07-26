@@ -1,5 +1,5 @@
 import { incomingEdge } from "./graph";
-import { ANSWER_SENTINEL } from "./modelOutput";
+import { SENTINEL_INSTRUCTION } from "./modelOutput";
 import type {
   AnswerMode,
   BuiltContext,
@@ -28,8 +28,7 @@ export interface BuildContextInput {
  *
  * 这把问题从「识别任意推理散文」（原理上做不到）换成了「识别我们自己规定的起点」。
  */
-const answerContract = `无论你在内部如何思考，最终回答之前必须先单独输出一行：${ANSWER_SENTINEL}
-该标记之前的任何内容都会被丢弃、不会展示给用户，因此不要把结论写在它之前；标记之后只写面向用户的最终回答，不要重复该标记。`;
+const answerContract = SENTINEL_INSTRUCTION;
 
 const instructionFor = (answerMode: AnswerMode) =>
   answerMode === "sources-only"

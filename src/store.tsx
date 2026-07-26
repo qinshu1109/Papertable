@@ -41,7 +41,11 @@ import {
   diffBackupCounts,
   parseLibraryBackup,
 } from "./lib/backup";
-import { createAnswerGate, visibleModelOutput } from "./lib/modelOutput";
+import {
+  SENTINEL_INSTRUCTION,
+  createAnswerGate,
+  visibleModelOutput,
+} from "./lib/modelOutput";
 import { vault } from "./lib/vault";
 import { VAULT_SUBTREE, planProjectSync, syncableCards } from "./lib/vaultPlan";
 import { parseWikilinks, stripWikilinks } from "./lib/wikilink";
@@ -947,8 +951,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const titlePrompt = [
         {
           role: "system" as const,
-          content:
-            "根据用户问题和回答，给出一个不超过 18 个中文字符的知识卡片标题。只输出标题。",
+          content: `根据用户问题和回答，给出一个不超过 18 个中文字符的知识卡片标题。只输出标题。\n${SENTINEL_INSTRUCTION}`,
         },
         {
           role: "user" as const,
@@ -958,8 +961,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const conceptPrompt = [
         {
           role: "system" as const,
-          content:
-            "从文本中找出最多 6 个值得继续探索的概念。只输出 JSON 字符串数组；每一项必须逐字出现在文本中。",
+          content: `从文本中找出最多 6 个值得继续探索的概念。只输出 JSON 字符串数组；每一项必须逐字出现在文本中。\n${SENTINEL_INSTRUCTION}`,
         },
         { role: "user" as const, content: answer.slice(0, 5000) },
       ];
@@ -2361,14 +2363,24 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const resolveVaultConflict = useCallback(
     async (cardId: string, keep: "papertable" | "note") => {
-      if (keep === "papertable") await vault.resolveConflict(cardId);
-      else await vault.stopSyncing(cardId);
+      const vaultPath = latestRef.current.settings.vaultPath;
+      if (!vaultPath) return;
+      // 意图字符串原样透传，这里不做任何分支映射——映射只存在 Rust 侧一处。
+      const status = await vault.resolveConflict({
+        vault: vaultPath,
+        cardId,
+        keep,
+      });
       await refreshVaultConflicts();
+      // 提示基于**落库后的真实状态**，不是点击意图。接线若在任何一层出错，
+      // 这行字会当场把它暴露出来，而不是用一句确认话术盖过去。
       showToast({
         text:
-          keep === "papertable"
-            ? "下次同步会用 Papertable 的内容覆盖那篇笔记。"
-            : "已保留你的笔记，这张卡片不再同步。",
+          status === "force"
+            ? "已标记：下次同步会用 Papertable 的内容覆盖那篇笔记。"
+            : status === "detached"
+              ? "已保留你的笔记，这张卡片不再同步。"
+              : `冲突处理返回了未知状态：${status}`,
       });
     },
     [refreshVaultConflicts, showToast],

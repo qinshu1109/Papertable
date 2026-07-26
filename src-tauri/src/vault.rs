@@ -333,6 +333,19 @@ pub fn rename_note(vault: &Path, from: &[&str], to: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// 删掉某篇笔记旁边的 `.papertable-conflict.md`（若有）。
+///
+/// 三个时机都要清：强制覆盖后（决定已做出）、「保留笔记」后（用户拒绝了这份内容）、
+/// 重命名时（副本挂在旧文件名上，否则永远躺在知识库里像一个没解决的冲突）。
+pub fn remove_conflict_copy(vault: &Path, relative: &[&str]) -> Result<()> {
+    let path = resolve(vault, relative)?;
+    let conflict = path.with_extension("papertable-conflict.md");
+    if conflict.exists() {
+        std::fs::remove_file(conflict)?;
+    }
+    Ok(())
+}
+
 pub fn delete_note(vault: &Path, relative: &[&str]) -> Result<()> {
     let path = resolve(vault, relative)?;
     if path.exists() {

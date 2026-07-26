@@ -237,3 +237,54 @@ test("prose mentioning the user after the latch is not filtered", () => {
     "退相干很快。它不是坍缩。第三句提到 the user interface 也不该被过滤。";
   assert.equal(visibleModelOutput(answer), answer);
 });
+
+// --- 真机截图暴露的两个泄漏 -------------------------------------------------
+
+/**
+ * 截图 09：CozAI 把推理分进独立字段 → content 被标注 final → 直通——而模型按系统
+ * 提示要求仍输出了哨兵，于是 `<<<PAPERTABLE_ANSWER>>>` 被原样渲染进正文并落盘。
+ * 直通不等于不剥协议标记。
+ */
+test("the trusted path strips the sentinel instead of rendering it", () => {
+  const gate = createAnswerGate();
+  gate.push("internal plan", "reasoning");
+  gate.push(`${ANSWER_SENTINEL}\n\n完成`, "final");
+  assert.equal(gate.visible(), "完成");
+  assert.ok(!gate.visible().includes("PAPERTABLE"));
+  assert.ok(gate.reasoning().includes("internal plan"));
+});
+
+test("a sentinel split across trusted chunks never renders, even partially", () => {
+  const gate = createAnswerGate();
+  gate.push("<<<PAPERTABLE_", "final");
+  assert.equal(gate.visible(), "", "半个哨兵一个字符都不能漏");
+  gate.push("ANSWER>>", "final");
+  assert.equal(gate.visible(), "");
+  gate.push(">完成", "final");
+  assert.equal(gate.visible(), "完成");
+  assert.equal(gate.finish(), "完成");
+});
+
+test("text already shown before a late sentinel is kept, marker still stripped", () => {
+  const gate = createAnswerGate();
+  gate.push("先到的正文。", "final");
+  assert.equal(gate.visible(), "先到的正文。");
+  gate.push(`${ANSWER_SENTINEL}后到的正文。`, "final");
+  // 只增不减：已展示的不收回；哨兵本身被剥掉。
+  assert.equal(gate.visible(), "先到的正文。后到的正文。");
+});
+
+/** 真机卡片标题被改成了「I'm looking at the answer 同步」。 */
+test("a leaked title preamble yields nothing rather than an English title", () => {
+  assert.equal(
+    visibleModelOutput(
+      "I'm looking at the answer 同步复测, so a good title is 同步复测。",
+    ),
+    "",
+    "识别不了就什么都不给——调用方会保留旧标题",
+  );
+  assert.equal(
+    visibleModelOutput(`I'm looking at the answer.${ANSWER_SENTINEL}同步复测`),
+    "同步复测",
+  );
+});

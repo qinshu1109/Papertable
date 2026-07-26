@@ -277,6 +277,9 @@ fn vault_sync(
                     watch.mark(std::path::Path::new(&old));
                     watch.mark(std::path::Path::new(&target));
                     vault::rename_note(&root, &old_parts, &parts)?;
+                    // 冲突副本挂在旧文件名上；不清掉就永远是孤儿。
+                    // 若冲突仍然成立，下一次写入会在新路径重新生成它。
+                    vault::remove_conflict_copy(&root, &old_parts)?;
                 }
                 _ => {}
             }
@@ -360,6 +363,7 @@ fn vault_forget(
         watch.mark(std::path::Path::new(&path));
         let parts: Vec<&str> = path.split('/').collect();
         vault::delete_note(&root, &parts)?;
+        vault::remove_conflict_copy(&root, &parts)?;
         db::forget_sync(conn, id).map_err(|e| vault::Error::from(e.to_string()))?;
         removed += 1;
     }
@@ -371,16 +375,31 @@ fn vault_conflicts(db: State<Db>) -> Result<Vec<(String, String)>, db::Error> {
     with_db!(db, conn, db::conflicted(conn))
 }
 
-/// 「以 Papertable 为准」：清除挂起，下一次同步正常覆盖。
+/// 冲突裁决。`keep` 是按钮的意图字符串，映射只发生在 `db::resolve_conflict` 一处；
+/// **返回落库后的真实状态**，UI 的提示必须基于返回值而不是点击意图——接线若再出错，
+/// 提示会当场暴露它。
 #[tauri::command]
-fn vault_resolve_conflict(db: State<Db>, card_id: String) -> Result<(), db::Error> {
-    with_db!(db, conn, db::clear_conflict(conn, &card_id))
-}
-
-/// 「保留笔记」：给这张卡片立墓碑，此后不再同步。
-#[tauri::command]
-fn vault_stop_syncing(db: State<Db>, card_id: String) -> Result<(), db::Error> {
-    with_db!(db, conn, db::stop_syncing(conn, &card_id))
+fn vault_resolve_conflict(
+    db: State<Db>,
+    vault: String,
+    card_id: String,
+    keep: String,
+) -> Result<String, vault::Error> {
+    let root = std::path::PathBuf::from(&vault);
+    let mut guard = db.0.lock().map_err(|_| "数据库锁被毒化".to_string())?;
+    let conn = &mut *guard;
+    let record = db::sync_record(conn, &card_id).map_err(|e| vault::Error::from(e.to_string()))?;
+    let status = db::resolve_conflict(conn, &card_id, &keep)
+        .map_err(|e| vault::Error::from(e.to_string()))?;
+    // 「保留笔记」= 用户拒绝了 Papertable 的那份内容，冲突副本立即清掉。
+    // 「以 Papertable 为准」的副本由下一次强制写入清理。
+    if status == "detached" {
+        if let Some((path, _)) = record {
+            let parts: Vec<&str> = path.split('/').collect();
+            vault::remove_conflict_copy(&root, &parts)?;
+        }
+    }
+    Ok(status.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +523,6 @@ pub fn run() {
             vault_indexed_count,
             vault_conflicts,
             vault_resolve_conflict,
-            vault_stop_syncing,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -36,6 +36,8 @@ export const DRAFT_MARKERS: readonly RegExp[] = [
   /\b(?:first|okay|ok|alright|hmm|so),\s+(?:I|let|we)\b/i,
   /\bthe (?:question|prompt|request|topic) (?:is|asks|seems|appears)\b/i,
   /\bmaking sure to\b/i,
+  // 真机标题泄漏原句「I'm looking at the answer 同步」。
+  /\bI['\u2019]m (?:looking|thinking|going|trying|considering|planning)\b/i,
   /\bdraw on general knowledge\b/i,
   /用户(?:提出|要求|正在|想要|询问|没有|未|问的|想|只|并没有)/,
   /我(?:需要|应该|会|将|必须|注意到|先|来|打算|可以先)/,
@@ -73,18 +75,37 @@ export type OutputChannel = "final" | "reasoning" | "unknown";
  */
 export const ANSWER_SENTINEL = "<<<PAPERTABLE_ANSWER>>>";
 
+/**
+ * 所有模型任务共用的哨兵指令。聊天、标题、概念、概念预览的提示词都必须带上它——
+ * 标题提取曾经没带，模型把推理写进 content，兜底启发式又漏判，于是卡片标题变成了
+ * 「I'm looking at the answer 同步」。
+ */
+export const SENTINEL_INSTRUCTION = `无论你在内部如何思考，正式输出之前必须先单独输出一行：${ANSWER_SENTINEL}
+该标记之前的内容会被丢弃、不会展示，因此不要把结论写在它之前；标记之后只写要求的输出，不要重复该标记。`;
+
 /** 容忍模型把哨兵写得略有出入（大小写、下划线/连字符、两三个尖括号）。 */
 const SENTINEL_RE = /<{2,3}\s*PAPERTABLE[_\- ]?ANSWER\s*>{2,3}/i;
 
-/** 哨兵可能跨 chunk 到达，尾部像半个哨兵时要扣住，绝不能当正文放出去。 */
+/**
+ * 哨兵可能跨 chunk 到达，尾部像半个哨兵时要扣住，绝不能当正文放出去。
+ *
+ * 必须取**最长**匹配尾：旧实现用 `lastIndexOf("<")`，对 `<<<PAPER` 只会扣住
+ * `<PAPER`，前面的 `<<` 就漏出去了。也要认带 `>` 的前缀（`…ANSWER>`、`…ANSWER>>`），
+ * 否则最后几个字符到达的那一拍会把整个哨兵短暂放出去再收回，违反只增不减。
+ */
 function partialSentinelHold(text: string): number {
-  const at = text.lastIndexOf("<");
-  if (at < 0) return 0;
-  const tail = text.slice(at);
-  if (tail.length >= ANSWER_SENTINEL.length) return 0;
-  // 尾部是哨兵某个前缀的一部分就扣住。宽松比较：只看是否由 `<`、字母、下划线、
-  // 连字符、空白组成，这样 `<<<PAPER` 这类残片都会被扣下。
-  return /^<[<\s]*[A-Za-z_\- ]*$/.test(tail) ? tail.length : 0;
+  const max = Math.min(text.length, ANSWER_SENTINEL.length + 2);
+  for (let k = max; k > 0; k--) {
+    const tail = text.slice(text.length - k);
+    if (tail[0] !== "<") continue;
+    if (/^<{1,3}[A-Za-z_\-\s]*>{0,2}$/.test(tail)) return k;
+  }
+  return 0;
+}
+
+/** 完整哨兵：要么后面还有内容，要么以全部三个 `>` 结尾——否则再等一拍。 */
+function sentinelComplete(text: string, m: RegExpExecArray): boolean {
+  return m.index + m[0].length < text.length || m[0].endsWith(">>>");
 }
 
 export interface AnswerGate {
@@ -411,8 +432,23 @@ export function createAnswerGate(): AnswerGate {
   let fallback = "";
 
   function ingest(text: string) {
-    if (sawSentinel || trusted) {
+    if (sawSentinel) {
       answer += text;
+      return;
+    }
+    if (trusted) {
+      // 网关已把推理分进独立字段，content 可信、逐 token 直通——但模型按系统提示
+      // 的要求**仍会输出哨兵**。真机截图里它就被原样渲染进了正文。
+      // 直通不等于不剥协议标记：哨兵是我们的线材符号，永远不是内容。
+      answer += text;
+      const m = SENTINEL_RE.exec(answer);
+      if (m && sentinelComplete(answer, m)) {
+        sawSentinel = true;
+        const pre = answer.slice(0, m.index);
+        const post = answer.slice(m.index + m[0].length);
+        // pre 已经展示过，不能收回（只增不减）；只有纯空白才顺手丢掉。
+        answer = pre.trim() ? pre + post : post.replace(/^\s+/, "");
+      }
       return;
     }
     before += text;
@@ -432,7 +468,7 @@ export function createAnswerGate(): AnswerGate {
     }
 
     const match = SENTINEL_RE.exec(before);
-    if (!match) return;
+    if (!match || !sentinelComplete(before, match)) return;
     sawSentinel = true;
     // 哨兵之后的部分立刻转为正文；哨兵本身与之前的内容留在推理区。
     answer = before.slice(match.index + match[0].length).replace(/^\s+/, "");

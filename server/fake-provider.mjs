@@ -32,10 +32,13 @@ const LEAK_SCENARIOS = [
     content: `<think>internal plan</think>${S}${DECOHERENCE_BODY}`,
   },
   { tag: "思考未闭合", content: "<think>internal plan that never closes" },
+  // 真机形态（CozAI × claude-opus-5）：推理走独立字段，**同时** content 里仍带哨兵
+  // ——模型只是照系统提示办事。可信直通路径必须剥掉它；曾经没剥，
+  // `<<<PAPERTABLE_ANSWER>>>` 被原样渲染进正文并落盘。
   {
     tag: "思考分道",
     reasoning: "internal plan the gateway kept in its own field",
-    content: DECOHERENCE_BODY,
+    content: `${S}${DECOHERENCE_BODY}`,
   },
   // 停止用例需要一个「首句很早完成、整体足够长」的回答，这样「等到有内容再停止」
   // 不必和流式速度赛跑。
@@ -78,10 +81,10 @@ export function fakeScenario(payload) {
 export function fakeCompletion(payload) {
   const lastUser = lastUserMessage(payload);
   const topic = lastUser.replace(/\s+/g, " ").slice(0, 42) || "这个问题";
-  if (payload.task === "title") return "本地验收测试";
+  if (payload.task === "title") return `${S}本地验收测试`;
   // 概念必须逐字出现在正文里；给概念浮层用例一个可点击的词。
   if (payload.task === "concepts")
-    return lastUser.includes("量子退相干") ? '["量子退相干"]' : "[]";
+    return lastUser.includes("量子退相干") ? `${S}["量子退相干"]` : `${S}[]`;
   const scenario = fakeScenario(payload);
   if (scenario) return scenario.content;
   // 默认回答也带哨兵：系统提示要求它，fake provider 必须反映真实契约，
