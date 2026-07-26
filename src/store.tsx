@@ -42,6 +42,8 @@ import {
   parseLibraryBackup,
 } from "./lib/backup";
 import { createAnswerGate, visibleModelOutput } from "./lib/modelOutput";
+import { vault } from "./lib/vault";
+import { VAULT_SUBTREE, planProjectSync, syncableCards } from "./lib/vaultPlan";
 import { preferredProjectCard } from "./lib/projectScope";
 import {
   attentionAsUpsert,
@@ -85,6 +87,7 @@ import type {
   SourceAnchor,
   SessionBoundary,
   Turn,
+  VaultConflict,
   ViewState,
 } from "./types";
 
@@ -327,6 +330,17 @@ interface Ctx {
   importLibraryBackup: (
     text: string,
   ) => Promise<{ equal: boolean; mismatches: string[] }>;
+  /** 桌面版为 true；web 端整个同步 UI 都不出现。 */
+  vaultAvailable: boolean;
+  vaultConflicts: VaultConflict[];
+  vaultPath?: string;
+  vaultSyncedProjects: string[];
+  chooseVaultPath: () => Promise<void>;
+  toggleProjectVaultSync: (projectId: string) => Promise<void>;
+  resolveVaultConflict: (
+    cardId: string,
+    keep: "papertable" | "note",
+  ) => Promise<void>;
   clearLocalData: () => Promise<void>;
   previewProposal: (id: string) => void;
   materializeProposal: (id: string, finalQuestion: string) => string | null;
@@ -404,6 +418,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     null,
   );
   const [toast, setToast] = useState<Toast | null>(null);
+  /** 挂起中的 vault 冲突。常驻横幅，不是 toast——它需要用户做一次二选一。 */
+  const [vaultConflicts, setVaultConflicts] = useState<VaultConflict[]>([]);
+  const vaultTimer = useRef<number | null>(null);
   const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [lastCreated, setLastCreated] = useState<{
     cardId: string;
@@ -2114,6 +2131,152 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [showToast],
   );
 
+  // -------------------------------------------------------------------------
+  // vault 同步（仅桌面版）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 触发时机：卡片完成之后防抖 2 秒，**绝不跟随 500 ms 的流式自动保存**——按那个
+   * 节奏写盘会把 vault 打烂，并让 Obsidian 的索引器永不停歇。
+   *
+   * 依赖里只放 `streamingTurnId` 和已完成卡片的指纹，所以打字、滚动、折叠这些
+   * 纯视图变化不会触发同步。
+   */
+  const syncFingerprint =
+    vault.available && settings.vaultPath
+      ? (settings.vaultSyncedProjects ?? [])
+          .flatMap((projectId) =>
+            syncableCards(cards, projectId).map(
+              (card) => `${card.id}:${card.title}:${card.turns.length}`,
+            ),
+          )
+          .join("|")
+      : "";
+
+  useEffect(() => {
+    if (!hydrated || !vault.available || !settings.vaultPath) return;
+    if (streamingTurnId) return; // 生成中不写：等它落定
+    if (!syncFingerprint) return;
+    if (vaultTimer.current) window.clearTimeout(vaultTimer.current);
+    vaultTimer.current = window.setTimeout(() => {
+      vaultTimer.current = null;
+      void (async () => {
+        const vaultPath = settings.vaultPath;
+        if (!vaultPath) return;
+        const now = Date.now();
+        for (const projectId of settings.vaultSyncedProjects ?? []) {
+          const project = latestRef.current.projects.find(
+            (item) => item.id === projectId,
+          );
+          if (!project) continue;
+          const notes = planProjectSync({
+            project,
+            cards: latestRef.current.cards,
+            edges: latestRef.current.edges,
+            syncedAt: now,
+          });
+          if (!notes.length) continue;
+          try {
+            await vault.sync({ vault: vaultPath, notes, now });
+          } catch (cause) {
+            // 同步失败绝不能影响本地数据；只提示，不回滚任何东西。
+            showToast({
+              text:
+                cause instanceof Error
+                  ? `同步到知识库失败：${cause.message}`
+                  : "同步到知识库失败。",
+            });
+            return;
+          }
+        }
+        await refreshVaultConflicts();
+      })();
+    }, 2000);
+    return () => {
+      if (vaultTimer.current) window.clearTimeout(vaultTimer.current);
+      vaultTimer.current = null;
+    };
+    // 依赖刻意只有这四项：syncFingerprint 已经概括了「哪些已完成卡片会被写出去」，
+    // 而 showToast / refreshVaultConflicts 的身份变化不该重启防抖。
+  }, [hydrated, streamingTurnId, syncFingerprint, settings.vaultPath]);
+
+  useEffect(() => {
+    if (hydrated) void refreshVaultConflicts();
+    // 只在水合完成时读一次挂起列表；此后由每次同步结束后主动刷新。
+  }, [hydrated]);
+
+  const refreshVaultConflicts = useCallback(async () => {
+    if (!vault.available) return;
+    const rows = await vault.conflicts();
+    setVaultConflicts(rows.map(([cardId, path]) => ({ cardId, path })));
+  }, []);
+
+  const chooseVaultPath = useCallback(async () => {
+    const picked = await vault.chooseVault();
+    if (!picked) return;
+    setSettings((current) => ({ ...current, vaultPath: picked }));
+    showToast({
+      text: `已选择知识库：${picked}。Papertable 只会写入其中的 ${VAULT_SUBTREE}/。`,
+    });
+  }, [showToast]);
+
+  /**
+   * 按项目开关同步。开启时立刻整项目写一次，这样用户马上能在 Obsidian 里看到
+   * 结果，而不是要等下一次问答完成才知道有没有生效。
+   */
+  const toggleProjectVaultSync = useCallback(
+    async (projectId: string) => {
+      const enabled = settings.vaultSyncedProjects ?? [];
+      const on = enabled.includes(projectId);
+      const next = on
+        ? enabled.filter((id) => id !== projectId)
+        : [...enabled, projectId];
+      setSettings((current) => ({ ...current, vaultSyncedProjects: next }));
+      if (on || !settings.vaultPath) return;
+
+      const project = projects.find((item) => item.id === projectId);
+      if (!project) return;
+      const notes = planProjectSync({
+        project,
+        cards: latestRef.current.cards,
+        edges: latestRef.current.edges,
+        syncedAt: Date.now(),
+      });
+      if (!notes.length) {
+        showToast({ text: "这个项目还没有已完成的卡片，暂时没有内容可同步。" });
+        return;
+      }
+      const reports = await vault.sync({
+        vault: settings.vaultPath,
+        notes,
+        now: Date.now(),
+      });
+      await refreshVaultConflicts();
+      const conflicts = reports.filter((r) => r.outcome === "conflict").length;
+      showToast({
+        text: conflicts
+          ? `已同步 ${reports.length - conflicts} 篇；${conflicts} 篇因为你在 Obsidian 里改过而挂起。`
+          : `已同步 ${reports.length} 个文件到知识库。`,
+      });
+    },
+    [projects, refreshVaultConflicts, settings, showToast],
+  );
+
+  const resolveVaultConflict = useCallback(
+    async (cardId: string, keep: "papertable" | "note") => {
+      if (keep === "papertable") await vault.resolveConflict(cardId);
+      else await vault.stopSyncing(cardId);
+      await refreshVaultConflicts();
+      showToast({
+        text:
+          keep === "papertable"
+            ? "下次同步会用 Papertable 的内容覆盖那篇笔记。"
+            : "已保留你的笔记，这张卡片不再同步。",
+      });
+    },
+    [refreshVaultConflicts, showToast],
+  );
+
   const exportAllBackup = useCallback(async () => {
     const artifacts = await Promise.all(
       projects.map((project) =>
@@ -2314,6 +2477,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       exportAllBackup,
       exportLibraryBackup,
       importLibraryBackup,
+      vaultAvailable: vault.available,
+      vaultConflicts,
+      vaultPath: settings.vaultPath,
+      vaultSyncedProjects: settings.vaultSyncedProjects ?? [],
+      chooseVaultPath,
+      toggleProjectVaultSync,
+      resolveVaultConflict,
       clearLocalData,
       previewProposal,
       materializeProposal,
@@ -2384,6 +2554,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       exportAllBackup,
       exportLibraryBackup,
       importLibraryBackup,
+      // vault.available 是编译期常量，不需要进依赖数组。
+      vaultConflicts,
+      chooseVaultPath,
+      toggleProjectVaultSync,
+      resolveVaultConflict,
       clearLocalData,
       previewProposal,
       materializeProposal,

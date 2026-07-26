@@ -1,8 +1,8 @@
 # Obsidian vault 同步 · 格式与约束
 
-S0 阶段在真实 vault（`~/主知识库_AI`）里跑过一次 dry-run 之后的结论。S3 的
-`src/lib/vaultNote.ts` 与 Rust 侧写入器按这里实现；`scripts/vault-dryrun.mts`
-是产出这些结论的一次性脚本，S3 落地后删除。
+S0 阶段在真实 vault（`~/主知识库_AI`）里跑过一次 dry-run 之后的结论，S3 已按此实现：
+序列化在 `src/lib/vaultNote.ts`（纯内容）、编排在 `src/lib/vaultPlan.ts`（纯函数）、
+容纳与冲突在 `src-tauri/src/vault.rs`。产出这些结论的一次性脚本已删除。
 
 ## 容纳规则
 
@@ -18,10 +18,9 @@ Papertable 只拥有一个子树：
 晋升到 `10_活跃知识` / `20_项目` 永远由 `knowledge-coach` 的 preview → publish → verify
 完成，Papertable 不碰。
 
-> **待你确认**：vault 的 `AGENTS.md` 写的是「候选与预览只能写入 `80_AI暂存/知识教练`」，
-> 而这里用的是 `80_AI暂存/Papertable/`。`80_AI暂存/技术调研` 已经作为同级目录存在，
-> 所以那条规则看起来是针对 knowledge-coach 流水线的。S3 动工前请确认落点，写错地方
-> 是信任层面的事件，不是可以事后修的 bug。
+落点已与用户确认：`80_AI暂存/Papertable/`，与 `80_AI暂存/技术调研` 平级。
+`AGENTS.md` 里「候选与预览只能写入 `80_AI暂存/知识教练`」那条针对的是 knowledge-coach
+的候选流水线；Papertable 不是那条流水线，混进去反而会污染它的语义。
 
 ## obsidian-linter 带来的硬约束
 
@@ -40,8 +39,9 @@ vault 的 `.obsidian/plugins/obsidian-linter/data.json` 里 `lintOnSave: true`�
 2. 正文逐行 `trimEnd`，`\n{3,}` 折叠为 `\n\n`，首尾 `trim`；
 3. 对 `frontmatter + "\n \n" + body` 取 sha256。
 
-已用 `scripts/hashcheck.mts` 对真实产物验证：模拟 Linter 重排后**字节不同、哈希相同**，
-而真正改动一句正文能被检出。
+`src-tauri/src/vault.rs` 的测试守着这条：模拟 Linter 重排后**字节不同、哈希相同**，
+而真正改动一句正文能被检出。真机上也验证过：手动改一篇已同步的笔记再触发同步，
+文件逐字节未变，旁边生成 `.papertable-conflict.md`，`sync_state` 置为 conflict。
 
 ## 笔记格式
 
@@ -124,3 +124,18 @@ vault 几乎每个目录都有 `.DS_Store`，且 Obsidian 在不停重写 `.obsi
 
 入向在 v1 **永不改动** `Card` / `Turn` / `CardEdge`，只新增 `ReferenceChip`——它是纯增量的，
 完全不需要冲突解决。这是整件事可控的关键。
+
+## 实现落点
+
+| 关注点                     | 位置                                      | 为什么在这                                   |
+| -------------------------- | ----------------------------------------- | -------------------------------------------- |
+| 笔记 / canvas / 索引的内容 | `src/lib/vaultNote.ts`                    | 纯字符串，能在 Node 里测                     |
+| 「这次要写哪些文件」       | `src/lib/vaultPlan.ts`                    | 纯函数；与「怎么写」的失败方式完全不同       |
+| 容纳、归一化哈希、冲突     | `src-tauri/src/vault.rs`                  | 只有这边读回磁盘，哈希必须只有一份实现       |
+| `sync_state`               | `src-tauri/src/db.rs` + schema v2         | 冲突挂起要跨进程重启存活                     |
+| 触发与 UI                  | `src/store.tsx`、`Dialogs.tsx`、`App.tsx` | 完成后防抖 2 秒；按项目 opt-in；常驻冲突横幅 |
+
+**可导出的判据是「这条 AI 轮次没有出问题」，不是「它被标成了 complete」。** `Turn.status`
+是可选的：导入的、demo 播种的、早期版本留下的轮次都没有这个字段。要求
+`status === "complete"` 会把它们全部悄悄排除——真机表现是开了同步却一个文件都不写，
+而且不报错。

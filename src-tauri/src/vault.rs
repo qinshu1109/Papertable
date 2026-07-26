@@ -92,9 +92,6 @@ pub fn resolve(vault: &Path, relative: &[&str]) -> Result<PathBuf> {
             path
         }
     };
-    if real_anchor != real_root && !real_anchor.starts_with(&real_root) {
-        return Err(format!("拒绝写到容纳目录之外：{}", target.display()).into());
-    }
     // 用已解析的祖先重建完整路径，避免路径里残留未解析的符号链接。
     //
     // 目标本身就是那个已存在的祖先时，suffix 为空——**必须直接返回 real_anchor**。
@@ -105,11 +102,19 @@ pub fn resolve(vault: &Path, relative: &[&str]) -> Result<PathBuf> {
         .strip_prefix(&anchor)
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    Ok(if suffix.as_os_str().is_empty() {
+    let full = if suffix.as_os_str().is_empty() {
         real_anchor
     } else {
         real_anchor.join(suffix)
-    })
+    };
+
+    // 断言的对象必须是**解析后的完整路径**，不是那个已存在的祖先。容纳根首次创建
+    // 之前，最深的已存在祖先在根的*上面*（例如 80_AI暂存），拿它去比前缀会把每一次
+    // 合法的首次写入都拒掉。
+    if full != real_root && !full.starts_with(&real_root) {
+        return Err(format!("拒绝写到容纳目录之外：{}", target.display()).into());
+    }
+    Ok(full)
 }
 
 fn existing_ancestor(path: &Path) -> PathBuf {
@@ -316,6 +321,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(root(dir.path())).unwrap();
         dir
+    }
+
+    /// 首次同步时 `80_AI暂存/Papertable/` 还不存在，最深的已存在祖先在根的*上面*。
+    /// 上面所有测试都预先建好了根，因此漏掉了这条最常见的路径——真机上第一次开启
+    /// 同步时它一个文件也写不出来，而且不报错。
+    #[test]
+    fn the_first_write_creates_the_root_instead_of_being_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("80_AI暂存")).unwrap();
+        let report = write_note(dir.path(), &["项目", "首篇.md"], "# 首篇\n", None)
+            .expect("容纳根尚不存在时，首次写入必须成功并把它建出来");
+        assert_eq!(report.outcome, WriteOutcome::Created);
+        assert!(root(dir.path()).join("项目/首篇.md").exists());
+    }
+
+    /// vault 本身就不存在时应当报错，而不是在别处凭空造一棵树。
+    #[test]
+    fn a_missing_vault_is_an_error() {
+        assert!(resolve(Path::new("/nonexistent-vault-xyz"), &["a.md"]).is_err());
     }
 
     #[test]

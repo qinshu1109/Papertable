@@ -296,6 +296,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     attentionMetrics,
     attentionPaused,
     setAttentionPaused,
+    vaultAvailable,
+    chooseVaultPath,
+    toggleProjectVaultSync,
+    vaultPath,
+    vaultSyncedProjects,
+    projects,
   } = useStore();
   const [testing, setTesting] = useState(false);
   const [savingConnection, setSavingConnection] = useState(false);
@@ -487,6 +493,66 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         <p className="note-line">
           这里只统计本机行为；第一阶段不连接 MemOS，也不会为提案额外调用模型。
         </p>
+        {/* web 端整块不出现：浏览器里的网页碰不到硬盘，这不是「暂未实现」。 */}
+        {vaultAvailable && (
+          <>
+            <div
+              className="fmt-name"
+              style={{ marginTop: 22, marginBottom: 8 }}
+            >
+              知识库同步
+            </div>
+            <p className="note-line" style={{ marginTop: 0 }}>
+              Papertable 只写入 <code>80_AI暂存/Papertable/</code>
+              ，绝不碰知识库的 其他位置。正式知识请照常经 knowledge-coach
+              发布。你在 Obsidian
+              里改过的笔记不会被覆盖——会另存冲突文件并暂停那张卡片的同步。
+            </p>
+            <button className="btn" onClick={() => void chooseVaultPath()}>
+              <FolderTree size={14} />
+              {vaultPath ? "更换知识库目录" : "选择知识库目录"}
+            </button>
+            {vaultPath && (
+              <>
+                <p className="note-line" style={{ marginTop: 8 }}>
+                  当前：<code>{vaultPath}</code>
+                </p>
+                <div className="fmt-desc" style={{ margin: "12px 0 6px" }}>
+                  按项目开启（默认全部关闭）
+                </div>
+                {projects.map((project) => {
+                  const on = vaultSyncedProjects.includes(project.id);
+                  return (
+                    <button
+                      key={project.id}
+                      className={`fmt-option${on ? " sel" : ""}`}
+                      onClick={() => void toggleProjectVaultSync(project.id)}
+                      aria-pressed={on}
+                    >
+                      <span className="fmt-icon">
+                        <FolderTree size={15} />
+                      </span>
+                      <span style={{ minWidth: 0, flex: 1 }}>
+                        <span className="fmt-name">{project.name}</span>
+                        <span className="fmt-desc">
+                          {on ? "已同步到知识库" : "未同步"}
+                        </span>
+                      </span>
+                      {on && (
+                        <Check
+                          size={15}
+                          color="var(--accent)"
+                          style={{ marginTop: 6 }}
+                        />
+                      )}
+                    </button>
+                  );
+                })}
+              </>
+            )}
+          </>
+        )}
+
         <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
           本地数据
         </div>
