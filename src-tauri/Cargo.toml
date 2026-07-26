@@ -27,6 +27,7 @@ tauri-plugin-dialog = "2"
 # 无法包进一个可回滚的事务——只能把 BEGIN/COMMIT 当字符串发出去然后祈祷。
 # applyChanges 每 120 ms 触发一次（流式中 500 ms），它必须是一次 IPC、一个事务。
 # 另外 vault 写入器在 Rust 侧，需要读同一个库。
+ureq = { version = "2", features = ["json", "tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]

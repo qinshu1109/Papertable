@@ -1,5 +1,5 @@
-import type { LlmMessage } from "../types";
-import type { OutputChannel } from "./modelOutput";
+import type { LlmMessage } from "../../types";
+import type { OutputChannel } from "../modelOutput";
 
 export interface ProviderHealth {
   configured: boolean;

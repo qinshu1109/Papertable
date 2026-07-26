@@ -1,9 +1,20 @@
 mod db;
+mod llm;
 
 use db::{AttentionSnapshot, AttentionUpsert, RemovedProject, WorkspaceSnapshot, WorkspaceUpsert};
+use llm::{ChatRequest, ProviderConfig, ProviderHealth, PublicConfig, StreamEvent};
 use rusqlite::Connection;
+use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Mutex;
+use tauri::ipc::Channel;
 use tauri::{Manager, State};
+
+/// 模型配置只住在本进程内存和 0600 的配置文件里，前端拿不到密钥本身。
+pub struct Provider {
+    config: Mutex<ProviderConfig>,
+    path: PathBuf,
+}
 
 /// 单写者。SQLite 自己是单写者 + WAL，这把锁额外保证的是调用方观察到的完成顺序，
 /// 从而让前端「写成功后才推进基线」是安全的——语义等价于 dexie.ts 里的 `enqueue`。
@@ -101,6 +112,59 @@ fn import_library(
     })
 }
 
+// ---------------------------------------------------------------------------
+// 模型通道
+// ---------------------------------------------------------------------------
+
+fn provider_snapshot(state: &State<Provider>) -> Result<ProviderConfig, llm::Error> {
+    Ok(state
+        .config
+        .lock()
+        .map_err(|_| "配置锁被毒化".to_string())?
+        .clone())
+}
+
+#[tauri::command]
+fn provider_health(state: State<Provider>) -> Result<ProviderHealth, llm::Error> {
+    Ok(llm::health(&provider_snapshot(&state)?))
+}
+
+#[tauri::command]
+fn provider_config(state: State<Provider>) -> Result<PublicConfig, llm::Error> {
+    Ok(PublicConfig::from(&provider_snapshot(&state)?))
+}
+
+#[tauri::command]
+fn save_provider_config(state: State<Provider>, input: Value) -> Result<PublicConfig, llm::Error> {
+    let mut guard = state
+        .config
+        .lock()
+        .map_err(|_| "配置锁被毒化".to_string())?;
+    let next = llm::normalize(&input, &guard)?;
+    llm::save_config(&state.path, &next)?;
+    *guard = next;
+    Ok(PublicConfig::from(&*guard))
+}
+
+#[tauri::command]
+fn llm_generate(state: State<Provider>, request: ChatRequest) -> Result<String, llm::Error> {
+    llm::generate(&provider_snapshot(&state)?, &request)
+}
+
+/// 流式生成。事件走 Tauri `Channel`，替代浏览器里的 SSE 解析循环。
+/// 阻塞式 HTTP 读放到线程池里，避免占住 IPC 线程。
+#[tauri::command]
+async fn llm_stream(
+    state: State<'_, Provider>,
+    request: ChatRequest,
+    channel: Channel<StreamEvent>,
+) -> Result<(), llm::Error> {
+    let config = provider_snapshot(&state)?;
+    tauri::async_runtime::spawn_blocking(move || llm::stream(&config, &request, &channel))
+        .await
+        .map_err(|e| llm::Error::from(e.to_string()))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -119,6 +183,12 @@ pub fn run() {
             let conn = db::open(&dir.join("papertable.sqlite3"))
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             app.manage(Db(Mutex::new(conn)));
+
+            let path = llm::config_path(&dir);
+            app.manage(Provider {
+                config: Mutex::new(llm::load_config(&path)),
+                path,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -134,6 +204,11 @@ pub fn run() {
             save_workspace,
             clear_workspace,
             import_library,
+            provider_health,
+            provider_config,
+            save_provider_config,
+            llm_generate,
+            llm_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
