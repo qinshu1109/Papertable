@@ -485,11 +485,30 @@ const FORBIDDEN = [
   "<think>",
   "internal plan",
   "The user didn't give me",
+  // 真机上泄漏的那两句：普通说明文英语，任何短语枚举都识别不了，
+  // 只有哨兵能把它挡在正文之外。
+  "The core issue is that qubits",
+  "I'm thinking of it like",
+  // 哨兵本身也不能出现在用户看到的内容里。
+  "PAPERTABLE_ANSWER",
 ];
 
+/**
+ * 只序列化**用户可见的正文字段**，刻意排除 `turn.reasoning`。
+ *
+ * 之前这里序列化整个 turns + cards，而推理现在合法地存在独立字段里，于是断言会
+ * 对着一份正确的数据报错。要验的是「推理不在正文里」，不是「推理不在数据库里」
+ * ——后者与产品要求相反：推理要能被折叠展开。
+ */
 async function persistedBlob(page: import("@playwright/test").Page) {
   const state = await workspaceCounts(page);
-  return JSON.stringify([state.turns, state.cards]);
+  const turns = (state.turns as Record<string, unknown>[]).map(
+    ({ reasoning, ...rest }) => {
+      void reasoning;
+      return rest;
+    },
+  );
+  return JSON.stringify([turns, state.cards]);
 }
 
 function expectClean(blob: string) {
@@ -560,6 +579,62 @@ test("an unterminated thinking tag is reported, not partially shown", async ({
   ).toBeVisible();
   await expect(page.locator("body")).not.toContainText("<think");
   await expect(page.locator("body")).not.toContainText("internal plan");
+  await page.waitForTimeout(700);
+  expectClean(await persistedBlob(page));
+});
+
+/**
+ * 真机上失效的正是这一条：推理是普通说明文英语，与正文之间连换行都没有。
+ * 旧的短语枚举一条都没命中，passthrough 闩锁又把一次漏判放大成全量泄漏。
+ */
+test("reasoning goes to a separate collapsible block, never into the answer", async ({
+  page,
+}) => {
+  await askInNewProject(page, "思考泄漏：解释量子退相干");
+  await expect(page.getByText("量子退相干是指系统与环境纠缠")).toBeVisible();
+
+  // 正文区绝不能出现推理，也不能出现哨兵。
+  const article = page.getByRole("article");
+  await expect(article).not.toContainText("The core issue is that qubits");
+  await expect(article).not.toContainText("PAPERTABLE_ANSWER");
+
+  // 推理在独立的折叠块里，点开才看得到。
+  //
+  // 等 aria-expanded="false" 而不是等文字出现：这既是「生成完成后自动折叠」这条
+  // 行为的断言，也保证流已经停下——正文还在增长时整个块的位置一直在动，点击的
+  // 可操作性检查过不了。
+  const head = page.locator(".reasoning-head");
+  // 完成后自动折叠——这本身就是要验的行为。
+  await expect(head).toHaveAttribute("aria-expanded", "false");
+  // 再等后台的标题提取落地。它会改卡片标题、引起一次布局位移，位移期间点击的
+  // 可操作性检查过不了。（真人也会遇到这一下轻微跳动，但那是既有行为，不在本次范围。）
+  await expect(
+    page.getByRole("heading", { name: "本地验收测试" }),
+  ).toBeVisible();
+  await head.click();
+  await expect(page.locator(".reasoning-body")).toContainText(
+    "The core issue is that qubits",
+  );
+
+  await page.waitForTimeout(700);
+  const state = await workspaceCounts(page);
+  // 落盘检查：推理只能在 reasoning 字段，绝不能在 content 里。
+  const turns = state.turns as { content: string; reasoning?: string }[];
+  for (const turn of turns)
+    expect(turn.content, "推理泄漏进了 turn.content").not.toContain(
+      "The core issue is that qubits",
+    );
+  expect(
+    turns.some((turn) => turn.reasoning?.includes("The core issue")),
+    "推理应当存在独立的 reasoning 字段里",
+  ).toBe(true);
+});
+
+test("without a sentinel the answer still arrives, just at the end", async ({
+  page,
+}) => {
+  await askInNewProject(page, "无哨兵：随便问问");
+  await expect(page.getByText("这是没有哨兵的散文回答")).toBeVisible();
   await page.waitForTimeout(700);
   expectClean(await persistedBlob(page));
 });

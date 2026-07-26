@@ -224,7 +224,7 @@ export function ProjectSidebar({
             style={{
               padding: "18px 10px",
               fontSize: 12,
-              color: "var(--ink-3)",
+              color: "var(--ink-3-aa)",
               lineHeight: 1.7,
             }}
           >

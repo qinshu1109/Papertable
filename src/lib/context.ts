@@ -1,4 +1,5 @@
 import { incomingEdge } from "./graph";
+import { ANSWER_SENTINEL } from "./modelOutput";
 import type {
   AnswerMode,
   BuiltContext,
@@ -18,10 +19,22 @@ export interface BuildContextInput {
   pendingUserText?: string;
 }
 
+/**
+ * 正文起点的硬约束。
+ *
+ * 「不输出隐藏推理过程」这种客套要求模型会直接无视——真机上它输出了 1573 字符的
+ * 英文推理，紧接着不加分隔就写正文。所以改成一个**可机械判定的边界**：正文必须以
+ * 哨兵开头，哨兵之前的一切都被丢弃。
+ *
+ * 这把问题从「识别任意推理散文」（原理上做不到）换成了「识别我们自己规定的起点」。
+ */
+const answerContract = `无论你在内部如何思考，最终回答之前必须先单独输出一行：${ANSWER_SENTINEL}
+该标记之前的任何内容都会被丢弃、不会展示给用户，因此不要把结论写在它之前；标记之后只写面向用户的最终回答，不要重复该标记。`;
+
 const instructionFor = (answerMode: AnswerMode) =>
   answerMode === "sources-only"
-    ? "你是 Papertable 的知识探索助手。只能使用下方明确提供的上下文；若证据不足，请直接说明，不得用通用知识补齐结论。不得伪造引用、来源或已提供的证据。使用清晰的 Markdown 回答，不输出隐藏推理过程。"
-    : "你是 Papertable 的知识探索助手。优先使用下方明确提供的当前卡片、来源主题、精确选区、冻结分支历史和显式引用；若材料不足，可以使用通用知识继续回答。回答时必须清楚区分哪些判断来自用户材料，哪些是通用知识补充或推断。不得伪造引用、来源或已提供的证据。使用清晰的 Markdown 回答，不输出隐藏推理过程。";
+    ? `你是 Papertable 的知识探索助手。只能使用下方明确提供的上下文；若证据不足，请直接说明，不得用通用知识补齐结论。不得伪造引用、来源或已提供的证据。使用清晰的 Markdown 回答。\n${answerContract}`
+    : `你是 Papertable 的知识探索助手。优先使用下方明确提供的当前卡片、来源主题、精确选区、冻结分支历史和显式引用；若材料不足，可以使用通用知识继续回答。回答时必须清楚区分哪些判断来自用户材料，哪些是通用知识补充或推断。不得伪造引用、来源或已提供的证据。使用清晰的 Markdown 回答。\n${answerContract}`;
 
 const toMessages = (card: Card, pendingUserText?: string): LlmMessage[] => {
   const messages: LlmMessage[] = card.turns

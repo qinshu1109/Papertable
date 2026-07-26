@@ -19,6 +19,8 @@ pub struct SharedDb(Arc<Mutex<Connection>>);
 pub struct Provider {
     config: Mutex<ProviderConfig>,
     path: PathBuf,
+    /// 应用数据目录，用于按标记文件开启 SSE 抓取。
+    data_dir: PathBuf,
     /// 密钥实际是从钥匙串读到的，还是回落到了文件。设置页要如实展示。
     from_keychain: Mutex<bool>,
 }
@@ -181,7 +183,8 @@ async fn llm_stream(
     channel: Channel<StreamEvent>,
 ) -> Result<(), llm::Error> {
     let config = provider_snapshot(&state)?;
-    tauri::async_runtime::spawn_blocking(move || llm::stream(&config, &request, &channel))
+    let tap = llm::SseTap::open(Some(&state.data_dir));
+    tauri::async_runtime::spawn_blocking(move || llm::stream(&config, &request, &channel, &tap))
         .await
         .map_err(|e| llm::Error::from(e.to_string()))?
 }
@@ -421,6 +424,7 @@ pub fn run() {
             app.manage(Provider {
                 config: Mutex::new(config),
                 path,
+                data_dir: dir.clone(),
                 from_keychain: Mutex::new(from_keychain),
             });
             Ok(())

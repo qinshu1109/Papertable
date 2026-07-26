@@ -262,7 +262,9 @@ fn url_parts(raw: &str) -> Option<UrlParts> {
 // 而其实躺在文件里。
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
 const KEYRING_SERVICE: &str = "com.papertable.app";
+#[cfg(not(test))]
 const KEYRING_USER: &str = "provider-api-key";
 
 #[derive(Serialize, Debug, PartialEq, Eq, Clone, Copy)]
@@ -274,16 +276,38 @@ pub enum KeySource {
     None,
 }
 
+/// **单元测试完全不碰钥匙串。**
+///
+/// 两个理由，都是踩过的：
+/// 1. 用真实服务名时，`cargo test` 把假密钥 `"k"` 写进了用户真实的钥匙串，覆盖掉
+///    真密钥——应用随后拿着 `"k"` 请求，报 INVALID_API_KEY。测试破坏了环境。
+/// 2. 换成独立服务名之后，未签名的测试二进制创建新条目会弹系统授权框，在
+///    非交互环境里直接把 `cargo test` 挂死。
+///
+/// 单元测试因此只走文件回落分支——那本来也是它该验的部分。钥匙串路径由签名后的
+/// 应用在首次保存时走通，见 docs/DESKTOP.md。
+#[cfg(test)]
+fn read_keychain() -> Option<String> {
+    None
+}
+#[cfg(test)]
+fn write_keychain(_key: &str) -> bool {
+    false
+}
+
+#[cfg(not(test))]
 fn keyring_entry() -> Option<keyring::Entry> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()
 }
 
+#[cfg(not(test))]
 fn read_keychain() -> Option<String> {
     let value = keyring_entry()?.get_password().ok()?;
     (!value.is_empty()).then_some(value)
 }
 
 /// 写钥匙串；不可用时返回 false，由调用方回落到文件。
+#[cfg(not(test))]
 fn write_keychain(key: &str) -> bool {
     let Some(entry) = keyring_entry() else {
         return false;
@@ -426,6 +450,41 @@ pub fn extract_message(payload: &Value) -> String {
         .to_string()
 }
 
+/// 诊断:上游 SSE 原始帧转存。
+///
+/// 存在 `<app_data>/DEBUG_SSE` 这个标记文件时，把每一行 `data:` 原样追加到
+/// `<app_data>/sse.log`。用标记文件而不是环境变量，是因为双击启动的应用拿不到
+/// 环境变量。
+///
+/// 原始帧里**不含** API 密钥（密钥在请求头里），但会包含问题与回答文本，
+/// 所以只在需要排查时打开，用完删掉标记文件。
+pub struct SseTap(Option<PathBuf>);
+
+impl SseTap {
+    pub fn open(app_data: Option<&Path>) -> Self {
+        let Some(dir) = app_data else {
+            return Self(None);
+        };
+        if dir.join("DEBUG_SSE").exists() {
+            Self(Some(dir.join("sse.log")))
+        } else {
+            Self(None)
+        }
+    }
+
+    fn write(&self, line: &str) {
+        let Some(path) = &self.0 else { return };
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(15))
@@ -441,11 +500,22 @@ pub fn health(config: &ProviderConfig) -> ProviderHealth {
             message: "尚未配置模型密钥，请在设置页填写。".into(),
         };
     }
+    // **不能用 /models 做健康检查。** CozAI 的 /models 不校验密钥，于是一个无效
+    // 密钥也会返回 200，界面显示「可开始真实生成」，而真正提问时才报
+    // INVALID_API_KEY。验收时就是这么被误导的：钥匙串里存的是测试残留的 "k"，
+    // 连接测试却是绿的。
+    //
+    // 改成打真实的 chat/completions：一个 1 token 的最小请求，会真正走鉴权。
     let response = agent()
-        .get(&format!("{}/models", config.base_url))
+        .post(&format!("{}/chat/completions", config.base_url))
         .set("authorization", &format!("Bearer {}", config.api_key))
-        .timeout(std::time::Duration::from_secs(8))
-        .call();
+        .set("content-type", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .send_json(json!({
+            "model": config.model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }));
     match response {
         Ok(_) => ProviderHealth {
             configured: true,
@@ -502,6 +572,7 @@ pub fn stream(
     config: &ProviderConfig,
     request: &ChatRequest,
     channel: &Channel<StreamEvent>,
+    tap: &SseTap,
 ) -> Result<()> {
     if let Err(e) = validate(request) {
         let _ = channel.send(StreamEvent::Error {
@@ -551,6 +622,7 @@ pub fn stream(
             continue;
         };
         let data = data.trim();
+        tap.write(data);
         if data.is_empty() || data == "[DONE]" {
             continue;
         }

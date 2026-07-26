@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 3;
+const USER_VERSION: i64 = 4;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -96,6 +96,9 @@ pub struct Turn {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "skip_none")]
     pub favorite: Option<bool>,
+    /// 与 content 物理隔离；只用于可折叠展示。
+    #[serde(default, skip_serializing_if = "skip_none")]
+    pub reasoning: Option<String>,
 }
 
 /// 落库的卡片行不含 turns，与 Dexie 侧的 `CardRecord` 一致。
@@ -260,10 +263,30 @@ pub fn open_in_memory() -> Result<Connection> {
 /// schema.sql 里的 DDL 全部是 `IF NOT EXISTS`，所以「版本落后就整份重放一遍」是
 /// 幂等的，比维护一串增量 DDL 更难写错。注意判据必须是 `< USER_VERSION` 而不是
 /// `< 1`——否则已经在 v1 的库永远拿不到后续版本新增的表。
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version < USER_VERSION {
-        conn.execute_batch(SCHEMA)?;
+        // SCHEMA 里除最后的 ALTER TABLE 之外都是 IF NOT EXISTS，可以整份重放。
+        // ALTER TABLE ADD COLUMN 不幂等，所以单独判断列是否已存在。
+        let (create_part, alter_part) = match SCHEMA.find("ALTER TABLE") {
+            Some(at) => SCHEMA.split_at(at),
+            None => (SCHEMA, ""),
+        };
+        conn.execute_batch(create_part)?;
+        if !alter_part.is_empty() && !has_column(conn, "turns", "reasoning")? {
+            conn.execute_batch(alter_part)?;
+        }
         conn.execute_batch(&format!("PRAGMA user_version = {USER_VERSION}"))?;
     }
     // 每次打开都要重设：foreign_keys 是 per-connection 的，不随库持久化。
@@ -346,8 +369,8 @@ fn read_card_records(conn: &Connection) -> Result<Vec<CardRecord>> {
 
 fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, card_id, role, content, created_at, streaming, status, error, model, favorite
-         FROM turns ORDER BY card_id, created_at",
+        "SELECT id, card_id, role, content, created_at, streaming, status, error, model, favorite,
+                reasoning FROM turns ORDER BY card_id, created_at",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(TurnRecord {
@@ -362,6 +385,7 @@ fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
                 error: row.get(7)?,
                 model: row.get(8)?,
                 favorite: row.get::<_, Option<i64>>(9)?.map(|v| v != 0),
+                reasoning: row.get(10)?,
             },
         })
     })?;
@@ -613,13 +637,13 @@ fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
         // card_id 也在 DO UPDATE 里：改道会把一条轮次挂到另一张卡片下。
         tx.execute(
             "INSERT INTO turns (id, card_id, role, content, created_at, streaming, status,
-                                error, model, favorite)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                                error, model, favorite, reasoning)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
              ON CONFLICT(id) DO UPDATE SET
                card_id = excluded.card_id, role = excluded.role, content = excluded.content,
                created_at = excluded.created_at, streaming = excluded.streaming,
                status = excluded.status, error = excluded.error, model = excluded.model,
-               favorite = excluded.favorite",
+               favorite = excluded.favorite, reasoning = excluded.reasoning",
             params![
                 turn.id,
                 record.card_id,
@@ -631,6 +655,7 @@ fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
                 turn.error,
                 turn.model,
                 turn.favorite.map(|v| v as i64),
+                turn.reasoning,
             ],
         )?;
     }
@@ -1239,6 +1264,7 @@ mod tests {
                 error: None,
                 model: None,
                 favorite: None,
+                reasoning: None,
             },
         }
     }

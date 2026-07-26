@@ -14,6 +14,28 @@ import type {
 } from "../types";
 
 const now = () => Date.now();
+
+/**
+ * 把 `Turn.reasoning` 从任何要离开本机的序列化里剥掉。
+ *
+ * 隔离字段只解决「正文里不会混进推理」，不自动解决「推理不会被导出」——
+ * 无损包的 base64 transport 和 graph.json 都是整卡片序列化，会把它一起带走。
+ * 代价是重新导入后推理不再存在；那不是值得跨导出保留的用户数据。
+ */
+function withoutReasoning(card: Card): Card {
+  if (!card.turns.some((turn) => turn.reasoning)) return card;
+  return {
+    ...card,
+    turns: card.turns.map(({ reasoning, ...turn }) => {
+      void reasoning;
+      return turn;
+    }),
+  };
+}
+
+function projectWithoutReasoning(project: PortableProject): PortableProject {
+  return { ...project, cards: project.cards.map(withoutReasoning) };
+}
 const id = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 const safeName = (value: string) =>
   value
@@ -35,7 +57,8 @@ function metadata(project: PortableProject, card: Card) {
   };
 }
 
-export function cardMarkdown(project: PortableProject, card: Card) {
+export function cardMarkdown(project: PortableProject, input: Card) {
+  const card = withoutReasoning(input);
   const meta = metadata(project, card);
   const frontmatter = Object.entries(meta)
     .filter(([, value]) => value !== undefined)
@@ -185,7 +208,8 @@ function assemble(
   };
 }
 
-export function projectBundle(project: PortableProject) {
+export function projectBundle(input: PortableProject) {
+  const project = projectWithoutReasoning(input);
   const zip = new JSZip();
   const root = safeName(project.project.name);
   // Whitelist the portable contract. Experimental event/session/proposal data
@@ -224,7 +248,8 @@ export function projectBundle(project: PortableProject) {
     .then((blob) => ({ filename: `${root}.papertable.zip`, blob }));
 }
 
-export function markdownFolder(project: PortableProject) {
+export function markdownFolder(input: PortableProject) {
+  const project = projectWithoutReasoning(input);
   const zip = new JSZip();
   const root = safeName(project.project.name);
   for (const card of project.cards)
@@ -241,7 +266,8 @@ export function markdownFolder(project: PortableProject) {
     .then((blob) => ({ filename: `${root}-markdown.zip`, blob }));
 }
 
-export function jsonCanvas(project: PortableProject) {
+export function jsonCanvas(input: PortableProject) {
+  const project = projectWithoutReasoning(input);
   const zip = new JSZip();
   const root = safeName(project.project.name);
   const nodes = project.cards.map((card, index) => ({

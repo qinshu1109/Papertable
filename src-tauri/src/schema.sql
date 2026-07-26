@@ -159,3 +159,7 @@ CREATE TABLE IF NOT EXISTS vault_index (
 );
 CREATE INDEX IF NOT EXISTS vault_index_name ON vault_index(name);
 CREATE INDEX IF NOT EXISTS vault_index_note ON vault_index(note_id);
+
+-- v4：推理内容独立列，与正文物理隔离。
+-- 它只用于可折叠展示，绝不进入发给模型的消息、导出包或知识库笔记。
+ALTER TABLE turns ADD COLUMN reasoning TEXT;

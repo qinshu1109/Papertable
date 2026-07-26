@@ -1043,7 +1043,7 @@ textarea {
 .graph-title {
   font-size: 11px;
   letter-spacing: 0.1em;
-  color: var(--ink-3);
+  color: var(--ink-3-aa);
   font-weight: 600;
   text-transform: uppercase;
 }
@@ -2460,4 +2460,68 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ============================================================
+   思考过程折叠块
+   内容来自 turn.reasoning，与 turn.content 是两个字段；正文的渲染路径不经过这里。
+   ============================================================ */
+/* 槽位用 **padding** 而不是让 .reasoning-block 带 margin-top。
+   推理块是轮次的第一个在流子元素，margin-top 会与 .turn 一起塌陷出去，把整个轮次
+   （连带绝对定位的工具条）一并下移，相对位置根本没变。padding 不塌陷。
+
+   要避开的是悬浮的 .turn-toolbar（absolute; top: -12px; right: 0，约 33px 高）。
+   其他轮次让它压在正文文字上无所谓——点文字不是操作；而这里是一个**可点击的头部**，
+   被压住就等于点不动。实测未避开时头部中心 (649,269) 正好落在工具条 (y 238–271) 内。 */
+.reasoning-slot {
+  padding-top: 28px;
+}
+.reasoning-block {
+  margin: 0 0 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-btn);
+  background: var(--raised);
+  overflow: hidden;
+}
+.reasoning-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--ink-2);
+  text-align: left;
+  transition: background var(--d-fast) var(--e-out);
+}
+.reasoning-head:hover {
+  background: rgba(52, 43, 38, 0.04);
+}
+.reasoning-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--ink-3-aa);
+  font-variant-numeric: tabular-nums;
+}
+.reasoning-chevron {
+  flex-shrink: 0;
+  color: var(--ink-3-aa);
+  transition: transform var(--d-fast) var(--e-out);
+}
+.reasoning-block.open .reasoning-chevron {
+  transform: rotate(180deg);
+}
+.reasoning-body {
+  max-height: 260px;
+  padding: 0 10px 9px;
+  border-top: 1px solid var(--line-soft);
+}
+.reasoning-body pre {
+  margin: 9px 0 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
 }

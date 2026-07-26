@@ -1040,6 +1040,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // 不可能把未释放的草稿刷到盘上。
       const gate = createAnswerGate();
       let answer = "";
+      let reasoning = "";
       try {
         const built = buildContext({
           cards: input.cardsSnapshot,
@@ -1056,18 +1057,28 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           if (event.type !== "token") continue;
           gate.push(event.text, event.channel);
           const nextAnswer = gate.visible();
-          if (nextAnswer === answer) continue;
+          const nextReasoning = gate.reasoning();
+          if (nextAnswer === answer && nextReasoning === reasoning) continue;
           answer = nextAnswer;
+          reasoning = nextReasoning;
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
-              turn.id === aiId ? { ...turn, content: answer } : turn,
+              turn.id === aiId
+                ? {
+                    ...turn,
+                    content: answer,
+                    // 独立字段。正文永远只来自 gate.visible()。
+                    ...(reasoning ? { reasoning } : {}),
+                  }
+                : turn,
             ),
           }));
         }
         if (!controller.signal.aborted) {
           // 收尾 flush 只在正常结束时发生；中断路径永远不会走到这里。
           answer = gate.finish();
+          reasoning = gate.reasoning();
           if (!answer.trim())
             throw new Error("模型没有返回可显示的最终文本，请重试。");
           updateCard(input.cardId, (card) => ({
@@ -1077,6 +1088,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 ? {
                     ...turn,
                     content: answer,
+                    ...(reasoning ? { reasoning } : {}),
                     streaming: false,
                     status: "complete",
                   }

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createAnswerGate, visibleModelOutput } from "./modelOutput";
+import {
+  ANSWER_SENTINEL,
+  createAnswerGate,
+  visibleModelOutput,
+} from "./modelOutput";
 
 test("normal final output streams through unchanged", () => {
   assert.equal(
@@ -78,12 +82,58 @@ test("openings the anchored whitelist missed are all caught", () => {
 
 // --- 短回答仍要能流式 -------------------------------------------------------
 
-test("a short answer still streams at sentence granularity", () => {
+/**
+ * 契约变更（有代价，刻意为之）：**没有哨兵时，散文开头的正文要等流结束才出现。**
+ *
+ * 旧行为是按句子边streaming释放，靠短语枚举判断每一句是不是推理。真机上模型输出了
+ * 1573 字符的英文推理散文，一条都没命中，而 passthrough 闩锁把这一次漏判放大成了
+ * 全量泄漏。散文开头就是无法区分的情形，宁可晚一点也不能混进推理。
+ *
+ * 我们自己的系统提示总会要求哨兵，所以这个代价只落在忽略格式要求的模型上。
+ */
+test("without a sentinel, prose is withheld until the stream ends", () => {
   const gate = createAnswerGate();
   gate.push("量子退相干");
-  assert.equal(gate.visible(), "", "半句话不释放");
+  assert.equal(gate.visible(), "");
   gate.push("是指系统与环境纠缠。");
+  assert.equal(gate.visible(), "", "散文开头，流中不放");
+  assert.equal(gate.finish(), "量子退相干是指系统与环境纠缠。", "收尾时给出");
+});
+
+test("a sentinel streams everything after it, with zero heuristics", () => {
+  const gate = createAnswerGate();
+  gate.push("The core issue is that qubits are extremely fragile. ");
+  assert.equal(gate.visible(), "", "哨兵之前一个字都不放");
+  gate.push("For the metaphor, I'm thinking of it like a library. ");
+  assert.equal(gate.visible(), "");
+  gate.push(`${ANSWER_SENTINEL}\n\n量子退相干是指`);
+  assert.equal(gate.visible(), "量子退相干是指", "哨兵之后立刻直通");
+  gate.push("系统与环境纠缠。");
   assert.equal(gate.visible(), "量子退相干是指系统与环境纠缠。");
+  // 推理进了独立通道，供可折叠组件展示；它永远不该进 turn.content。
+  assert.ok(gate.reasoning().includes("The core issue"));
+  assert.ok(!gate.visible().includes("The core issue"));
+});
+
+test("the real leaked transcript is split at the sentinel", () => {
+  const gate = createAnswerGate();
+  // 真机上模型把推理和正文之间连换行都没加：`accumulate.## 材料说明`
+  gate.push(
+    `${LEAK_PREAMBLE}accumulate.${ANSWER_SENTINEL}## 材料说明\n\n${LEAK_BODY}`,
+  );
+  const answer = gate.finish();
+  assert.ok(answer.startsWith("## 材料说明"));
+  assert.ok(answer.includes(LEAK_BODY));
+  assert.ok(!answer.includes("Since the user"));
+  assert.ok(!answer.includes("accumulate."));
+  assert.ok(gate.reasoning().includes("Since the user"));
+});
+
+test("a partial sentinel at the tail never renders literally", () => {
+  const gate = createAnswerGate();
+  gate.push("## 正文开始\n\n第一句。<<<PAPER");
+  assert.ok(!gate.visible().includes("<<<PAPER"), "半个哨兵不能当字面量放出去");
+  assert.ok(gate.visible().startsWith("## 正文开始"));
 });
 
 test("two-sentence answers with no heading survive verbatim", () => {
@@ -98,10 +148,16 @@ test("two-sentence answers with no heading survive verbatim", () => {
   assert.equal(visibleModelOutput("退相干很快"), "退相干很快");
 });
 
-test("a structural head releases with zero lag", () => {
+/**
+ * 保守例外：正文一上来就是结构化 Markdown 时直接放流。推理独白是散文，
+ * 从不以 `##` 或围栏开头，所以这条例外不会放过真实的泄漏。
+ */
+test("a structural head streams with zero lag even without a sentinel", () => {
   const gate = createAnswerGate();
   gate.push("## 结");
   assert.equal(gate.visible(), "## 结");
+  gate.push("论\n\n可以继续。");
+  assert.equal(gate.visible(), "## 结论\n\n可以继续。");
 });
 
 // --- 不可收回 ---------------------------------------------------------------
@@ -153,10 +209,9 @@ test("delimiter tags are handled in every position", () => {
   );
 });
 
-test("a partial tag at the tail never renders literally", () => {
-  const gate = createAnswerGate();
-  gate.push("正文。<thi");
-  assert.equal(gate.visible(), "正文。");
+test("a partial thinking tag at the tail never renders literally", () => {
+  // 散文开头，所以流中本就不放；收尾时未闭合的 <think 也不能变成字面量。
+  assert.equal(visibleModelOutput("正文。<thi"), "正文。");
 });
 
 // --- 服务端分道 -------------------------------------------------------------
