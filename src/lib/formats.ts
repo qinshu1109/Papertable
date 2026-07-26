@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { parseWikilinks, stripWikilinks } from "./wikilink";
 import type {
   Card,
   CardEdge,
@@ -122,6 +123,45 @@ function defaultView(projectId: string, cardId: string): Partial<ViewState> {
     collapsed: [],
     scrollPositions: {},
   };
+}
+
+/**
+ * 把导入内容里的 `[[双链]]` 变成 `ReferenceChip`。
+ *
+ * README 一直这么写着，但这个功能从来没有实现过——`assemble()` 硬编码了
+ * `references: []`。现在补上。
+ *
+ * **只生成引用，绝不推断 `CardEdge`。** 边携带冻结的 `ContextSnapshot`，而一条
+ * `[[链接]]` 没有快照；由它造一条边等于凭空伪造出处。
+ */
+function referencesFromLinks(
+  projectId: string,
+  cards: Card[],
+): ReferenceChip[] {
+  const byTitle = new Map(cards.map((card) => [card.title, card]));
+  const references: ReferenceChip[] = [];
+  const seen = new Set<string>();
+  for (const card of cards) {
+    for (const turn of card.turns) {
+      for (const link of parseWikilinks(turn.content)) {
+        const key = `${card.id}::${link.name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const target = byTitle.get(link.name);
+        references.push({
+          id: id("ref"),
+          projectId,
+          sourceTitle: target?.title ?? link.name,
+          excerpt: stripWikilinks(link.label).slice(0, 180),
+          // 链接目标不在这批导入里时仍然保留引用，anchor 指向写下它的那张卡片。
+          anchor: target
+            ? { cardId: target.id, text: link.label }
+            : { cardId: card.id, text: link.label },
+        });
+      }
+    }
+  }
+  return references;
 }
 
 function assemble(
@@ -287,6 +327,9 @@ async function markdownImport(input: ImportInput): Promise<PortableProject> {
       (edge) =>
         cardIds.has(edge.sourceCardId) && cardIds.has(edge.targetCardId),
     ),
+    [],
+    [],
+    referencesFromLinks(project.id, cards),
   );
 }
 
@@ -343,7 +386,14 @@ async function canvasImport(input: ImportInput): Promise<PortableProject> {
     });
   if (!cards.length)
     throw new Error("JSON Canvas 中没有可导入的文本或文件节点。");
-  return assemble(project, cards, edges);
+  return assemble(
+    project,
+    cards,
+    edges,
+    [],
+    [],
+    referencesFromLinks(project.id, cards),
+  );
 }
 
 export const formatAdapters = {

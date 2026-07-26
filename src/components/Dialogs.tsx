@@ -298,6 +298,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     setAttentionPaused,
     vaultAvailable,
     chooseVaultPath,
+    rescanVault,
+    vaultIndexed,
     toggleProjectVaultSync,
     vaultPath,
     vaultSyncedProjects,
@@ -516,7 +518,16 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               <>
                 <p className="note-line" style={{ marginTop: 8 }}>
                   当前：<code>{vaultPath}</code>
+                  {vaultIndexed > 0 && ` · 已索引 ${vaultIndexed} 篇笔记`}
                 </p>
+                <button
+                  className="btn"
+                  onClick={() => void rescanVault()}
+                  title="监听器出问题时的手动兜底：重新全量扫描知识库并重新开始监听"
+                >
+                  <RefreshCw size={14} />
+                  重新扫描知识库
+                </button>
                 <div className="fmt-desc" style={{ margin: "12px 0 6px" }}>
                   按项目开启（默认全部关闭）
                 </div>

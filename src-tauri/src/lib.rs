@@ -1,15 +1,19 @@
 mod db;
 mod llm;
 mod vault;
+mod watcher;
 
 use db::{AttentionSnapshot, AttentionUpsert, RemovedProject, WorkspaceSnapshot, WorkspaceUpsert};
 use llm::{ChatRequest, ProviderConfig, ProviderHealth, PublicConfig, StreamEvent};
 use rusqlite::Connection;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::{Manager, State};
+
+/// 监听线程要拿同一个连接，所以 Db 内部改成 Arc；这个别名只是给 setup 用。
+pub struct SharedDb(Arc<Mutex<Connection>>);
 
 /// 模型配置只住在本进程内存和 0600 的配置文件里，前端拿不到密钥本身。
 pub struct Provider {
@@ -19,7 +23,7 @@ pub struct Provider {
 
 /// 单写者。SQLite 自己是单写者 + WAL，这把锁额外保证的是调用方观察到的完成顺序，
 /// 从而让前端「写成功后才推进基线」是安全的——语义等价于 dexie.ts 里的 `enqueue`。
-pub struct Db(Mutex<Connection>);
+pub struct Db(Arc<Mutex<Connection>>);
 
 macro_rules! with_db {
     ($state:expr, $conn:ident, $body:expr) => {{
@@ -189,6 +193,7 @@ struct NoteWrite {
 #[tauri::command]
 fn vault_sync(
     db: State<Db>,
+    watch: State<watcher::VaultWatcher>,
     vault: String,
     notes: Vec<NoteWrite>,
     now: i64,
@@ -216,6 +221,8 @@ fn vault_sync(
             (_, value) => value,
         };
 
+        // 写盘前登记：让常见路径省掉一次读盘。**只是优化**，真正的判定靠哈希。
+        watch.mark(std::path::Path::new(&note.relative.join("/")));
         let report = vault::write_note(&root, &parts, &note.content, previous.as_deref())?;
         if let Some(id) = &note.card_id {
             let status = if report.outcome == vault::WriteOutcome::Conflict {
@@ -268,6 +275,57 @@ fn vault_stop_syncing(db: State<Db>, card_id: String) -> Result<(), db::Error> {
     with_db!(db, conn, db::stop_syncing(conn, &card_id))
 }
 
+// ---------------------------------------------------------------------------
+// vault 监听（入向）
+//
+// 入向**只新增 ReferenceChip**，永不改动 Card / Turn / CardEdge。
+// ---------------------------------------------------------------------------
+
+/// 全量重扫并开始监听。监听器出问题时，重新调用它就是那个「重新扫描知识库」按钮。
+#[tauri::command]
+fn vault_watch(
+    app: tauri::AppHandle,
+    shared: State<SharedDb>,
+    watch: State<watcher::VaultWatcher>,
+    vault: String,
+) -> Result<usize, vault::Error> {
+    let root = std::path::PathBuf::from(&vault);
+    let now = now_millis();
+    let count = {
+        let conn = shared.0.lock().map_err(|_| "数据库锁被毒化".to_string())?;
+        watcher::scan(&conn, &root, now).map_err(|e| vault::Error::from(e.to_string()))?
+    };
+    let handle = app.clone();
+    watch
+        .start(root, Arc::clone(&shared.0), move |notes| {
+            use tauri::Emitter;
+            let _ = handle.emit("vault-changed", notes);
+        })
+        .map_err(|e| vault::Error::from(e.to_string()))?;
+    Ok(count)
+}
+
+/// 把 `[[双链]]` 解析成 vault 里的真实笔记。
+#[tauri::command]
+fn vault_resolve_link(
+    db: State<Db>,
+    name: String,
+) -> Result<Vec<(String, Option<String>)>, db::Error> {
+    with_db!(db, conn, db::resolve_link(conn, &name))
+}
+
+#[tauri::command]
+fn vault_indexed_count(db: State<Db>) -> Result<i64, db::Error> {
+    with_db!(db, conn, db::indexed_count(conn))
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -285,7 +343,10 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             let conn = db::open(&dir.join("papertable.sqlite3"))
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            app.manage(Db(Mutex::new(conn)));
+            let shared = Arc::new(Mutex::new(conn));
+            app.manage(Db(Arc::clone(&shared)));
+            app.manage(SharedDb(shared));
+            app.manage(watcher::VaultWatcher::default());
 
             let path = llm::config_path(&dir);
             app.manage(Provider {
@@ -315,6 +376,9 @@ pub fn run() {
             vault_sync,
             vault_rename,
             vault_delete,
+            vault_watch,
+            vault_resolve_link,
+            vault_indexed_count,
             vault_conflicts,
             vault_resolve_conflict,
             vault_stop_syncing,

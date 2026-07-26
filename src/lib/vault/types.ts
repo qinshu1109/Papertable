@@ -37,6 +37,14 @@ export interface VaultBridge {
   }): Promise<WriteReport[]>;
   rename(input: { vault: string; from: string[]; to: string[] }): Promise<void>;
   remove(input: { vault: string; relative: string[] }): Promise<void>;
+  /**
+   * 全量重扫并开始监听，返回索引到的笔记数。监听器出问题时重新调用它，就是
+   * 「重新扫描知识库」那个按钮。
+   */
+  watch(vault: string): Promise<number>;
+  /** 把 `[[双链]]` 解析成 vault 里的真实笔记：[路径, papertable_id]。 */
+  resolveLink(name: string): Promise<[string, string | null][]>;
+  indexedCount(): Promise<number>;
   conflicts(): Promise<Conflict[]>;
   /** 「以 Papertable 为准」：清除挂起，下次同步正常覆盖。 */
   resolveConflict(cardId: string): Promise<void>;

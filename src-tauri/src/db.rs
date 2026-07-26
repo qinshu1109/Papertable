@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 2;
+const USER_VERSION: i64 = 3;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -1106,6 +1106,73 @@ pub fn stop_syncing(conn: &Connection, card_id: &str) -> Result<()> {
         params![card_id],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// vault 索引（入向）
+// ---------------------------------------------------------------------------
+
+/// 索引里记的归一化哈希，用于识别「这个事件是我们自己写入的回声」。
+pub fn indexed_hash(conn: &Connection, path: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT hash FROM vault_index WHERE path = ?1",
+            params![path],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?)
+}
+
+pub fn put_indexed(
+    conn: &Connection,
+    path: &str,
+    name: &str,
+    note_id: Option<&str>,
+    hash: &str,
+    at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO vault_index (path, name, note_id, hash, updated_at)
+         VALUES (?1,?2,?3,?4,?5)
+         ON CONFLICT(path) DO UPDATE SET name = excluded.name, note_id = excluded.note_id,
+           hash = excluded.hash, updated_at = excluded.updated_at",
+        params![path, name, note_id, hash, at],
+    )?;
+    Ok(())
+}
+
+pub fn drop_indexed(conn: &Connection, path: &str) -> Result<()> {
+    conn.execute("DELETE FROM vault_index WHERE path = ?1", params![path])?;
+    Ok(())
+}
+
+/// 全量重扫时用：把不在磁盘上的条目清掉。
+pub fn retain_indexed(conn: &Connection, alive: &[String]) -> Result<()> {
+    if alive.is_empty() {
+        conn.execute("DELETE FROM vault_index", [])?;
+        return Ok(());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(alive.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    conn.execute(
+        &format!("DELETE FROM vault_index WHERE path NOT IN ({placeholders})"),
+        params_from_iter(alive.iter()),
+    )?;
+    Ok(())
+}
+
+/// 按 `[[双链]]` 里的名字解析。同名多篇时返回全部，由调用方决定怎么处理。
+pub fn resolve_link(conn: &Connection, name: &str) -> Result<Vec<(String, Option<String>)>> {
+    let mut stmt =
+        conn.prepare("SELECT path, note_id FROM vault_index WHERE name = ?1 ORDER BY path")?;
+    let rows = stmt.query_map(params![name], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn indexed_count(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM vault_index", [], |row| row.get(0))?)
 }
 
 #[cfg(test)]

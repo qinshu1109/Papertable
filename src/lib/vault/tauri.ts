@@ -20,6 +20,10 @@ export const tauriVault: VaultBridge = {
     }),
   rename: (input) => invoke<void>("vault_rename", input),
   remove: (input) => invoke<void>("vault_delete", input),
+  watch: (vault) => invoke<number>("vault_watch", { vault }),
+  resolveLink: (name) =>
+    invoke<[string, string | null][]>("vault_resolve_link", { name }),
+  indexedCount: () => invoke<number>("vault_indexed_count"),
   conflicts: () => invoke<Conflict[]>("vault_conflicts"),
   resolveConflict: (cardId) =>
     invoke<void>("vault_resolve_conflict", { cardId }),

@@ -109,3 +109,27 @@ test("normal exports exclude experimental attention events and ghost proposals",
   assert.doesNotMatch(content, /不应导出/);
   assert.doesNotMatch(content, /interactionEvents/);
 });
+
+test("Markdown 双链导入为引用，而不是伪造出一条继承边", async () => {
+  const files = [
+    new File(
+      ["# 退相干\n\n参见 [[波函数]] 与 [[外部笔记|别名]]。\n"],
+      "退相干.md",
+      { type: "text/markdown" },
+    ),
+    new File(["# 波函数\n\n正文。\n"], "波函数.md", { type: "text/markdown" }),
+  ];
+  const imported = await formatAdapters["md-dir"].import({
+    format: "md-dir",
+    files,
+  });
+
+  // README 一直声称有这个行为，但它此前从未被实现过。
+  assert.equal(imported.references.length, 2);
+  const names = imported.references.map((r) => r.sourceTitle).sort();
+  assert.deepEqual(names, ["外部笔记", "波函数"]);
+  // 双链没有 ContextSnapshot，由它推断边等于凭空伪造出处。
+  assert.deepEqual(imported.edges, []);
+  // 摘录里不能带 [[ ]]。
+  assert.ok(imported.references.every((r) => !r.excerpt.includes("[[")));
+});

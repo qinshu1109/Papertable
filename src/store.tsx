@@ -44,6 +44,7 @@ import {
 import { createAnswerGate, visibleModelOutput } from "./lib/modelOutput";
 import { vault } from "./lib/vault";
 import { VAULT_SUBTREE, planProjectSync, syncableCards } from "./lib/vaultPlan";
+import { parseWikilinks, stripWikilinks } from "./lib/wikilink";
 import { preferredProjectCard } from "./lib/projectScope";
 import {
   attentionAsUpsert,
@@ -336,6 +337,8 @@ interface Ctx {
   vaultPath?: string;
   vaultSyncedProjects: string[];
   chooseVaultPath: () => Promise<void>;
+  rescanVault: () => Promise<void>;
+  vaultIndexed: number;
   toggleProjectVaultSync: (projectId: string) => Promise<void>;
   resolveVaultConflict: (
     cardId: string,
@@ -420,6 +423,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [toast, setToast] = useState<Toast | null>(null);
   /** 挂起中的 vault 冲突。常驻横幅，不是 toast——它需要用户做一次二选一。 */
   const [vaultConflicts, setVaultConflicts] = useState<VaultConflict[]>([]);
+  const [vaultIndexed, setVaultIndexed] = useState(0);
   const vaultTimer = useRef<number | null>(null);
   const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [lastCreated, setLastCreated] = useState<{
@@ -1337,6 +1341,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         candidate.id === card.id ? nextCard : candidate,
       );
       const activeReferences = references;
+      // 提问里写的 [[双链]] 也算这次带入的引用。解析是异步的，所以先发出这一轮，
+      // 解析到了就作为下一次的引用留在输入器里——绝不为了等它而卡住发送。
+      void resolveWikilinks(text, activeProjectId).then((chips) => {
+        if (chips.length)
+          setReferenceStore((current) => [...current, ...chips]);
+      });
       setCards(nextCards);
       setReferenceStore((current) => {
         const cleared = current
@@ -2201,8 +2211,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, [hydrated, streamingTurnId, syncFingerprint, settings.vaultPath]);
 
   useEffect(() => {
-    if (hydrated) void refreshVaultConflicts();
-    // 只在水合完成时读一次挂起列表；此后由每次同步结束后主动刷新。
+    if (!hydrated) return;
+    void refreshVaultConflicts();
+    // 启动时重建索引并接上监听。选目录时会做一次，但重启之后没人做——
+    // 不在这里做，重启后监听器就是死的，而界面上看不出任何异常。
+    const vaultPath = settings.vaultPath;
+    if (vault.available && vaultPath)
+      void vault
+        .watch(vaultPath)
+        .then(setVaultIndexed)
+        .catch(() => undefined);
+    // 只在水合完成时跑一次；此后由每次同步结束后主动刷新挂起列表。
   }, [hydrated]);
 
   const refreshVaultConflicts = useCallback(async () => {
@@ -2215,10 +2234,46 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const picked = await vault.chooseVault();
     if (!picked) return;
     setSettings((current) => ({ ...current, vaultPath: picked }));
+    const indexed = await vault.watch(picked);
+    setVaultIndexed(indexed);
     showToast({
-      text: `已选择知识库：${picked}。Papertable 只会写入其中的 ${VAULT_SUBTREE}/。`,
+      text: `已选择知识库：${picked}，索引到 ${indexed} 篇笔记。Papertable 只会写入其中的 ${VAULT_SUBTREE}/。`,
     });
   }, [showToast]);
+
+  /** 监听器出问题时的手动兜底。 */
+  const rescanVault = useCallback(async () => {
+    if (!settings.vaultPath) return;
+    const indexed = await vault.watch(settings.vaultPath);
+    setVaultIndexed(indexed);
+    showToast({ text: `已重新扫描知识库，共 ${indexed} 篇笔记。` });
+  }, [settings.vaultPath, showToast]);
+
+  /**
+   * 把提问里的 `[[双链]]` 解析成引用。**只生成 ReferenceChip，绝不推断 CardEdge**
+   * ——边携带冻结的 ContextSnapshot，而一条链接没有快照。
+   */
+  const resolveWikilinks = useCallback(
+    async (text: string, projectId: string): Promise<ReferenceChip[]> => {
+      if (!vault.available) return [];
+      const links = parseWikilinks(text);
+      if (!links.length) return [];
+      const chips: ReferenceChip[] = [];
+      for (const link of links) {
+        const hits = await vault.resolveLink(link.name);
+        if (!hits.length) continue; // 指不到真实笔记就不造引用
+        chips.push({
+          id: uid("ref"),
+          projectId,
+          sourceTitle: link.name,
+          excerpt: stripWikilinks(link.label).slice(0, 180),
+          anchor: { cardId: currentCardId, text: link.label },
+        });
+      }
+      return chips;
+    },
+    [currentCardId],
+  );
 
   /**
    * 按项目开关同步。开启时立刻整项目写一次，这样用户马上能在 Obsidian 里看到
@@ -2482,6 +2537,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       vaultPath: settings.vaultPath,
       vaultSyncedProjects: settings.vaultSyncedProjects ?? [],
       chooseVaultPath,
+      rescanVault,
+      vaultIndexed,
       toggleProjectVaultSync,
       resolveVaultConflict,
       clearLocalData,

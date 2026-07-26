@@ -146,3 +146,16 @@ CREATE TABLE IF NOT EXISTS sync_state (
   last_written_at   INTEGER NOT NULL,
   status            TEXT    NOT NULL DEFAULT 'synced'
 );
+
+-- v3：vault 索引。入向只用来把 [[双链]] 解析成 ReferenceChip，
+-- **永不改动 Card / Turn / CardEdge**——ReferenceChip 是纯增量的，不需要冲突解决。
+-- `hash` 是归一化哈希，用于识别「这个事件是我们自己写入的回声」。
+CREATE TABLE IF NOT EXISTS vault_index (
+  path       TEXT PRIMARY KEY,   -- vault 相对路径
+  name       TEXT NOT NULL,      -- 文件名去掉 .md，也就是 [[双链]] 里写的那个名字
+  note_id    TEXT,               -- frontmatter 里的 papertable_id（若是我们写的）
+  hash       TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS vault_index_name ON vault_index(name);
+CREATE INDEX IF NOT EXISTS vault_index_note ON vault_index(note_id);
