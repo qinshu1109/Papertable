@@ -49,6 +49,7 @@ import {
 } from "./lib/storage";
 import { EDGE_META } from "./types";
 import type {
+  AnswerMode,
   AppSettings,
   AttentionMetrics,
   BuiltContext,
@@ -186,6 +187,7 @@ interface Ctx {
   attentionPaused: boolean;
   morningPrompt: { projectId: string; count: number } | null;
   proposalTrayOpen: boolean;
+  selectedProposalId: string | null;
   currentCardId: string;
   references: ReferenceChip[];
   draft: string;
@@ -204,6 +206,7 @@ interface Ctx {
   deleteProject: (id: string) => void;
   setCurrentCard: (id: string) => void;
   createCard: (input: CreateCardInput) => string;
+  setCardAnswerMode: (cardId: string, mode: AnswerMode) => void;
   renameCard: (id: string, title: string) => void;
   rerouteEditedQuestion: (
     cardId: string,
@@ -240,7 +243,9 @@ interface Ctx {
   exportProject: (format: "md-dir" | "canvas" | "bundle") => Promise<void>;
   exportAllBackup: () => Promise<void>;
   clearLocalData: () => Promise<void>;
-  openProposal: (id: string) => void;
+  previewProposal: (id: string) => void;
+  materializeProposal: (id: string, finalQuestion: string) => string | null;
+  clearProposalPreview: () => void;
   dismissProposal: (id: string) => void;
   setProposalTrayOpen: (open: boolean) => void;
   dismissMorningPrompt: () => void;
@@ -309,7 +314,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     projectId: string;
     count: number;
   } | null>(null);
-  const [proposalTrayOpen, setProposalTrayOpen] = useState(false);
+  const [proposalTrayOpen, setProposalTrayOpenState] = useState(false);
+  const [selectedProposalId, setSelectedProposalId] = useState<string | null>(
+    null,
+  );
   const [toast, setToast] = useState<Toast | null>(null);
   const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [lastCreated, setLastCreated] = useState<{
@@ -329,6 +337,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     proposals: [],
   });
   const hiddenAtRef = useRef<number | null>(null);
+  const materializingProposalIdsRef = useRef(new Set<string>());
 
   const activeProjectId = view.activeProjectId;
   const currentCardId = view.currentCardId;
@@ -1070,6 +1079,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         unread: false,
         createdAt: Date.now(),
         concepts: [],
+        answerMode: source.answerMode ?? "general",
         turns: input.seedTurns ?? [],
         origin: input.origin ?? "manual",
         proposalId: input.proposalId,
@@ -1219,7 +1229,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     streamingTurnId,
   ]);
 
-  const openProposal = useCallback(
+  const setProposalTrayOpen = useCallback((open: boolean) => {
+    setProposalTrayOpenState(open);
+    if (!open) setSelectedProposalId(null);
+  }, []);
+  const clearProposalPreview = useCallback(
+    () => setSelectedProposalId(null),
+    [],
+  );
+
+  const previewProposal = useCallback(
     (id: string) => {
       const current = attentionRef.current;
       const proposal = current.proposals.find(
@@ -1229,6 +1248,37 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           ["queued", "opened"].includes(candidate.status),
       );
       if (!proposal) return;
+      commitAttention({
+        ...current,
+        proposals: current.proposals.map((candidate) =>
+          candidate.id === proposal.id && candidate.status === "queued"
+            ? { ...candidate, status: "opened" }
+            : candidate,
+        ),
+      });
+      setSelectedProposalId(proposal.id);
+      setProposalTrayOpenState(true);
+      setMorningPrompt(null);
+    },
+    [activeProjectId, commitAttention],
+  );
+
+  const materializeProposal = useCallback(
+    (id: string, finalQuestion: string) => {
+      const question = finalQuestion.trim();
+      if (!question) {
+        showToast({ text: "请先写下要开始探索的问题。" });
+        return null;
+      }
+      if (materializingProposalIdsRef.current.has(id)) return null;
+      const current = attentionRef.current;
+      const proposal = current.proposals.find(
+        (candidate) =>
+          candidate.id === id &&
+          candidate.projectId === activeProjectId &&
+          ["queued", "opened"].includes(candidate.status),
+      );
+      if (!proposal) return null;
       const parent = cards.find(
         (card) =>
           card.id === proposal.suggestedParentCardId &&
@@ -1237,53 +1287,60 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       );
       if (!parent) {
         showToast({ text: "这条提案的来源卡片已不存在。" });
-        return;
+        return null;
       }
-      const anchor = proposal.sourceAnchorIds
-        .map((anchorId) => anchors.find((item) => item.id === anchorId))
-        .find(Boolean);
-      const sourceTurnId =
-        anchor?.turnId ?? parent.turns[parent.turns.length - 1]?.id;
-      const cardId = createCard({
-        type: proposal.suggestedRelation,
-        sourceCardId: parent.id,
-        sourceTurnId,
-        // 由提案物化时也冻结来源；branch 默认继承到当前来源轮次。
-        contextThroughTurnId:
-          proposal.suggestedRelation === "branch"
-            ? (sourceTurnId ?? null)
-            : undefined,
-        sourceText: anchor?.exact ?? anchor?.text,
-        sourceBlockText: anchor?.blockText,
-        title: proposal.title,
-        origin: "proposal",
-        proposalId: proposal.id,
-        seedTurns: [
-          {
-            id: uid("turn"),
-            role: "user",
-            content: proposal.explorationQuestion,
-            createdAt: Date.now(),
-            status: "complete",
-          },
-        ],
-      });
-      const afterCreate = attentionRef.current;
-      commitAttention({
-        ...afterCreate,
-        proposals: afterCreate.proposals.map((candidate) =>
-          candidate.id === proposal.id
-            ? {
-                ...candidate,
-                status: "accepted",
-                acceptedCardId: cardId,
-              }
-            : candidate,
-        ),
-      });
-      setMorningPrompt(null);
-      setProposalTrayOpen(false);
-      showToast({ text: "已把幽灵分支变成正式卡片，正在生成回答。" });
+      materializingProposalIdsRef.current.add(id);
+      try {
+        const anchor = proposal.sourceAnchorIds
+          .map((anchorId) => anchors.find((item) => item.id === anchorId))
+          .find(Boolean);
+        const sourceTurnId =
+          anchor?.turnId ?? parent.turns[parent.turns.length - 1]?.id;
+        const cardId = createCard({
+          type: proposal.suggestedRelation,
+          sourceCardId: parent.id,
+          sourceTurnId,
+          // 由提案物化时也冻结来源；branch 默认继承到当前来源轮次。
+          contextThroughTurnId:
+            proposal.suggestedRelation === "branch"
+              ? (sourceTurnId ?? null)
+              : undefined,
+          sourceText: anchor?.exact ?? anchor?.text,
+          sourceBlockText: anchor?.blockText,
+          title: proposal.title,
+          origin: "proposal",
+          proposalId: proposal.id,
+          seedTurns: [
+            {
+              id: uid("turn"),
+              role: "user",
+              content: question,
+              createdAt: Date.now(),
+              status: "complete",
+            },
+          ],
+        });
+        const afterCreate = attentionRef.current;
+        commitAttention({
+          ...afterCreate,
+          proposals: afterCreate.proposals.map((candidate) =>
+            candidate.id === proposal.id
+              ? {
+                  ...candidate,
+                  status: "accepted",
+                  acceptedCardId: cardId,
+                }
+              : candidate,
+          ),
+        });
+        setMorningPrompt(null);
+        setProposalTrayOpenState(false);
+        setSelectedProposalId(null);
+        showToast({ text: "已把幽灵分支变成正式卡片，正在生成回答。" });
+        return cardId;
+      } finally {
+        materializingProposalIdsRef.current.delete(id);
+      }
     },
     [activeProjectId, anchors, cards, commitAttention, createCard, showToast],
   );
@@ -1308,6 +1365,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             : candidate,
         ),
       });
+      setSelectedProposalId((currentId) =>
+        currentId === id ? null : currentId,
+      );
       showToast({ text: "已忽略这条方向；不会自动创建卡片。" });
     },
     [activeProjectId, commitAttention, showToast],
@@ -1373,6 +1433,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         return;
       stopStream();
       closeAttentionSession(activeProjectId, "project-switch");
+      setProposalTrayOpenState(false);
+      setSelectedProposalId(null);
       const nextCard = preferredProjectCard(
         cards,
         id,
@@ -1401,6 +1463,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const contextForCurrent = useCallback(
     () => buildContext({ cards, edges, snapshots, references, currentCardId }),
     [cards, currentCardId, edges, references, snapshots],
+  );
+  const setCardAnswerMode = useCallback(
+    (cardId: string, mode: AnswerMode) => {
+      const card = cards.find(
+        (candidate) =>
+          candidate.id === cardId && candidate.projectId === activeProjectId,
+      );
+      if (!card || card.answerMode === mode) return;
+      updateCard(cardId, (current) => ({ ...current, answerMode: mode }));
+    },
+    [activeProjectId, cards, updateCard],
   );
   const setDraft = useCallback(
     (value: string) =>
@@ -1652,6 +1725,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         favorite: false,
         unread: false,
         concepts: [],
+        answerMode: "general",
         createdAt: Date.now(),
       },
     ]);
@@ -1938,7 +2012,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setSessions([]);
     setProposals([]);
     setMorningPrompt(null);
-    setProposalTrayOpen(false);
+    setProposalTrayOpenState(false);
+    setSelectedProposalId(null);
     showToast({ text: "已清除本地数据，并恢复示例项目。" });
   }, [showToast]);
 
@@ -1958,6 +2033,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       attentionPaused: Boolean(settings.attentionPaused),
       morningPrompt,
       proposalTrayOpen,
+      selectedProposalId,
       currentCardId,
       references,
       draft,
@@ -1975,6 +2051,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       deleteProject,
       setCurrentCard,
       createCard,
+      setCardAnswerMode,
       renameCard,
       rerouteEditedQuestion,
       deleteCard,
@@ -1999,7 +2076,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       exportProject,
       exportAllBackup,
       clearLocalData,
-      openProposal,
+      previewProposal,
+      materializeProposal,
+      clearProposalPreview,
       dismissProposal,
       setProposalTrayOpen,
       dismissMorningPrompt,
@@ -2022,6 +2101,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       settings.attentionPaused,
       morningPrompt,
       proposalTrayOpen,
+      selectedProposalId,
       currentCardId,
       references,
       draft,
@@ -2039,6 +2119,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       deleteProject,
       setCurrentCard,
       createCard,
+      setCardAnswerMode,
       renameCard,
       rerouteEditedQuestion,
       deleteCard,
@@ -2063,7 +2144,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       exportProject,
       exportAllBackup,
       clearLocalData,
-      openProposal,
+      previewProposal,
+      materializeProposal,
+      clearProposalPreview,
       dismissProposal,
       setProposalTrayOpen,
       dismissMorningPrompt,

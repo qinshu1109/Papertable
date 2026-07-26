@@ -355,7 +355,7 @@ function wildcardDraft(input: {
     sessionId: input.session.id,
     title: `${term} · 另一种入口`,
     explorationQuestion: `如果把「${term}」当成新的入口，它会怎样改变你对「${card.title}」的理解？`,
-    reason: `AI 意外提名：它复用了你已看见的概念「${term}」，没有新增模型调用。`,
+    reason: `概念侧向提名：复用了你已看见的概念「${term}」，没有新增模型调用。`,
     sourceAnchorIds: [],
     suggestedParentCardId: card.id,
     suggestedRelation: "divergent",
@@ -624,5 +624,5 @@ export function buildAttentionMetrics(input: {
 }
 
 export function proposalEvidenceLabel(evidence: ProposalEvidence): string {
-  return evidence === "human-signals" ? "人类行为信号" : "AI 意外提名";
+  return evidence === "human-signals" ? "人类行为信号" : "概念侧向提名";
 }

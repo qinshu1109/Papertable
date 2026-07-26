@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   ChevronDown,
+  Compass,
   Cpu,
   Layers,
   Paperclip,
@@ -29,6 +30,8 @@ export function Composer({
     retryLast,
     streamingTurnId,
     contextForCurrent,
+    currentCardId,
+    setCardAnswerMode,
     provider,
     refreshProvider,
     showToast,
@@ -67,6 +70,12 @@ export function Composer({
   };
   const tokens = built.estimatedTokens;
   const pct = Math.min(100, Math.round((tokens / 8_000) * 100));
+  const answerModeLabel =
+    built.answerMode === "sources-only" ? "仅依据材料" : "通用探索";
+  const answerModeDetail =
+    built.answerMode === "sources-only"
+      ? "只依据上面明确列出的上下文；证据不足时会直接说明。"
+      : "优先依据上面明确列出的上下文；材料不足时可补充通用知识，并会区分材料、通用知识和推断。";
 
   return (
     <div className="composer-wrap">
@@ -123,6 +132,12 @@ export function Composer({
               <p className="ctx-sub">
                 这是即将发给模型的真实上下文。关系和引用决定它带入什么，而不是界面上的猜测。
               </p>
+              <div className="ctx-answer-mode">
+                <div className="ctx-group-t">回答依据</div>
+                <p>
+                  <b>{answerModeLabel}</b> · {answerModeDetail}
+                </p>
+              </div>
               <div className="ctx-group">
                 <div className="ctx-group-t">会带入</div>
                 {built.provenance.map((item, index) => (
@@ -216,6 +231,23 @@ export function Composer({
             <span className="desktop-context-label">本次上下文</span>
             <span className="mobile-context-label">上下文</span>
             <span className="ctx-count">{built.provenance.length}</span>
+          </button>
+          <button
+            className={`chip-btn answer-mode ${built.answerMode}`}
+            onClick={() =>
+              setCardAnswerMode(
+                currentCardId,
+                built.answerMode === "general" ? "sources-only" : "general",
+              )
+            }
+            title={`回答依据：${answerModeLabel}；点击切换`}
+            aria-label={`回答依据：${answerModeLabel}；点击切换`}
+          >
+            <Compass size={13} />
+            <span className="desktop-answer-label">{answerModeLabel}</span>
+            <span className="mobile-answer-label">
+              {built.answerMode === "sources-only" ? "材料" : "通用"}
+            </span>
           </button>
           <textarea
             ref={ta}

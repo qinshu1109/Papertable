@@ -1,5 +1,6 @@
 import { incomingEdge } from "./graph";
 import type {
+  AnswerMode,
   BuiltContext,
   Card,
   CardEdge,
@@ -17,8 +18,10 @@ export interface BuildContextInput {
   pendingUserText?: string;
 }
 
-const projectInstruction =
-  "你是 Papertable 的知识探索助手。只使用下方明确提供的上下文；若证据不足，请直接说明。使用清晰的 Markdown 回答，不输出隐藏推理过程。";
+const instructionFor = (answerMode: AnswerMode) =>
+  answerMode === "sources-only"
+    ? "你是 Papertable 的知识探索助手。只能使用下方明确提供的上下文；若证据不足，请直接说明，不得用通用知识补齐结论。不得伪造引用、来源或已提供的证据。使用清晰的 Markdown 回答，不输出隐藏推理过程。"
+    : "你是 Papertable 的知识探索助手。优先使用下方明确提供的当前卡片、来源主题、精确选区、冻结分支历史和显式引用；若材料不足，可以使用通用知识继续回答。回答时必须清楚区分哪些判断来自用户材料，哪些是通用知识补充或推断。不得伪造引用、来源或已提供的证据。使用清晰的 Markdown 回答，不输出隐藏推理过程。";
 
 const toMessages = (card: Card, pendingUserText?: string): LlmMessage[] => {
   const messages: LlmMessage[] = card.turns
@@ -39,6 +42,7 @@ export function buildContext(input: BuildContextInput): BuiltContext {
     (candidate) => candidate.id === input.currentCardId,
   );
   if (!card) throw new Error("Current card not found");
+  const answerMode = card.answerMode ?? "general";
   const edge = incomingEdge(input.edges, card.id);
   const snapshot = edge?.contextSnapshotId
     ? input.snapshots.find(
@@ -48,7 +52,7 @@ export function buildContext(input: BuildContextInput): BuiltContext {
   const source = edge
     ? input.cards.find((candidate) => candidate.id === edge.sourceCardId)
     : undefined;
-  const system = [projectInstruction];
+  const system = [instructionFor(answerMode)];
   const provenance: BuiltContext["provenance"] = [];
   const excluded: BuiltContext["excluded"] = [];
 
@@ -162,6 +166,7 @@ export function buildContext(input: BuildContextInput): BuiltContext {
       .length / 1.7,
   );
   return {
+    answerMode,
     system,
     messages: [{ role: "system", content: system.join("\n\n") }, ...messages],
     provenance,

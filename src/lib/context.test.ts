@@ -192,3 +192,61 @@ test("assistant turns use the OpenAI-compatible assistant role on the wire", () 
     ["user", "assistant"],
   );
 });
+
+test("old cards default to general exploration and only the answer-mode instruction changes", () => {
+  const edge: CardEdge = {
+    id: "mode-edge",
+    type: "child",
+    sourceCardId: "root",
+    targetCardId: "child",
+    sourceText: "选区",
+    contextPolicy: "topic-and-selection",
+    contextSnapshotId: "mode-snapshot",
+  };
+  const snapshot: ContextSnapshot = {
+    id: "mode-snapshot",
+    edgeId: "mode-edge",
+    createdAt: 1,
+    sourceTitle: "根",
+    sourceText: "选区",
+  };
+  const references: ReferenceChip[] = [
+    {
+      id: "mode-ref",
+      projectId: "p",
+      sourceTitle: "外部材料",
+      excerpt: "按添加顺序保留",
+      anchor: { cardId: "external", exact: "按添加顺序保留" },
+    },
+  ];
+  const oldChild = card("child", "子", []);
+  const general = buildContext({
+    cards: [card("root", "根", turns), oldChild],
+    edges: [edge],
+    snapshots: [snapshot],
+    references,
+    currentCardId: "child",
+  });
+  const sourcesOnly = buildContext({
+    cards: [
+      card("root", "根", turns),
+      { ...oldChild, answerMode: "sources-only" },
+    ],
+    edges: [edge],
+    snapshots: [snapshot],
+    references,
+    currentCardId: "child",
+  });
+
+  assert.equal(general.answerMode, "general");
+  assert.match(general.system[0], /可以使用通用知识/);
+  assert.match(general.system[0], /区分.*材料.*通用知识.*推断/);
+  assert.equal(sourcesOnly.answerMode, "sources-only");
+  assert.match(sourcesOnly.system[0], /只能使用下方明确提供的上下文/);
+  assert.match(sourcesOnly.system[0], /不得用通用知识补齐结论/);
+
+  assert.deepEqual(general.provenance, sourcesOnly.provenance);
+  assert.deepEqual(general.excluded, sourcesOnly.excluded);
+  assert.deepEqual(general.system.slice(1), sourcesOnly.system.slice(1));
+  assert.deepEqual(general.messages.slice(1), sourcesOnly.messages.slice(1));
+});

@@ -14,6 +14,7 @@ const project = (): PortableProject => ({
       title: "根卡",
       favorite: false,
       unread: false,
+      answerMode: "sources-only",
       concepts: [],
       createdAt: 1,
       turns: [
@@ -32,6 +33,7 @@ const project = (): PortableProject => ({
       title: "子卡",
       favorite: false,
       unread: false,
+      answerMode: "general",
       concepts: [],
       createdAt: 2,
       turns: [
@@ -86,6 +88,8 @@ test("native project package preserves graph, snapshots and cards", async () => 
   assert.equal(restored.cards.length, 2);
   assert.equal(restored.edges[0].contextSnapshotId, "snapshot");
   assert.equal(restored.snapshots[0].sourceText, "问题");
+  assert.equal(restored.cards[0].answerMode, "sources-only");
+  assert.equal(restored.cards[1].answerMode, "general");
 });
 
 test("normal exports exclude experimental attention events and ghost proposals", async () => {

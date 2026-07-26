@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Menu, Sparkles, X } from "lucide-react";
+import { Menu, Sparkles } from "lucide-react";
 import { useStore } from "./store";
 import { ProjectSidebar } from "./components/ProjectSidebar";
 import { CardStage } from "./components/CardStage";
@@ -14,7 +14,7 @@ import {
 import { EDGE_META } from "./types";
 import { incomingEdge, layoutGraph, pathToRoot } from "./lib/graph";
 import { scopeProject } from "./lib/projectScope";
-import { proposalEvidenceLabel } from "./lib/attention";
+import { ProposalExplorer } from "./components/ProposalExplorer";
 
 export function App() {
   const {
@@ -31,8 +31,6 @@ export function App() {
     proposalTrayOpen,
     setProposalTrayOpen,
     dismissMorningPrompt,
-    openProposal,
-    dismissProposal,
   } = useStore();
   const [sbCollapsed, setSbCollapsed] = useState(false);
   const [drawer, setDrawer] = useState(false);
@@ -195,49 +193,7 @@ export function App() {
           role="dialog"
           aria-label="幽灵分支"
         >
-          <div className="mobile-proposal-sheet-head">
-            <div>
-              <b>幽灵分支</b>
-              <span>点击后才会创建正式卡片</span>
-            </div>
-            <button
-              className="icon-btn"
-              onClick={() => setProposalTrayOpen(false)}
-              aria-label="关闭幽灵分支"
-            >
-              <X size={16} />
-            </button>
-          </div>
-          <div className="mobile-proposal-list scroll-y">
-            {activeProposals.length === 0 ? (
-              <p>当前没有可展开的幽灵分支。</p>
-            ) : (
-              activeProposals.map((proposal) => (
-                <article className="proposal-item" key={proposal.id}>
-                  <b>{proposal.title}</b>
-                  <p>{proposal.explorationQuestion}</p>
-                  <small>
-                    {proposalEvidenceLabel(proposal.evidence)} ·{" "}
-                    {proposal.reason}
-                  </small>
-                  <div className="proposal-actions">
-                    <button
-                      className="btn primary"
-                      onClick={() => openProposal(proposal.id)}
-                    >
-                      开始探索
-                    </button>
-                    <button
-                      className="btn"
-                      onClick={() => dismissProposal(proposal.id)}
-                    >
-                      忽略
-                    </button>
-                  </div>
-                </article>
-              ))
-            )}
-          </div>
+          <ProposalExplorer mobile onClose={() => setProposalTrayOpen(false)} />
         </div>
       )}
 

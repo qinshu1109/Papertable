@@ -449,14 +449,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           HTTPS 或本机 HTTP。
         </p>
         <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
-          注意力实验
+          注意力观察
         </div>
         <div className="attention-settings">
           <div>
             <b>
               {attentionPaused
-                ? "实验已暂停"
-                : `第 ${attentionMetrics.dayIndex} 天`}
+                ? "观察已暂停"
+                : `已观察 ${attentionMetrics.dayIndex} 天`}
             </b>
             <span>
               暂停后不记录行为、不生成提案，也不会补算暂停期间的动作。
@@ -466,10 +466,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             className={`btn${attentionPaused ? " primary" : ""}`}
             onClick={() => setAttentionPaused(!attentionPaused)}
           >
-            {attentionPaused ? "恢复实验" : "暂停实验"}
+            {attentionPaused ? "恢复观察" : "暂停观察"}
           </button>
         </div>
-        <div className="attention-metrics" aria-label="注意力实验统计">
+        <div className="attention-metrics" aria-label="注意力观察统计">
           <span>今日强 / 中 / 弱</span>
           <b>
             {attentionMetrics.today.strong} / {attentionMetrics.today.medium} /{" "}

@@ -18,7 +18,7 @@ React 网页
 
 ```ts
 buildContext({ cards, edges, snapshots, references, currentCardId });
-// => { system, messages, provenance, excluded, estimatedTokens }
+// => { answerMode, system, messages, provenance, excluded, estimatedTokens }
 ```
 
 `CardEdge` 是关系真相，`ContextSnapshot` 在创建边时冻结来源含义。布局方向只影响动画和关系图，不影响模型上下文。
@@ -31,6 +31,8 @@ buildContext({ cards, edges, snapshots, references, currentCardId });
 | 改道 | 来源卡到分支点的冻结历史、当前分支轮次 | 分支点之后内容     |
 
 显式引用按用户添加顺序进入上下文，按来源锚点去重。`Composer` 不自行猜上下文，只渲染 `BuiltContext.provenance` 和 `excluded`。
+
+每张 `Card` 可选的 `answerMode` 是请求层边界：旧数据缺省时按 `general`。`general` 优先使用同一套关系、快照与显式引用，在材料不足时允许补充通用知识，但必须区分材料、通用知识与推断；`sources-only` 使用完全相同的 provenance、excluded、关系和引用顺序，只把系统指令收紧为“只依据明确上下文”。切换只影响下一次请求，不改写旧回答。
 
 ## 持久化
 
@@ -53,12 +55,13 @@ buildContext({ cards, edges, snapshots, references, currentCardId });
   → 项目内 SessionBoundary
   → 次日首次打开时的确定性聚合
   → Proposal（幽灵分支，不是 Card）
-  → 用户点击后才创建 Card + CardEdge + ContextSnapshot
+  → 用户查看并编辑问题（不产生模型请求）
+  → 明确开始后才创建 Card + CardEdge + ContextSnapshot + 主回答
 ```
 
 `src/lib/attention.ts` 是纯函数：它只处理本地时间、事件、卡片和锚点，不调用模型，也不依赖 React、Dexie 或网络。行为候选需要一条强信号或两条中信号；每项目最多五条未处理提案，每次最多展示三条、其中最多一条复用既有概念结果的 `ai-wildcard`。72 小时未处理进入 `cooled`，七天后低信号项移除；一条高信号冷却记录最多保留在本机短期审计中。
 
-Proposal 不进入 `buildContext()`、正式卡片搜索或任何标准 Markdown / JSON Canvas / 项目包导出。`src/lib/memory.ts` 仅提供 `MemoryProvider` / `NoopProvider` 边界；本阶段没有接 MemOS、蒸馏或额外后台模型调用。
+Proposal 不进入 `buildContext()`、正式卡片搜索或任何标准 Markdown / JSON Canvas / 项目包导出。`previewProposal(id)` 只将 `queued` 标为 `opened` 并选择详情，绝不建立卡片、边、快照或访问模型；`materializeProposal(id, finalQuestion)` 才在防重入保护下创建一张卡、一条边和一个快照，记录 `proposalId` / `acceptedCardId`，并由正常主回答链路生成。`src/lib/memory.ts` 仅提供 `MemoryProvider` / `NoopProvider` 边界；本阶段没有接 MemOS、蒸馏或额外后台模型调用。
 
 ## 模型适配
 

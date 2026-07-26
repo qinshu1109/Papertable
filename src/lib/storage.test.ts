@@ -20,6 +20,7 @@ const snapshot = (): WorkspaceSnapshot => ({
       title: "根卡",
       favorite: false,
       unread: false,
+      answerMode: "sources-only",
       concepts: [],
       createdAt: 1,
       turns: [
@@ -57,6 +58,7 @@ test("IndexedDB restores cards, drafts and scroll positions", async () => {
   assert.equal(restored?.cards[0].turns[0].content, "你好");
   assert.equal(restored?.view.drafts.p, "草稿");
   assert.equal(restored?.view.scrollPositions.c, 120);
+  assert.equal(restored?.cards[0].answerMode, "sources-only");
   await clearWorkspace();
   assert.equal(await loadWorkspace(), null);
 });

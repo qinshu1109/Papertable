@@ -11,6 +11,9 @@ export type ContextPolicy =
   | "topic-only" // 发散：仅来源主题作为相关背景
   | "history-through-turn"; // 改道：继承到指定轮次为止的完整历史
 
+/** 卡片下一次回答可使用的知识边界。 */
+export type AnswerMode = "general" | "sources-only";
+
 export type TurnRole = "user" | "ai";
 export type TurnStatus = "complete" | "streaming" | "stopped" | "error";
 
@@ -59,6 +62,8 @@ export interface LlmMessage {
 }
 
 export interface BuiltContext {
+  /** 当前请求的回答依据；由当前卡片决定。 */
+  answerMode: AnswerMode;
   system: string[];
   messages: LlmMessage[];
   provenance: ContextProvenance[];
@@ -93,6 +98,11 @@ export interface Card {
   turns: Turn[];
   favorite: boolean;
   unread: boolean;
+  /**
+   * 未设置时兼容旧数据，按 `general` 处理。该设置只影响后续模型请求，
+   * 不会改写已有回答。
+   */
+  answerMode?: AnswerMode;
   /** 可点击概念词，由后台功能模型提取；旧 demo 可保留已有词表。 */
   concepts: string[];
   /** 概念解释按概念 + 来源版本缓存，避免重复消耗模型调用。 */

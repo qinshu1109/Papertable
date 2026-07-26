@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Crosshair, Minus, Plus, Sparkles, X } from "lucide-react";
+import { Crosshair, Minus, Plus, Sparkles } from "lucide-react";
 import { useStore } from "../store";
 import { EDGE_META } from "../types";
-import type { Proposal } from "../types";
+import { ProposalExplorer } from "./ProposalExplorer";
 import {
   incomingEdge,
   layoutGraph,
@@ -34,15 +34,13 @@ export function GraphNavigator() {
     setCurrentCard,
     collapsed,
     toggleCollapse,
-    proposals,
     activeProposals,
     sessions,
     interactionEvents,
     attentionPaused,
     proposalTrayOpen,
     setProposalTrayOpen,
-    openProposal,
-    dismissProposal,
+    previewProposal,
   } = useStore();
   const wrapRef = useRef<HTMLDivElement>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -67,17 +65,6 @@ export function GraphNavigator() {
     [projectEdges, currentCardId],
   );
   const pathSet = useMemo(() => new Set(path), [path]);
-  const cooledProposals = useMemo(
-    () =>
-      proposals
-        .filter(
-          (proposal) =>
-            proposal.projectId === activeProjectId &&
-            proposal.status === "cooled",
-        )
-        .sort((a, b) => b.signalScore - a.signalScore),
-    [activeProjectId, proposals],
-  );
   const ghostNodes = useMemo(
     () =>
       activeProposals
@@ -210,10 +197,8 @@ export function GraphNavigator() {
             aria-expanded={proposalTrayOpen}
           >
             <Sparkles size={14} />
-            {(activeProposals.length > 0 || cooledProposals.length > 0) && (
-              <span className="proposal-count">
-                {activeProposals.length || cooledProposals.length}
-              </span>
+            {activeProposals.length > 0 && (
+              <span className="proposal-count">{activeProposals.length}</span>
             )}
           </button>
           <button
@@ -238,44 +223,7 @@ export function GraphNavigator() {
 
       {proposalTrayOpen && (
         <div className="proposal-panel" role="dialog" aria-label="幽灵分支">
-          <div className="proposal-panel-head">
-            <div>
-              <b>幽灵分支</b>
-              <span>先看方向，点击后才创建正式卡片</span>
-            </div>
-            <button
-              className="icon-btn"
-              onClick={() => setProposalTrayOpen(false)}
-              aria-label="关闭幽灵分支"
-            >
-              <X size={14} />
-            </button>
-          </div>
-          <div className="proposal-list scroll-y">
-            {activeProposals.length === 0 && cooledProposals.length === 0 && (
-              <p className="proposal-empty">
-                当前没有提案。系统只会在次日根据你的真实行为提出方向。
-              </p>
-            )}
-            {activeProposals.map((proposal) => (
-              <ProposalItem
-                key={proposal.id}
-                proposal={proposal}
-                onOpen={() => openProposal(proposal.id)}
-                onDismiss={() => dismissProposal(proposal.id)}
-              />
-            ))}
-            {cooledProposals.length > 0 && (
-              <div className="cooled-heading">冷却中 · 不再提醒</div>
-            )}
-            {cooledProposals.map((proposal) => (
-              <div className="proposal-item cooled" key={proposal.id}>
-                <b>{proposal.title}</b>
-                <p>{proposal.explorationQuestion}</p>
-                <small>{proposalEvidenceLabel(proposal.evidence)}</small>
-              </div>
-            ))}
-          </div>
+          <ProposalExplorer onClose={() => setProposalTrayOpen(false)} />
         </div>
       )}
 
@@ -465,13 +413,13 @@ export function GraphNavigator() {
                   <g
                     role="button"
                     tabIndex={0}
-                    aria-label={`开始探索幽灵分支：${proposal.title}`}
+                    aria-label={`查看幽灵分支提案：${proposal.title}`}
                     onPointerDown={(event) => event.stopPropagation()}
-                    onClick={() => openProposal(proposal.id)}
+                    onClick={() => previewProposal(proposal.id)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        openProposal(proposal.id);
+                        previewProposal(proposal.id);
                       }
                     }}
                     onPointerEnter={(event) => {
@@ -531,7 +479,7 @@ export function GraphNavigator() {
                     <b>{proposal.explorationQuestion}</b>
                     <i>
                       来自《{cardTitle(proposal.suggestedParentCardId)}》 ·{" "}
-                      {proposalEvidenceLabel(proposal.evidence)} · 点击开始探索
+                      {proposalEvidenceLabel(proposal.evidence)} · 点击查看提案
                     </i>
                   </>
                 );
@@ -571,38 +519,5 @@ export function GraphNavigator() {
         ))}
       </div>
     </nav>
-  );
-}
-
-function ProposalItem({
-  proposal,
-  onOpen,
-  onDismiss,
-}: {
-  proposal: Proposal;
-  onOpen: () => void;
-  onDismiss: () => void;
-}) {
-  return (
-    <article className="proposal-item">
-      <div className="proposal-item-top">
-        <b>{proposal.title}</b>
-        <span className={`proposal-evidence ${proposal.evidence}`}>
-          {proposalEvidenceLabel(proposal.evidence)}
-        </span>
-      </div>
-      <p>{proposal.explorationQuestion}</p>
-      <small>
-        {proposal.reason} · {EDGE_META[proposal.suggestedRelation].label}方向
-      </small>
-      <div className="proposal-actions">
-        <button className="btn primary" onClick={onOpen}>
-          开始探索
-        </button>
-        <button className="btn" onClick={onDismiss}>
-          忽略
-        </button>
-      </div>
-    </article>
   );
 }
