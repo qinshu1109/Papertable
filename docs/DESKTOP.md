@@ -71,11 +71,7 @@ web 端的 IndexedDB 全程不动，可以作为数周的实时回滚。
 
 ## CI
 
-`.github/workflows/ci.yml` 目前只有 `verify`。另外两个 job 放在
-`.github/ci-desktop-jobs.yml`，因为推送 `.github/workflows/` 下的文件需要 OAuth token
-的 `workflow` scope，本地凭证没有；那个文件里写了两种启用方式。
-
-三个 job 的分工：
+`.github/workflows/ci.yml` 有三个 job：
 
 - `verify`（ubuntu）——typecheck / lint / format / 单测 / build / Playwright。
   **永远不能删**：`tauri-driver` 需要 WebKitWebDriver，而它在 macOS 上不存在，
