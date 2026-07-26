@@ -31,27 +31,53 @@
 ### 颜色
 
 ```css
---bg:         #F3EEE5;  /* 应用背景，叠加极轻纸张颗粒 */
---card:       #FBF8F2;  /* 当前卡片 */
---card-back:  #EAE3D9;  /* 后方祖先卡片 */
---composer:   #EEE8DF;  /* 输入器 */
---raised:     #F7F3EC;  /* 次级浮起面：小按钮、菜单项底 */
---sunken:     #ECE5DA;  /* 下陷面：代码块、表头、输入框 */
+--bg:          #F3EEE5;  /* 应用背景，叠加极轻纸张颗粒 */
+--card:        #FBF8F2;  /* 当前卡片 */
+--card-back:   #EAE3D9;  /* 后方祖先卡片 */
+--composer:    #EEE8DF;  /* 输入器 */
+--raised:      #F7F3EC;  /* 次级浮起面：小按钮、菜单项底 */
+--sunken:      #ECE5DA;  /* 下陷面：代码块、表头、输入框 */
 
---ink:        #342B26;  /* 主文字 */
---ink-2:      #746A62;  /* 次级文字 */
---ink-3:      #9A9087;  /* 弱文字、占位符、图例说明 */
+--ink:         #342B26;  /* 主文字 */
+--ink-2:       #665D56;  /* 次级文字 */
+--ink-3:       #746B63;  /* 弱文字：仅限最亮的三个表面 */
+--ink-3-aa:    #6B6259;  /* 弱文字：可能落在深色表面上时用它 */
 
---line:       #D8D0C6;  /* 主边框 */
---line-soft:  #E4DDD3;  /* 内部分隔线 */
+--line:        #D8D0C6;  /* 主边框 */
+--line-soft:   #E4DDD3;  /* 内部分隔线 */
 
---accent:     #E66A3A;  /* 主强调 / 深挖 */
---ctx:        #6F8C76;  /* 引用与上下文 / 发散 */
---branch:     #6F7893;  /* 分支辅助 / 改道 */
---danger:     #B65D56;  /* 危险 */
+--accent:      #B9471E;  /* 主强调 / 深挖 */
+--accent-soft: #F6DED3;
+--ctx:         #526E59;  /* 引用与上下文 / 发散 */
+--ctx-soft:    #E2EBE3;
+--branch:      #58627D;  /* 分支辅助 / 改道 */
+--branch-soft: #E3E6ED;
+--danger:      #A94D47;  /* 危险 */
 ```
 
 三种关系各自绑定一个语义色，并在关系胶囊、底部按钮、轮次工具条 hover 态、关系图连线四处保持一致。这是让用户形成关系记忆的核心手段。
+
+### 弱文字的两档：为什么有 `--ink-3-aa`
+
+`--ink-3` (#746B63) 只在最亮的三个表面上达到 WCAG AA 的 4.5:1：
+
+| 表面 | `--ink-3` | `--ink-3-aa` |
+| --- | --- | --- |
+| `--card` #FBF8F2 | 4.92 ✅ | 5.63 |
+| `--raised` #F7F3EC | 4.72 ✅ | 5.40 |
+| `--bg` #F3EEE5 | 4.51 ✅ | 5.17 |
+| `--composer` #EEE8DF | **4.28 ❌** | 4.90 ✅ |
+| `--sunken` #ECE5DA | **4.17 ❌** | 4.77 ✅ |
+| `--card-back` #EAE3D9 | **4.10 ❌** | 4.69 ✅ |
+| `--accent-soft` #F6DED3 | **4.05 ❌** | 4.64 ✅ |
+| `--ctx-soft` #E2EBE3 | 4.42 ❌ | 4.90 ✅ |
+| `--branch-soft` #E3E6ED | 4.77 ✅ | 4.78 ✅ |
+
+规则：**弱文字只要可能出现在 `--card` / `--raised` / `--bg` 之外的表面上，就用 `--ink-3-aa`。** 已按此改的四处是 `.sb-search`（含占位符）、`.settings-field input::placeholder`、`.composer textarea::placeholder`、`.rel-btn small`。
+
+最后一处值得单独说明：它常态在 `--raised` 上（4.72，过线），但 `.rel-btn.k-child:hover` 会把背景换成 `--accent-soft`，11px 的字在那里掉到 4.05。**hover 态换背景是这类问题最容易被漏掉的形式**——只看静态截图查不出来。
+
+另需注意但不属于对比度问题的：`.proposal-evidence` 是 9px，`.attention-metrics`、`.graph-title` 在 11px 一档。这些是字号问题，不要用调色来补偿。
 
 ### 圆角
 

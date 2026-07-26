@@ -14,6 +14,11 @@
   --ink: #342b26;
   --ink-2: #665d56;
   --ink-3: #746b63;
+  /* --ink-3 只在最亮的 --card / --raised / --bg 上过 4.5:1；落到 --sunken(4.17)、
+     --composer(4.28)、--card-back(4.10) 或 hover 态的 --accent-soft(4.05) 上都不
+     达标。弱化文字凡是可能出现在这些表面上的，改用这一档：在全部九个表面 token
+     上最低 4.64:1，视觉上仍明显弱于正文。 */
+  --ink-3-aa: #6b6259;
 
   /* 线条 */
   --line: #d8d0c6;
@@ -287,7 +292,7 @@ textarea {
   border: 1px solid var(--line-soft);
   border-radius: var(--r-btn);
   padding: 6px 9px;
-  color: var(--ink-3);
+  color: var(--ink-3-aa);
 }
 .sb-search input {
   border: none;
@@ -298,7 +303,7 @@ textarea {
   color: var(--ink);
 }
 .sb-search input::placeholder {
-  color: var(--ink-3);
+  color: var(--ink-3-aa);
 }
 
 .sb-label {
@@ -799,7 +804,9 @@ textarea {
   flex-shrink: 0;
 }
 .rel-btn small {
-  color: var(--ink-3);
+  /* 常态在 --raised 上，但 .k-child:hover 会把背景换成 --accent-soft，
+     11px 的 --ink-3 在那里只有 4.05:1。 */
+  color: var(--ink-3-aa);
   font-size: 11px;
   font-weight: 400;
 }
@@ -1440,7 +1447,7 @@ textarea {
   color: var(--ink);
 }
 .composer textarea::placeholder {
-  color: var(--ink-3);
+  color: var(--ink-3-aa);
 }
 
 .chip-btn {
@@ -1868,7 +1875,7 @@ textarea {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .settings-field input::placeholder {
-  color: var(--ink-3);
+  color: var(--ink-3-aa);
 }
 .attention-settings {
   display: flex;
