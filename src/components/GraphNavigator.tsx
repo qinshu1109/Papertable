@@ -508,7 +508,7 @@ export function GraphNavigator() {
               }}
             />
             {EDGE_META[t].label}
-            <span style={{ color: "var(--ink-3-aa)", fontSize: 10.5 }}>
+            <span style={{ color: "var(--ink-3)", fontSize: 10.5 }}>
               {t === "child"
                 ? "继承主题与片段"
                 : t === "divergent"

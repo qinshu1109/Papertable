@@ -426,7 +426,7 @@ export function CardStage() {
                 >
                   {c.title}
                 </span>
-                <span style={{ color: "var(--ink-3-aa)", fontSize: 11 }}>
+                <span style={{ color: "var(--ink-3)", fontSize: 11 }}>
                   · {e ? EDGE_META[e.type].label : "根卡片"}
                 </span>
               </div>
@@ -628,7 +628,7 @@ export function CardStage() {
                   <div
                     style={{
                       padding: "40px 0",
-                      color: "var(--ink-3-aa)",
+                      color: "var(--ink-3)",
                       fontSize: 14,
                       lineHeight: 1.9,
                     }}

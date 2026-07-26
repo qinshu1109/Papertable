@@ -1136,9 +1136,14 @@ pub fn conflicted(conn: &Connection) -> Result<Vec<(String, String)>> {
 }
 
 /// 用户选择「以 Papertable 为准」后清除挂起，下次同步会正常覆盖。
+/// 用户选择「以 Papertable 为准」：标记为下一次同步强制覆盖。
+///
+/// **不能改成把 `last_written_hash` 置空**。那会让 `write_note` 认为这是一个我们从没
+/// 写过、却已经存在的文件，于是按「绝不接管他人文件」的规则再次隔离——按钮点了、
+/// 提示说会覆盖、下一次同步却又报冲突。意图必须显式表达。
 pub fn clear_conflict(conn: &Connection, card_id: &str) -> Result<()> {
     conn.execute(
-        "UPDATE sync_state SET status = 'synced', last_written_hash = NULL WHERE card_id = ?1",
+        "UPDATE sync_state SET status = 'force' WHERE card_id = ?1",
         params![card_id],
     )?;
     Ok(())
@@ -1400,14 +1405,24 @@ mod tests {
         let _ = &mut conn;
     }
 
+    /// 「以 Papertable 为准」要留下一个**可执行的意图**（status='force'），
+    /// 而不是把基线抹掉——抹掉基线会让下一次写入按「不接管他人文件」再次隔离。
     #[test]
-    fn resolving_a_conflict_clears_the_baseline_so_the_next_write_overwrites() {
+    fn resolving_a_conflict_marks_it_for_a_forced_overwrite() {
         let conn = seeded();
         put_sync_state(&conn, "c", "项目/卡片.md", Some("h1"), 1, "conflict").unwrap();
         assert_eq!(conflicted(&conn).unwrap().len(), 1);
+
         clear_conflict(&conn, "c").unwrap();
-        assert!(conflicted(&conn).unwrap().is_empty());
-        assert_eq!(sync_hash(&conn, "c").unwrap(), None);
+        assert!(conflicted(&conn).unwrap().is_empty(), "横幅上不该再列它");
+        let (_, status) = sync_record(&conn, "c").unwrap().unwrap();
+        assert_eq!(status, "force", "同步循环要能看出这是一次强制覆盖");
+        // 基线仍然保留，强制覆盖不依赖它，但也不该被无意义地丢掉。
+        assert_eq!(
+            sync_hash(&conn, "c").unwrap(),
+            None,
+            "force 态不参与常规基线"
+        );
     }
 
     #[test]

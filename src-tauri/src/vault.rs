@@ -207,6 +207,19 @@ pub struct WriteReport {
     pub conflict_path: Option<String>,
 }
 
+/// 用户对冲突的决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overwrite {
+    /// 常规：覆盖前检查用户有没有改过这个文件。
+    IfUnchanged,
+    /// 用户选了「以 Papertable 为准」。**一次性**无条件覆盖，并清掉冲突副本。
+    ///
+    /// 必须是一个明确的意图，不能用「把基线置空」来表达——那正好落进
+    /// 「无基线 + 文件已存在 → 隔离」这条防止接管他人文件的规则里，于是
+    /// 按钮点了、提示说会覆盖、下一次同步却又报冲突。
+    Force,
+}
+
 /// 按容纳规则写一篇笔记，并在覆盖前检查用户有没有改过它。
 ///
 /// `last_written_hash` 来自 sync_state：`None` 表示我们从没写过这个文件。
@@ -215,10 +228,26 @@ pub fn write_note(
     relative: &[&str],
     content: &str,
     last_written_hash: Option<&str>,
+    overwrite: Overwrite,
 ) -> Result<WriteReport> {
     let path = resolve(vault, relative)?;
     let display = relative.join("/");
     let next_hash = normalized_hash(content);
+
+    if overwrite == Overwrite::Force {
+        write_atomically(&path, content)?;
+        // 用户已经选定以 Papertable 为准，留着冲突副本只会让人以为还没解决。
+        let conflict = path.with_extension("papertable-conflict.md");
+        if conflict.exists() {
+            let _ = std::fs::remove_file(conflict);
+        }
+        return Ok(WriteReport {
+            outcome: WriteOutcome::Updated,
+            hash: Some(next_hash),
+            path: display,
+            conflict_path: None,
+        });
+    }
 
     if path.exists() {
         let existing = std::fs::read_to_string(&path)?;
@@ -317,6 +346,16 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// 常规写入，测试里的默认。
+    fn write_note_default(
+        vault: &Path,
+        relative: &[&str],
+        content: &str,
+        last: Option<&str>,
+    ) -> Result<WriteReport> {
+        write_note(vault, relative, content, last, Overwrite::IfUnchanged)
+    }
+
     fn vault() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(root(dir.path())).unwrap();
@@ -330,7 +369,7 @@ mod tests {
     fn the_first_write_creates_the_root_instead_of_being_refused() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("80_AI暂存")).unwrap();
-        let report = write_note(dir.path(), &["项目", "首篇.md"], "# 首篇\n", None)
+        let report = write_note_default(dir.path(), &["项目", "首篇.md"], "# 首篇\n", None)
             .expect("容纳根尚不存在时，首次写入必须成功并把它建出来");
         assert_eq!(report.outcome, WriteOutcome::Created);
         assert!(root(dir.path()).join("项目/首篇.md").exists());
@@ -345,7 +384,8 @@ mod tests {
     #[test]
     fn writes_land_inside_the_owned_subtree() {
         let dir = vault();
-        let report = write_note(dir.path(), &["项目", "卡片.md"], "# 内容\n", None).unwrap();
+        let report =
+            write_note_default(dir.path(), &["项目", "卡片.md"], "# 内容\n", None).unwrap();
         assert_eq!(report.outcome, WriteOutcome::Created);
         assert!(root(dir.path()).join("项目/卡片.md").exists());
     }
@@ -407,14 +447,15 @@ mod tests {
     fn a_user_edit_is_quarantined_never_overwritten() {
         let dir = vault();
         let path = ["项目", "卡片.md"];
-        let first = write_note(dir.path(), &path, "---\nk: 1\n---\n\n原始正文。\n", None).unwrap();
+        let first =
+            write_note_default(dir.path(), &path, "---\nk: 1\n---\n\n原始正文。\n", None).unwrap();
         let hash = first.hash.unwrap();
 
         // 用户在 Obsidian 改了它。
         let file = root(dir.path()).join("项目/卡片.md");
         fs::write(&file, "---\nk: 1\n---\n\n我自己改的正文。\n").unwrap();
 
-        let report = write_note(
+        let report = write_note_default(
             dir.path(),
             &path,
             "---\nk: 1\n---\n\nPapertable 的新正文。\n",
@@ -440,7 +481,7 @@ mod tests {
         let dir = vault();
         let path = ["项目", "卡片.md"];
         let content = "---\nb: 2\na: 1\n---\n\n正文。\n";
-        let hash = write_note(dir.path(), &path, content, None)
+        let hash = write_note_default(dir.path(), &path, content, None)
             .unwrap()
             .hash
             .unwrap();
@@ -452,7 +493,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = write_note(dir.path(), &path, content, Some(&hash)).unwrap();
+        let report = write_note_default(dir.path(), &path, content, Some(&hash)).unwrap();
         assert_eq!(
             report.outcome,
             WriteOutcome::Unchanged,
@@ -467,7 +508,7 @@ mod tests {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, "不是 Papertable 写的。\n").unwrap();
 
-        let report = write_note(
+        let report = write_note_default(
             dir.path(),
             &["项目", "别人的笔记.md"],
             "Papertable 想写的内容。\n",
@@ -481,10 +522,57 @@ mod tests {
         );
     }
 
+    /// 「以 Papertable 为准」必须真的覆盖。
+    ///
+    /// 真机验收在这里失败过：当时把这个意图表达成「把 last_written_hash 置空」，
+    /// 而那正好落进「无基线 + 文件已存在 → 隔离」这条规则，于是按钮点了、提示说会
+    /// 覆盖、下一次同步照旧报冲突，用户的编辑还在。
+    #[test]
+    fn choosing_papertable_actually_overwrites() {
+        let dir = vault();
+        let path = ["项目", "卡片.md"];
+        let hash = write_note_default(dir.path(), &path, "---\nk: 1\n---\n\n原始。\n", None)
+            .unwrap()
+            .hash
+            .unwrap();
+
+        let file = root(dir.path()).join("项目/卡片.md");
+        fs::write(&file, "---\nk: 1\n---\n\n我自己改的。\n").unwrap();
+        // 先走一次常规同步，确认它被隔离（这一步是失败前提）。
+        let conflicted = write_note_default(dir.path(), &path, "新内容。\n", Some(&hash)).unwrap();
+        assert_eq!(conflicted.outcome, WriteOutcome::Conflict);
+        assert!(root(dir.path())
+            .join("项目/卡片.papertable-conflict.md")
+            .exists());
+
+        // 用户选择以 Papertable 为准。
+        let forced = write_note(
+            dir.path(),
+            &path,
+            "Papertable 的新内容。\n",
+            None, // 基线为空也不该阻止强制覆盖
+            Overwrite::Force,
+        )
+        .unwrap();
+        assert_eq!(forced.outcome, WriteOutcome::Updated);
+        assert!(forced.hash.is_some(), "强制覆盖后要推进基线");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "Papertable 的新内容。\n",
+            "文件必须真的被覆盖"
+        );
+        assert!(
+            !root(dir.path())
+                .join("项目/卡片.papertable-conflict.md")
+                .exists(),
+            "决定已经做出，冲突副本要清掉，否则看起来像还没解决"
+        );
+    }
+
     #[test]
     fn renaming_moves_the_file_so_obsidian_can_fix_backlinks() {
         let dir = vault();
-        write_note(dir.path(), &["项目", "旧标题.md"], "# 旧\n", None).unwrap();
+        write_note_default(dir.path(), &["项目", "旧标题.md"], "# 旧\n", None).unwrap();
         rename_note(dir.path(), &["项目", "旧标题.md"], &["项目", "新标题.md"]).unwrap();
         assert!(!root(dir.path()).join("项目/旧标题.md").exists());
         assert!(root(dir.path()).join("项目/新标题.md").exists());

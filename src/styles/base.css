@@ -13,12 +13,14 @@
   /* 文字 */
   --ink: #342b26;
   --ink-2: #665d56;
-  --ink-3: #746b63;
-  /* --ink-3 只在最亮的 --card / --raised / --bg 上过 4.5:1；落到 --sunken(4.17)、
-     --composer(4.28)、--card-back(4.10) 或 hover 态的 --accent-soft(4.05) 上都不
-     达标。弱化文字凡是可能出现在这些表面上的，改用这一档：在全部九个表面 token
-     上最低 4.64:1，视觉上仍明显弱于正文。 */
-  --ink-3-aa: #6b6259;
+  /* 弱化文字**只有一档**。
+     原来的 #746b63 只在最亮的 --card / --raised / --bg 上勉强过 4.5:1（4.51–4.92），
+     落到 --sunken(4.17)、--composer(4.28)、--card-back(4.10) 或 hover 态的
+     --accent-soft(4.05) 上都不达标。曾经拆成两档，让调用点自己判断该用哪一个——
+     结果是漏了一批，真人两次反馈「关系面板和小图标偏低」。
+     现在只留一个值：在全部九个表面 token 上最低 4.64:1，且与正文仍有明显区分。
+     一个 token 就没有选错 token 这回事。 */
+  --ink-3: #6b6259;
 
   /* 线条 */
   --line: #d8d0c6;
@@ -292,7 +294,7 @@ textarea {
   border: 1px solid var(--line-soft);
   border-radius: var(--r-btn);
   padding: 6px 9px;
-  color: var(--ink-3-aa);
+  color: var(--ink-3);
 }
 .sb-search input {
   border: none;
@@ -303,7 +305,7 @@ textarea {
   color: var(--ink);
 }
 .sb-search input::placeholder {
-  color: var(--ink-3-aa);
+  color: var(--ink-3);
 }
 
 .sb-label {
@@ -806,7 +808,7 @@ textarea {
 .rel-btn small {
   /* 常态在 --raised 上，但 .k-child:hover 会把背景换成 --accent-soft，
      11px 的 --ink-3 在那里只有 4.05:1。 */
-  color: var(--ink-3-aa);
+  color: var(--ink-3);
   font-size: 11px;
   font-weight: 400;
 }
@@ -1043,7 +1045,7 @@ textarea {
 .graph-title {
   font-size: 11px;
   letter-spacing: 0.1em;
-  color: var(--ink-3-aa);
+  color: var(--ink-3);
   font-weight: 600;
   text-transform: uppercase;
 }
@@ -1447,7 +1449,7 @@ textarea {
   color: var(--ink);
 }
 .composer textarea::placeholder {
-  color: var(--ink-3-aa);
+  color: var(--ink-3);
 }
 
 .chip-btn {
@@ -1875,7 +1877,7 @@ textarea {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .settings-field input::placeholder {
-  color: var(--ink-3-aa);
+  color: var(--ink-3);
 }
 .attention-settings {
   display: flex;
@@ -2444,7 +2446,7 @@ textarea {
   background: var(--sunken);
   border-radius: 5px;
   padding: 1px 5px;
-  color: var(--ink-3-aa);
+  color: var(--ink-3);
 }
 .vault-conflict-row {
   display: flex;
@@ -2500,12 +2502,12 @@ textarea {
 .reasoning-count {
   margin-left: auto;
   font-size: 11px;
-  color: var(--ink-3-aa);
+  color: var(--ink-3);
   font-variant-numeric: tabular-nums;
 }
 .reasoning-chevron {
   flex-shrink: 0;
-  color: var(--ink-3-aa);
+  color: var(--ink-3);
   transition: transform var(--d-fast) var(--e-out);
 }
 .reasoning-block.open .reasoning-chevron {

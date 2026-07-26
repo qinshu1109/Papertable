@@ -152,12 +152,12 @@ export function ConceptPreview({
           drag.current = null;
         }}
       >
-        <GripHorizontal size={14} color="var(--ink-3-aa)" />
+        <GripHorizontal size={14} color="var(--ink-3)" />
         <div className="cp-title">{state.term}</div>
         <span
           style={{
             fontSize: 10.5,
-            color: status === "error" ? "var(--danger)" : "var(--ink-3-aa)",
+            color: status === "error" ? "var(--danger)" : "var(--ink-3)",
             border: "1px solid var(--line)",
             borderRadius: 99,
             padding: "2px 7px",

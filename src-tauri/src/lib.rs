@@ -257,9 +257,14 @@ fn vault_sync(
         let parts: Vec<&str> = note.relative.iter().map(String::as_str).collect();
         let target = note.relative.join("/");
 
+        let mut overwrite = vault::Overwrite::IfUnchanged;
         if let Some(id) = &note.card_id {
             let record =
                 db::sync_record(conn, id).map_err(|e| vault::Error::from(e.to_string()))?;
+            // 用户选过「以 Papertable 为准」：这一次无条件覆盖。
+            if matches!(&record, Some((_, status)) if status == "force") {
+                overwrite = vault::Overwrite::Force;
+            }
             match record {
                 // 用户选了「保留笔记」：这张卡片已脱钩，此后一个字都不写。
                 // 之前这里没检查，于是墓碑写了没人读——按钮点完，下一轮同步又冲突。
@@ -295,7 +300,8 @@ fn vault_sync(
 
         // 写盘前登记：让常见路径省掉一次读盘。**只是优化**，真正的判定靠哈希。
         watch.mark(std::path::Path::new(&note.relative.join("/")));
-        let report = vault::write_note(&root, &parts, &note.content, previous.as_deref())?;
+        let report =
+            vault::write_note(&root, &parts, &note.content, previous.as_deref(), overwrite)?;
         if let Some(id) = &note.card_id {
             let status = if report.outcome == vault::WriteOutcome::Conflict {
                 "conflict"
