@@ -38,8 +38,12 @@ import {
 import { visibleModelOutput } from "./lib/modelOutput";
 import { preferredProjectCard } from "./lib/projectScope";
 import {
+  applyAttentionChanges,
+  applyChanges,
   clearWorkspace,
   deleteAttentionForProject,
+  diffAttention,
+  diffWorkspace,
   loadAttentionState,
   loadWorkspace,
   saveAttentionState,
@@ -336,6 +340,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     sessions: [],
     proposals: [],
   });
+  // 上次成功落库的快照，增量保存的比较基线。写失败时保持不动，下一次 diff 会
+  // 重新带上这批变化，因此失败只会重写，不会丢。
+  const persistedRef = useRef<WorkspaceSnapshot | null>(null);
+  const persistedAttentionRef = useRef<AttentionSnapshot | null>(null);
   const hiddenAtRef = useRef<number | null>(null);
   const materializingProposalIdsRef = useRef(new Set<string>());
 
@@ -387,6 +395,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const now = Date.now();
       const next = saved ?? seed;
       if (!saved) await saveWorkspace(seed);
+      // 落库基线 = 此刻库里真正的内容。下面的裁剪与默认值补齐会成为第一次
+      // 增量保存的 diff 内容。
+      persistedRef.current = next;
+      persistedAttentionRef.current = savedAttention;
       const withDefaults: AppSettings = {
         ...next.settings,
         attentionPaused: next.settings.attentionPaused ?? false,
@@ -505,7 +517,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     persistTimer.current = window.setTimeout(() => {
       persistTimer.current = null;
       lastPersistedAt.current = Date.now();
-      void saveWorkspace(latestRef.current);
+      const target = latestRef.current;
+      void applyChanges(diffWorkspace(persistedRef.current, target)).then(
+        () => {
+          persistedRef.current = target;
+        },
+        () => {
+          // 基线保持不动：下一次 diff 会重新包含这批变化。
+        },
+      );
     }, delay);
   }, [
     projects,
@@ -538,7 +558,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     if (attentionPersistTimer.current) return;
     attentionPersistTimer.current = window.setTimeout(() => {
       attentionPersistTimer.current = null;
-      void saveAttentionState(attentionRef.current);
+      const target = attentionRef.current;
+      void applyAttentionChanges(
+        diffAttention(persistedAttentionRef.current, target),
+      ).then(
+        () => {
+          persistedAttentionRef.current = target;
+        },
+        () => {
+          // 同上：写失败时不推进基线。
+        },
+      );
     }, 120);
   }, [hydrated, interactionEvents, proposals, sessions]);
 
@@ -1823,7 +1853,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           setView(snapshot.view);
           setSettings(snapshot.settings);
           commitAttention(attentionSnapshot);
-          void saveAttentionState(attentionSnapshot);
+          // 撤销要把 deleteAttentionForProject 删掉的行整体写回，之后基线随之复位。
+          void saveAttentionState(attentionSnapshot).then(() => {
+            persistedAttentionRef.current = attentionSnapshot;
+          });
           dismissToast();
         },
       });
@@ -1999,6 +2032,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     await clearWorkspace();
     const next = seedSnapshot();
     await saveWorkspace(next);
+    // 库被整体重写，两条增量基线必须跟着复位，否则下一次 diff 会拿旧内容比较。
+    persistedRef.current = next;
+    persistedAttentionRef.current = { events: [], sessions: [], proposals: [] };
     setProjects(next.projects);
     setCards(next.cards);
     setEdges(next.edges);
