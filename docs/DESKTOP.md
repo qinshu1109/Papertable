@@ -6,7 +6,14 @@ pnpm desktop:signed     # 构建 release 并 ad-hoc 签名
 pnpm test:rust          # Rust 单元测试
 ```
 
-产物在 `src-tauri/target/release/bundle/macos/Papertable.app`，拖进 `/Applications` 即可。
+`desktop:signed` 会构建、ad-hoc 签名，**并覆盖安装到 `/Applications/Papertable.app`**。
+加 `--no-install` 可只构建不安装，产物在 `src-tauri/target/release/bundle/macos/`。
+
+安装这一步一开始是缺的，结果是「改完重新构建」之后打开的仍然是 `/Applications` 里的
+旧版本，而界面上看不出任何异常——只会觉得改动没生效。
+
+ad-hoc 签名的内容哈希每次构建都不同，所以**更新后钥匙串里的密钥可能读不出来**，
+需要在设置页重填一次。设置页会如实显示密钥当前在钥匙串还是在回落文件里。
 
 ## 为什么要 ad-hoc 签名
 

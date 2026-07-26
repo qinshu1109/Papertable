@@ -13,6 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODE="${1:-release}"
+[[ "$MODE" == "--no-install" ]] && MODE="release"
 case "$MODE" in
   release) pnpm tauri build --bundles app ;;
   debug)   pnpm tauri build --debug --bundles app ;;
@@ -26,6 +27,21 @@ APP="src-tauri/target/${MODE}/bundle/macos/Papertable.app"
 # --deep：连同内嵌的框架一起签。
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
+
+# 安装到 /Applications。
+#
+# 之前这一步是缺的：构建产物留在 target/ 里，而用户运行的是 /Applications 里那份，
+# 于是「改完重新构建」之后打开的仍然是旧版本，且看不出任何异常。
+# 传 --no-install 可跳过。
+if [[ " $* " != *" --no-install "* ]]; then
+  # 正在运行的话先退出，否则替换 bundle 会留下半新半旧的目录。
+  pkill -f "Papertable.app" 2>/dev/null || true
+  pkill -f "MacOS/papertable" 2>/dev/null || true
+  sleep 1
+  rm -rf "/Applications/Papertable.app"
+  cp -R "$APP" /Applications/
+  echo "已安装到 /Applications/Papertable.app"
+fi
 
 echo
 echo "已签名：$APP"
