@@ -38,6 +38,11 @@ export interface VaultBridge {
   rename(input: { vault: string; from: string[]; to: string[] }): Promise<void>;
   remove(input: { vault: string; relative: string[] }): Promise<void>;
   /**
+   * 取消跟踪这批卡片并删掉它们的笔记。路径取自同步记录，**只删我们确实写过的
+   * 文件**，不按当前状态重新推算文件名。
+   */
+  forget(input: { vault: string; cardIds: string[] }): Promise<number>;
+  /**
    * 全量重扫并开始监听，返回索引到的笔记数。监听器出问题时重新调用它，就是
    * 「重新扫描知识库」那个按钮。
    */

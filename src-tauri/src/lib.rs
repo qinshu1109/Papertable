@@ -221,6 +221,28 @@ fn vault_sync(
 
     for note in &notes {
         let parts: Vec<&str> = note.relative.iter().map(String::as_str).collect();
+        let target = note.relative.join("/");
+
+        if let Some(id) = &note.card_id {
+            let record =
+                db::sync_record(conn, id).map_err(|e| vault::Error::from(e.to_string()))?;
+            match record {
+                // 用户选了「保留笔记」：这张卡片已脱钩，此后一个字都不写。
+                // 之前这里没检查，于是墓碑写了没人读——按钮点完，下一轮同步又冲突。
+                Some((_, status)) if status == "detached" => continue,
+                // 标题变了：先 rename 再写，Obsidian 会自动更新指向它的 [[双链]]。
+                // 路径取自 sync_state 记下的那个，不是重新推算的——推算依赖当时的
+                // 重名集合，改完标题就对不上了。
+                Some((old, _)) if old != target => {
+                    let old_parts: Vec<&str> = old.split('/').collect();
+                    watch.mark(std::path::Path::new(&old));
+                    watch.mark(std::path::Path::new(&target));
+                    vault::rename_note(&root, &old_parts, &parts)?;
+                }
+                _ => {}
+            }
+        }
+
         let previous = match &note.card_id {
             Some(id) => db::sync_hash(conn, id).map_err(|e| vault::Error::from(e.to_string()))?,
             None => None,
@@ -272,6 +294,36 @@ fn vault_delete(vault: String, relative: Vec<String>) -> Result<(), vault::Error
         &std::path::PathBuf::from(&vault),
         &relative.iter().map(String::as_str).collect::<Vec<_>>(),
     )
+}
+
+/// 取消跟踪一批卡片，并删掉它们在知识库里的笔记。
+///
+/// 路径取自 `sync_state` 记下的那个——**只删我们确实写过的文件**，绝不按当前状态
+/// 重新推算文件名，那样可能删到别人的东西。
+#[tauri::command]
+fn vault_forget(
+    db: State<Db>,
+    watch: State<watcher::VaultWatcher>,
+    vault: String,
+    card_ids: Vec<String>,
+) -> Result<usize, vault::Error> {
+    let root = std::path::PathBuf::from(&vault);
+    let mut guard = db.0.lock().map_err(|_| "数据库锁被毒化".to_string())?;
+    let conn = &mut *guard;
+    let mut removed = 0usize;
+    for id in &card_ids {
+        let Some((path, _)) =
+            db::sync_record(conn, id).map_err(|e| vault::Error::from(e.to_string()))?
+        else {
+            continue;
+        };
+        watch.mark(std::path::Path::new(&path));
+        let parts: Vec<&str> = path.split('/').collect();
+        vault::delete_note(&root, &parts)?;
+        db::forget_sync(conn, id).map_err(|e| vault::Error::from(e.to_string()))?;
+        removed += 1;
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -395,6 +447,7 @@ pub fn run() {
             vault_sync,
             vault_rename,
             vault_delete,
+            vault_forget,
             vault_watch,
             vault_resolve_link,
             vault_indexed_count,

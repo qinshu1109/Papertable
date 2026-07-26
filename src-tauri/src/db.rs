@@ -1063,6 +1063,26 @@ pub fn sync_hash(conn: &Connection, card_id: &str) -> Result<Option<String>> {
         .flatten())
 }
 
+/// 上次写出去的路径与状态。冲突挂起 / 已脱钩的卡片也要能查到，所以不过滤 status。
+pub fn sync_record(conn: &Connection, card_id: &str) -> Result<Option<(String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT vault_path, status FROM sync_state WHERE card_id = ?1",
+            params![card_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// 取消跟踪：把 sync_state 的行删掉。文件由调用方按记录下来的路径删除。
+pub fn forget_sync(conn: &Connection, card_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM sync_state WHERE card_id = ?1",
+        params![card_id],
+    )?;
+    Ok(())
+}
+
 pub fn put_sync_state(
     conn: &Connection,
     card_id: &str,
@@ -1331,6 +1351,37 @@ mod tests {
             .collect();
         ids.sort();
         assert_eq!(ids, vec!["c", "c2", "ghost"]);
+    }
+
+    /// 「保留笔记」写下的墓碑必须查得到。之前 sync_hash 只看 status='synced'，
+    /// 于是脱钩的卡片基线为空 → 文件已存在 → 又被判冲突，按钮等于没点。
+    #[test]
+    fn a_detached_card_is_still_visible_to_the_sync_loop() {
+        let mut conn = seeded();
+        put_sync_state(&conn, "c", "项目/卡片.md", Some("h1"), 1, "synced").unwrap();
+        assert_eq!(sync_hash(&conn, "c").unwrap().as_deref(), Some("h1"));
+
+        stop_syncing(&conn, "c").unwrap();
+        // 状态查得到，同步循环据此整张跳过。
+        let (path, status) = sync_record(&conn, "c").unwrap().unwrap();
+        assert_eq!(status, "detached");
+        assert_eq!(path, "项目/卡片.md");
+        // 而基线仍然为空——正因如此，只看 sync_hash 的实现会把它误判成新文件。
+        assert_eq!(sync_hash(&conn, "c").unwrap(), None);
+
+        forget_sync(&conn, "c").unwrap();
+        assert_eq!(sync_record(&conn, "c").unwrap(), None);
+        let _ = &mut conn;
+    }
+
+    #[test]
+    fn resolving_a_conflict_clears_the_baseline_so_the_next_write_overwrites() {
+        let conn = seeded();
+        put_sync_state(&conn, "c", "项目/卡片.md", Some("h1"), 1, "conflict").unwrap();
+        assert_eq!(conflicted(&conn).unwrap().len(), 1);
+        clear_conflict(&conn, "c").unwrap();
+        assert!(conflicted(&conn).unwrap().is_empty());
+        assert_eq!(sync_hash(&conn, "c").unwrap(), None);
     }
 
     #[test]

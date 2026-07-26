@@ -1559,6 +1559,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [activeProjectId, closeAttentionSession],
   );
 
+  /**
+   * 取消跟踪并删掉这批卡片的笔记。
+   *
+   * 同步签名的 fire-and-forget：调用点都在状态更新的路径上，不该为了删文件变成
+   * async，删失败也绝不能回滚本地数据。
+   *
+   * vault 路径从 `latestRef` 读而不是从闭包里的 `settings` 读：它的调用方
+   * (`deleteCard` / `deleteProject`) 的依赖数组里没有它，闭包会停在创建它的那一次
+   * 渲染上——换过知识库目录之后就会拿着旧路径去删。
+   */
+  const forgetInVault = useCallback((cardIds: string[]) => {
+    const vaultPath = latestRef.current.settings.vaultPath;
+    if (!vault.available || !vaultPath || !cardIds.length) return;
+    void vault.forget({ vault: vaultPath, cardIds }).catch(() => undefined);
+  }, []);
+
   const deleteCard = useCallback(
     (id: string) => {
       const card = cards.find((candidate) => candidate.id === id);
@@ -1572,6 +1588,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             !candidate.trashed &&
             !ids.includes(candidate.id),
         )?.id;
+      // 进回收站的卡片要连带删掉知识库里的笔记，否则它会永远留在那里。
+      forgetInVault(ids);
       setCards((current) =>
         current.map((candidate) =>
           ids.includes(candidate.id)
@@ -1965,6 +1983,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // 在事务内按 projectId 重新查库定位从属行，不依赖任何内存基线——另一个
       // 标签页刚建在这个项目下的卡片也会被正确删除。返回值是「删除前库里真正
       // 有什么」，撤销据此精确还原，比还原本标签页记得的内容更完整。
+      // 必须在级联之前：sync_state 的 card_id 挂了 ON DELETE CASCADE，
+      // 级联跑完之后就查不到这些卡片写过哪些文件了。
+      forgetInVault([...removedCardIds]);
       const removed: { current: RemovedProject | null } = { current: null };
       void deleteProjectCascade(id).then((rows) => {
         removed.current = rows;
@@ -2186,6 +2207,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             syncedAt: now,
           });
           if (!notes.length) continue;
+          // 顺手清掉已经进回收站、但笔记还留在知识库里的卡片。
+          // 点删除时会调用一次 forgetInVault，但卡片也可能通过导入、撤销或直接改
+          // 数据变成 trashed——只依赖那一次调用，笔记会永远留在那里。
+          // Rust 侧对没有同步记录的 id 直接跳过，所以这是幂等的。
+          forgetInVault(
+            latestRef.current.cards
+              .filter((card) => card.projectId === projectId && card.trashed)
+              .map((card) => card.id),
+          );
           try {
             await vault.sync({ vault: vaultPath, notes, now });
           } catch (cause) {
