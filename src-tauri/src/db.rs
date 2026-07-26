@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 1;
+const USER_VERSION: i64 = 2;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -256,9 +256,13 @@ pub fn open_in_memory() -> Result<Connection> {
 }
 
 /// `PRAGMA user_version` 阶梯，与 Dexie 的 version(1)/(2)/(3) 是同一个模式。
+///
+/// schema.sql 里的 DDL 全部是 `IF NOT EXISTS`，所以「版本落后就整份重放一遍」是
+/// 幂等的，比维护一串增量 DDL 更难写错。注意判据必须是 `< USER_VERSION` 而不是
+/// `< 1`——否则已经在 v1 的库永远拿不到后续版本新增的表。
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version < 1 {
+    if version < USER_VERSION {
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(&format!("PRAGMA user_version = {USER_VERSION}"))?;
     }
@@ -1040,6 +1044,67 @@ pub fn clear_all(conn: &mut Connection) -> Result<()> {
         tx.execute(&format!("DELETE FROM {table}"), [])?;
     }
     tx.commit()?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// vault 同步状态
+// ---------------------------------------------------------------------------
+
+/// 某张卡片上次被写进 vault 时的归一化哈希；`None` 表示从没写过。
+pub fn sync_hash(conn: &Connection, card_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT last_written_hash FROM sync_state WHERE card_id = ?1 AND status = 'synced'",
+            params![card_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+pub fn put_sync_state(
+    conn: &Connection,
+    card_id: &str,
+    vault_path: &str,
+    hash: Option<&str>,
+    at: i64,
+    status: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sync_state (card_id, vault_path, last_written_hash, last_written_at, status)
+         VALUES (?1,?2,?3,?4,?5)
+         ON CONFLICT(card_id) DO UPDATE SET vault_path = excluded.vault_path,
+           last_written_hash = COALESCE(excluded.last_written_hash, sync_state.last_written_hash),
+           last_written_at = excluded.last_written_at, status = excluded.status",
+        params![card_id, vault_path, hash, at, status],
+    )?;
+    Ok(())
+}
+
+/// 处于冲突挂起状态的卡片，用于 UI 上的常驻横幅。
+pub fn conflicted(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT card_id, vault_path FROM sync_state WHERE status = 'conflict'")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// 用户选择「以 Papertable 为准」后清除挂起，下次同步会正常覆盖。
+pub fn clear_conflict(conn: &Connection, card_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE sync_state SET status = 'synced', last_written_hash = NULL WHERE card_id = ?1",
+        params![card_id],
+    )?;
+    Ok(())
+}
+
+/// 用户选择「保留笔记」：给这张卡片立墓碑，此后不再同步。
+pub fn stop_syncing(conn: &Connection, card_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE sync_state SET status = 'detached' WHERE card_id = ?1",
+        params![card_id],
+    )?;
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 mod db;
 mod llm;
+mod vault;
 
 use db::{AttentionSnapshot, AttentionUpsert, RemovedProject, WorkspaceSnapshot, WorkspaceUpsert};
 use llm::{ChatRequest, ProviderConfig, ProviderHealth, PublicConfig, StreamEvent};
@@ -165,6 +166,108 @@ async fn llm_stream(
         .map_err(|e| llm::Error::from(e.to_string()))?
 }
 
+// ---------------------------------------------------------------------------
+// vault 同步
+// ---------------------------------------------------------------------------
+
+/// 一篇待写笔记。内容由 TS 侧的 `vaultNote.ts` 序列化——归一化哈希只在 Rust 侧算，
+/// 因为只有这边需要读回磁盘上的文件做比较。
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct NoteWrite {
+    /// 卡片 id；`None` 表示 `_索引.md` / `_关系.canvas` 这类项目级产物。
+    card_id: Option<String>,
+    /// 相对于 Papertable 容纳根目录的分段路径。
+    relative: Vec<String>,
+    content: String,
+}
+
+/// 按容纳规则写一批笔记，并按 `sync_state` 逐个做冲突检测。
+///
+/// 冲突的那一篇**不推进基线**，同步就此挂起；其余照常写入，不会因为一篇冲突就
+/// 整批停摆。
+#[tauri::command]
+fn vault_sync(
+    db: State<Db>,
+    vault: String,
+    notes: Vec<NoteWrite>,
+    now: i64,
+) -> Result<Vec<vault::WriteReport>, vault::Error> {
+    let root = std::path::PathBuf::from(&vault);
+    let mut guard = db.0.lock().map_err(|_| "数据库锁被毒化".to_string())?;
+    let conn = &mut *guard;
+    let mut reports = Vec::with_capacity(notes.len());
+
+    for note in &notes {
+        let parts: Vec<&str> = note.relative.iter().map(String::as_str).collect();
+        let previous = match &note.card_id {
+            Some(id) => db::sync_hash(conn, id).map_err(|e| vault::Error::from(e.to_string()))?,
+            None => None,
+        };
+        // 项目级产物没有 card_id，也就没有基线；它们完全由 Papertable 生成，
+        // 用「内容不同就覆盖」即可，所以这里把当前磁盘内容当作基线传进去。
+        let previous = match (&note.card_id, previous) {
+            (None, _) => {
+                let path = vault::resolve(&root, &parts)?;
+                std::fs::read_to_string(&path)
+                    .ok()
+                    .map(|text| vault::normalized_hash(&text))
+            }
+            (_, value) => value,
+        };
+
+        let report = vault::write_note(&root, &parts, &note.content, previous.as_deref())?;
+        if let Some(id) = &note.card_id {
+            let status = if report.outcome == vault::WriteOutcome::Conflict {
+                "conflict"
+            } else {
+                "synced"
+            };
+            db::put_sync_state(conn, id, &report.path, report.hash.as_deref(), now, status)
+                .map_err(|e| vault::Error::from(e.to_string()))?;
+        }
+        reports.push(report);
+    }
+    Ok(reports)
+}
+
+/// 标题变更走 rename 而不是删+建，Obsidian 会自动更新指向它的 `[[双链]]`。
+#[tauri::command]
+fn vault_rename(vault: String, from: Vec<String>, to: Vec<String>) -> Result<(), vault::Error> {
+    let root = std::path::PathBuf::from(&vault);
+    vault::rename_note(
+        &root,
+        &from.iter().map(String::as_str).collect::<Vec<_>>(),
+        &to.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+}
+
+/// 卡片进回收站时删掉笔记，不留孤儿。
+#[tauri::command]
+fn vault_delete(vault: String, relative: Vec<String>) -> Result<(), vault::Error> {
+    vault::delete_note(
+        &std::path::PathBuf::from(&vault),
+        &relative.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+}
+
+#[tauri::command]
+fn vault_conflicts(db: State<Db>) -> Result<Vec<(String, String)>, db::Error> {
+    with_db!(db, conn, db::conflicted(conn))
+}
+
+/// 「以 Papertable 为准」：清除挂起，下一次同步正常覆盖。
+#[tauri::command]
+fn vault_resolve_conflict(db: State<Db>, card_id: String) -> Result<(), db::Error> {
+    with_db!(db, conn, db::clear_conflict(conn, &card_id))
+}
+
+/// 「保留笔记」：给这张卡片立墓碑，此后不再同步。
+#[tauri::command]
+fn vault_stop_syncing(db: State<Db>, card_id: String) -> Result<(), db::Error> {
+    with_db!(db, conn, db::stop_syncing(conn, &card_id))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -209,6 +312,12 @@ pub fn run() {
             save_provider_config,
             llm_generate,
             llm_stream,
+            vault_sync,
+            vault_rename,
+            vault_delete,
+            vault_conflicts,
+            vault_resolve_conflict,
+            vault_stop_syncing,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -135,3 +135,14 @@ CREATE INDEX IF NOT EXISTS refs_project    ON refs(project_id);
 CREATE INDEX IF NOT EXISTS ev_project      ON interaction_events(project_id);
 CREATE INDEX IF NOT EXISTS sb_project      ON session_boundaries(project_id);
 CREATE INDEX IF NOT EXISTS pr_project      ON proposals(project_id);
+
+-- v2：vault 同步状态。`last_written_hash` 是「我们上次写出去的归一化哈希」，
+-- 冲突检测全靠它——文件当前内容归一化后与它不符，就说明用户在 Obsidian 改过。
+-- status='conflict' 时该卡片的同步挂起，直到用户二选一。
+CREATE TABLE IF NOT EXISTS sync_state (
+  card_id           TEXT PRIMARY KEY REFERENCES cards(id) ON DELETE CASCADE,
+  vault_path        TEXT    NOT NULL,
+  last_written_hash TEXT,
+  last_written_at   INTEGER NOT NULL,
+  status            TEXT    NOT NULL DEFAULT 'synced'
+);
