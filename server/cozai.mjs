@@ -7,8 +7,18 @@ export function friendlyProviderError(status, body = "") {
   return body.slice(0, 280) || "模型服务返回了无法处理的响应。";
 }
 
+/**
+ * 分离最终正文与草稿推理。网关把推理放进独立字段时，`content` 才是可信的最终
+ * 正文——这个事实要传给前端，否则闸门只能靠文本启发式判断。
+ */
 export function extractDelta(payload) {
-  return payload?.choices?.[0]?.delta?.content ?? "";
+  const delta = payload?.choices?.[0]?.delta ?? {};
+  const reasoning =
+    delta.reasoning_content ?? delta.reasoning ?? delta.thinking ?? "";
+  return {
+    content: typeof delta.content === "string" ? delta.content : "",
+    reasoning: typeof reasoning === "string" ? reasoning : "",
+  };
 }
 
 export function extractMessage(payload) {
@@ -38,6 +48,7 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
   const decoder = new TextDecoder();
   let pending = "";
   let emitted = false;
+  let sawReasoning = false;
 
   try {
     while (!signal?.aborted) {
@@ -52,9 +63,20 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
         if (!data || data === "[DONE]") continue;
         try {
           const delta = extractDelta(JSON.parse(data));
-          if (delta) {
+          if (delta.reasoning) {
+            sawReasoning = true;
+            // 只发长度，不发文本：推理绝不离开本机服务。
+            write(sseEvent("reasoning", { chars: delta.reasoning.length }));
+          }
+          if (delta.content) {
+            // `emitted` 只由 content 驱动，只有推理没有正文时仍要报错。
             emitted = true;
-            write(sseEvent("token", { text: delta }));
+            write(
+              sseEvent("token", {
+                text: delta.content,
+                channel: sawReasoning ? "final" : "unknown",
+              }),
+            );
           }
         } catch {
           // Keep the UI stream alive if a non-JSON provider heartbeat arrives.

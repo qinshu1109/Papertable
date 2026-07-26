@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { GripHorizontal, Maximize2, Quote, X } from "lucide-react";
 import { Markdown } from "../lib/markdown";
+import { createAnswerGate } from "../lib/modelOutput";
 import { streamModel } from "../lib/provider";
 
 export interface ConceptState {
@@ -52,7 +53,9 @@ export function ConceptPreview({
     setError("");
     if (cachedText) return () => controller.abort();
     void (async () => {
-      let answer = "";
+      // 之前这里直接把原始流 setText + onCache，绕过了闸门：草稿会同时进入浮层、
+      // conceptPreviewCache、引用文本和「展开为卡片」的种子轮次。
+      const gate = createAnswerGate();
       try {
         const messages = [
           {
@@ -71,11 +74,18 @@ export function ConceptPreview({
           signal: controller.signal,
         })) {
           if (event.type !== "token") continue;
-          answer += event.text;
-          setText(answer);
+          gate.push(event.text, event.channel);
+          setText(gate.visible());
         }
         if (!controller.signal.aborted) {
-          onCache(answer);
+          const final = gate.finish();
+          setText(final);
+          if (!final.trim()) {
+            setStatus("error");
+            setError("模型没有返回可显示的最终文本，请重试。");
+            return; // 不写缓存：空结果绝不能落盘。
+          }
+          onCache(final);
           setStatus("done");
         }
       } catch (cause) {

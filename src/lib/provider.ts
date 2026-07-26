@@ -1,4 +1,5 @@
 import type { LlmMessage } from "../types";
+import type { OutputChannel } from "./modelOutput";
 
 export interface ProviderHealth {
   configured: boolean;
@@ -88,9 +89,19 @@ export async function* streamModel(input: {
         const type = event.match(/^event:\s*(.+)$/m)?.[1]?.trim();
         const raw = event.match(/^data:\s*(.+)$/m)?.[1];
         if (!type || !raw) continue;
-        const payload = JSON.parse(raw) as { text?: string; message?: string };
+        const payload = JSON.parse(raw) as {
+          text?: string;
+          message?: string;
+          channel?: OutputChannel;
+        };
+        // 推理事件只带长度、不带文本，仅用于进度指示，绝不进入正文。
+        if (type === "reasoning") continue;
         if (type === "token" && payload.text)
-          yield { type: "token" as const, text: payload.text };
+          yield {
+            type: "token" as const,
+            text: payload.text,
+            channel: payload.channel ?? ("unknown" as const),
+          };
         if (type === "error")
           throw new Error(payload.message || "模型生成失败。");
         if (type === "done") return;

@@ -2,17 +2,21 @@ import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyAttentionChanges,
   applyChanges,
   clearWorkspace,
   db,
-  diffAttention,
-  diffWorkspace,
+  deleteProjectCascade,
+  deleteProposals,
+  deleteReferences,
   loadAttentionState,
   loadWorkspace,
-  saveAttentionState,
+  putAttentionState,
   saveWorkspace,
+  seedIfEmpty,
 } from "./storage";
-import type { AttentionSnapshot, WorkspaceSnapshot } from "./storage";
+import { diffAttention, diffWorkspace } from "./delta";
+import type { AttentionSnapshot, WorkspaceSnapshot } from "./delta";
 
 const snapshot = (): WorkspaceSnapshot => ({
   projects: [{ id: "p", name: "测试项目", pinned: false, updatedAt: 1 }],
@@ -105,32 +109,35 @@ const appendStreamToken = (
   ),
 });
 
-test("a streaming save writes exactly one turn row and never rewrites whole tables", async () => {
+const freshDb = async () => {
+  await db.delete();
+  await db.open();
+};
+
+test("a streaming save writes exactly one turn row and never rewrites whole tables", () => {
   const before = busySnapshot();
   const after = appendStreamToken(before, "已生成更多文本");
-  const delta = diffWorkspace(before, after);
+  const upsert = diffWorkspace(before, after);
 
   // 唯一该落库的就是那条还在生成的轮次。
-  assert.equal(delta.turns.upserts.length, 1);
-  assert.equal(delta.turns.upserts[0].id, "t-stream");
-  assert.equal(delta.turns.upserts[0].content, "已生成更多文本");
-  assert.equal(delta.turns.upserts[0].cardId, "c");
-  assert.deepEqual(delta.turns.deletes, []);
+  assert.equal(upsert.turns.upserts.length, 1);
+  assert.equal(upsert.turns.upserts[0].id, "t-stream");
+  assert.equal(upsert.turns.upserts[0].content, "已生成更多文本");
+  assert.equal(upsert.turns.upserts[0].cardId, "c");
 
   // 卡片行不含 turns，只有 turns 变化时不该重写；其余表和单例行完全不动。
-  assert.deepEqual(delta.cards, { upserts: [], deletes: [] });
-  assert.deepEqual(delta.projects, { upserts: [], deletes: [] });
-  assert.deepEqual(delta.edges, { upserts: [], deletes: [] });
-  assert.deepEqual(delta.anchors, { upserts: [], deletes: [] });
-  assert.deepEqual(delta.snapshots, { upserts: [], deletes: [] });
-  assert.deepEqual(delta.references, { upserts: [], deletes: [] });
-  assert.equal(delta.view, null);
-  assert.equal(delta.settings, null);
+  assert.deepEqual(upsert.cards, { upserts: [] });
+  assert.deepEqual(upsert.projects, { upserts: [] });
+  assert.deepEqual(upsert.edges, { upserts: [] });
+  assert.deepEqual(upsert.anchors, { upserts: [] });
+  assert.deepEqual(upsert.snapshots, { upserts: [] });
+  assert.deepEqual(upsert.references, { upserts: [] });
+  assert.equal(upsert.view, null);
+  assert.equal(upsert.settings, null);
 });
 
 test("incremental saves leave untouched rows in place", async () => {
-  await db.delete();
-  await db.open();
+  await freshDb();
   const before = busySnapshot();
   await saveWorkspace(before);
 
@@ -152,9 +159,8 @@ test("incremental saves leave untouched rows in place", async () => {
   assert.equal((await db.turns.get("t2"))?.content, "另一条");
 });
 
-test("incremental saves round-trip edits, additions and cascading deletes", async () => {
-  await db.delete();
-  await db.open();
+test("incremental saves round-trip edits without ever deleting a row", async () => {
+  await freshDb();
   let persisted = busySnapshot();
   await saveWorkspace(persisted);
 
@@ -165,33 +171,205 @@ test("incremental saves round-trip edits, additions and cascading deletes", asyn
       card.id === "c2" ? { ...card, title: "改名后的旁支" } : card,
     ),
   };
-  const renameDelta = diffWorkspace(persisted, renamed);
+  const renameUpsert = diffWorkspace(persisted, renamed);
   assert.deepEqual(
-    renameDelta.cards.upserts.map((card) => card.id),
+    renameUpsert.cards.upserts.map((card: { id: string }) => card.id),
     ["c2"],
   );
-  assert.deepEqual(renameDelta.turns.upserts, []);
-  await applyChanges(renameDelta);
+  assert.deepEqual(renameUpsert.turns.upserts, []);
+  await applyChanges(renameUpsert);
   persisted = renamed;
 
-  // 2. 删卡片：它的轮次必须跟着删，否则会留下孤儿行。
-  const removed: WorkspaceSnapshot = {
+  // 2. 一张卡片从内存状态里消失，**绝不能**因此被删除。这里原来断言的是
+  //    「轮次要跟着删」——那条断言把缺陷写成了需求：删除是从每个标签页私有、
+  //    永不与库对账的基线推导出来的，于是一个陈旧的标签页会真删掉另一个标签页
+  //    刚建的行。删除现在只能来自 deleteProjectCascade 这类显式意图。
+  const shrunk: WorkspaceSnapshot = {
     ...persisted,
     cards: persisted.cards.filter((card) => card.id !== "c2"),
   };
-  const removeDelta = diffWorkspace(persisted, removed);
-  assert.deepEqual(removeDelta.cards.deletes, ["c2"]);
-  assert.deepEqual(removeDelta.turns.deletes, ["t2"]);
-  await applyChanges(removeDelta);
+  await applyChanges(diffWorkspace(persisted, shrunk));
+
+  assert.ok(await db.cards.get("c2"), "增量保存绝不删行");
+  assert.ok(await db.turns.get("t2"), "增量保存绝不删轮次");
+  const restored = await loadWorkspace();
+  assert.deepEqual(restored?.cards.map((card) => card.id).sort(), ["c", "c2"]);
+  assert.equal(restored?.view.drafts.p, "草稿");
+});
+
+test("the upsert contract has no deletes field at all", () => {
+  const upsert = diffWorkspace(busySnapshot(), snapshot());
+  // 将来有人把推导式删除加回来时，这里会立刻失败。
+  for (const [name, table] of Object.entries(upsert)) {
+    if (table === null || name === "view" || name === "settings") continue;
+    assert.ok(!("deletes" in table), `${name} 不应该有 deletes 字段`);
+  }
+  const attention = diffAttention(
+    { events: [], sessions: [], proposals: [] },
+    { events: [], sessions: [], proposals: [] },
+  );
+  for (const [name, table] of Object.entries(attention))
+    assert.ok(!("deletes" in table), `attention.${name} 不应该有 deletes 字段`);
+});
+
+test("deleteProjectCascade removes rows no in-memory snapshot ever saw", async () => {
+  await freshDb();
+  await saveWorkspace(busySnapshot());
+  // 另一个标签页刚建的卡片和轮次：本标签页的任何快照里都没有它们。
+  await db.cards.put({
+    id: "ghost",
+    projectId: "p",
+    title: "另一个标签页建的",
+    favorite: false,
+    unread: false,
+    concepts: [],
+    createdAt: 9,
+  });
+  await db.turns.put({
+    id: "t-ghost",
+    cardId: "ghost",
+    role: "user",
+    content: "另一个标签页写的",
+    createdAt: 9,
+  });
+  // 另一个项目的行必须完好无损。
+  await db.projects.put({
+    id: "p2",
+    name: "别的项目",
+    pinned: false,
+    updatedAt: 1,
+  });
+  await db.cards.put({
+    id: "c-other",
+    projectId: "p2",
+    title: "别的项目的卡",
+    favorite: false,
+    unread: false,
+    concepts: [],
+    createdAt: 3,
+  });
+
+  const removed = await deleteProjectCascade("p");
+
+  assert.equal(await db.cards.get("ghost"), undefined, "级联应按库内容定位");
+  assert.equal(await db.turns.get("t-ghost"), undefined);
+  assert.equal(await db.cards.get("c"), undefined);
+  assert.equal(await db.projects.get("p"), undefined);
+  assert.ok(await db.cards.get("c-other"), "不得波及其他项目");
+  assert.ok(await db.projects.get("p2"));
+  assert.ok(
+    removed.workspace.cards.upserts.some((card) => card.id === "ghost"),
+    "返回值要包含库里真正删掉的行",
+  );
+});
+
+test("undo restores what the database held, including other tabs' rows", async () => {
+  await freshDb();
+  await saveWorkspace(busySnapshot());
+  await db.cards.put({
+    id: "ghost",
+    projectId: "p",
+    title: "另一个标签页建的",
+    favorite: false,
+    unread: false,
+    concepts: [],
+    createdAt: 9,
+  });
+
+  const removed = await deleteProjectCascade("p");
+  await applyChanges(removed.workspace);
+  await applyAttentionChanges(removed.attention);
 
   const restored = await loadWorkspace();
   assert.deepEqual(
-    restored?.cards.map((card) => card.id),
-    ["c"],
+    restored?.cards.map((card) => card.id).sort(),
+    ["c", "c2", "ghost"],
+    "撤销要还原库里删除前的内容，而不是本标签页记得的内容",
   );
-  assert.equal(restored?.cards[0].turns.length, 2);
-  assert.equal(await db.turns.get("t2"), undefined);
-  assert.equal(restored?.view.drafts.p, "草稿");
+  assert.equal(
+    restored?.cards.find((card) => card.id === "c")?.turns.length,
+    2,
+  );
+});
+
+test("closing one tab must not destroy another tab's sessions and proposals", async () => {
+  await freshDb();
+  const proposal = (id: string) => ({
+    id,
+    projectId: "p",
+    sessionId: "s1",
+    title: "方向",
+    explorationQuestion: "接下来先验证什么？",
+    reason: "测试",
+    sourceAnchorIds: [],
+    suggestedParentCardId: "c",
+    suggestedRelation: "child" as const,
+    evidence: "human-signals" as const,
+    status: "queued" as const,
+    candidateKey: `card:${id}`,
+    signalScore: 6,
+    signalEventIds: [],
+    createdAt: 10,
+    lastSignalAt: 10,
+    expiresAt: 20,
+    purgeAt: 30,
+  });
+  const session = (id: string) => ({
+    id,
+    projectId: "p",
+    localDate: "2026-07-27",
+    startedAt: 1,
+    lastActiveAt: 10,
+  });
+  await putAttentionState({
+    events: [],
+    sessions: [session("s1"), session("s2")],
+    proposals: [proposal("pr1"), proposal("pr2")],
+  });
+
+  // 第二个标签页只知道自己那一份状态，pagehide 时把它写回去。
+  await putAttentionState({
+    events: [],
+    sessions: [session("s1")],
+    proposals: [proposal("pr1")],
+  });
+
+  const after = await loadAttentionState();
+  assert.deepEqual(
+    after.proposals.map((row) => row.id).sort(),
+    ["pr1", "pr2"],
+    "关闭一个标签页不得销毁另一个标签页生成的提案",
+  );
+  assert.deepEqual(after.sessions.map((row) => row.id).sort(), ["s1", "s2"]);
+});
+
+test("proposals and references are removed only by explicit id", async () => {
+  await freshDb();
+  await saveWorkspace({
+    ...snapshot(),
+    references: [
+      {
+        id: "r1",
+        projectId: "p",
+        sourceTitle: "来源",
+        excerpt: "片段",
+        anchor: { cardId: "c", text: "片段" },
+      },
+      {
+        id: "r2",
+        projectId: "p",
+        sourceTitle: "来源二",
+        excerpt: "片段二",
+        anchor: { cardId: "c", text: "片段二" },
+      },
+    ],
+  });
+  await deleteReferences(["r1"]);
+  assert.equal(await db.references.get("r1"), undefined);
+  assert.ok(await db.references.get("r2"));
+
+  await deleteProposals([]);
+  await deleteReferences([]);
 });
 
 test("attention events stay append-only across incremental saves", () => {
@@ -209,27 +387,46 @@ test("attention events stay append-only across incremental saves", () => {
     proposals: [],
   };
   // 即使状态里不再出现这条事件，增量保存也绝不能删它。
-  const delta = diffAttention(before, {
+  const upsert = diffAttention(before, {
     events: [],
     sessions: [],
     proposals: [],
   });
-  assert.deepEqual(delta.events, { upserts: [], deletes: [] });
+  assert.deepEqual(upsert.events, { upserts: [] });
 
   const appended = diffAttention(before, {
     ...before,
     events: [event, { ...event, id: "event-2", createdAt: 11 }],
   });
   assert.deepEqual(
-    appended.events.upserts.map((entry) => entry.id),
+    appended.events.upserts.map((entry: { id: string }) => entry.id),
     ["event-2"],
   );
-  assert.deepEqual(appended.events.deletes, []);
+});
+
+test("seeding twice keeps the first seed instead of rewriting it", async () => {
+  await freshDb();
+  const first = await seedIfEmpty(snapshot());
+  assert.equal(first.cards.length, 1);
+  await db.cards.put({
+    id: "later",
+    projectId: "p",
+    title: "播种后新增",
+    favorite: false,
+    unread: false,
+    concepts: [],
+    createdAt: 5,
+  });
+  const second = await seedIfEmpty(snapshot());
+  assert.deepEqual(
+    second.cards.map((card) => card.id).sort(),
+    ["c", "later"],
+    "第二次播种必须返回库里已有的内容，而不是覆盖它",
+  );
 });
 
 test("IndexedDB restores cards, drafts and scroll positions", async () => {
-  await db.delete();
-  await db.open();
+  await freshDb();
   await saveWorkspace(snapshot());
   const restored = await loadWorkspace();
   assert.equal(restored?.cards[0].turns[0].content, "你好");
@@ -241,10 +438,9 @@ test("IndexedDB restores cards, drafts and scroll positions", async () => {
 });
 
 test("v3 attention tables survive ordinary workspace snapshots and clear with local data", async () => {
-  await db.delete();
-  await db.open();
+  await freshDb();
   await saveWorkspace(snapshot());
-  await saveAttentionState({
+  await putAttentionState({
     events: [
       {
         id: "event-1",
@@ -287,7 +483,7 @@ test("v3 attention tables survive ordinary workspace snapshots and clear with lo
       },
     ],
   });
-  // This exercises the old whole-workspace auto-save path after v3 migration.
+  // This exercises the whole-workspace reset path after v3 migration.
   await saveWorkspace(snapshot());
   const attention = await loadAttentionState();
   assert.equal(attention.events.length, 1);

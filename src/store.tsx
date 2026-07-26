@@ -35,21 +35,29 @@ import {
   streamModel,
   type ProviderHealth,
 } from "./lib/provider";
-import { visibleModelOutput } from "./lib/modelOutput";
+import { createAnswerGate, visibleModelOutput } from "./lib/modelOutput";
 import { preferredProjectCard } from "./lib/projectScope";
+import {
+  attentionAsUpsert,
+  diffAttention,
+  diffWorkspace,
+  type AttentionSnapshot,
+  type AttentionUpsert,
+  type WorkspaceSnapshot,
+  type WorkspaceUpsert,
+} from "./lib/delta";
 import {
   applyAttentionChanges,
   applyChanges,
   clearWorkspace,
-  deleteAttentionForProject,
-  diffAttention,
-  diffWorkspace,
+  deleteProjectCascade,
+  deleteProposals,
+  deleteReferences,
   loadAttentionState,
   loadWorkspace,
-  saveAttentionState,
+  putAttentionState,
   saveWorkspace,
-  type AttentionSnapshot,
-  type WorkspaceSnapshot,
+  seedIfEmpty,
 } from "./lib/storage";
 import { EDGE_META } from "./types";
 import type {
@@ -93,6 +101,68 @@ const defaultView = (): ViewState => ({
   collapsed: [],
   scrollPositions: {},
 });
+
+/** 变更点上「这批 id 没了」的显式意图，用于驱动显式删除。 */
+function removedIds<T extends { id: string }>(
+  before: readonly T[],
+  after: readonly T[],
+): string[] {
+  if (!before.length) return [];
+  const live = new Set(after.map((row) => row.id));
+  return before.filter((row) => !live.has(row.id)).map((row) => row.id);
+}
+
+type RemovedProject = {
+  workspace: WorkspaceUpsert;
+  attention: AttentionUpsert;
+};
+
+/**
+ * 项目级联删除后把基线里的对应行摘掉，让基线继续等于「库里真正有什么」。
+ * 按级联实际删掉的 id 摘，而不是按 projectId 重新推断——那样又会退回到用内存
+ * 猜测数据库内容。
+ */
+function withoutProject(
+  baseline: WorkspaceSnapshot | null,
+  projectId: string,
+  removed: RemovedProject,
+): WorkspaceSnapshot | null {
+  if (!baseline) return baseline;
+  const cardIds = new Set(removed.workspace.cards.upserts.map((row) => row.id));
+  const edgeIds = new Set(removed.workspace.edges.upserts.map((row) => row.id));
+  const anchorIds = new Set(
+    removed.workspace.anchors.upserts.map((row) => row.id),
+  );
+  const snapshotIds = new Set(
+    removed.workspace.snapshots.upserts.map((row) => row.id),
+  );
+  const referenceIds = new Set(
+    removed.workspace.references.upserts.map((row) => row.id),
+  );
+  return {
+    ...baseline,
+    projects: baseline.projects.filter((row) => row.id !== projectId),
+    cards: baseline.cards.filter((row) => !cardIds.has(row.id)),
+    edges: baseline.edges.filter((row) => !edgeIds.has(row.id)),
+    anchors: baseline.anchors.filter(
+      (row) => !row.id || !anchorIds.has(row.id),
+    ),
+    snapshots: baseline.snapshots.filter((row) => !snapshotIds.has(row.id)),
+    references: baseline.references.filter((row) => !referenceIds.has(row.id)),
+  };
+}
+
+function withoutAttentionProject(
+  baseline: AttentionSnapshot | null,
+  projectId: string,
+): AttentionSnapshot | null {
+  if (!baseline) return baseline;
+  return {
+    events: baseline.events.filter((row) => row.projectId !== projectId),
+    sessions: baseline.sessions.filter((row) => row.projectId !== projectId),
+    proposals: baseline.proposals.filter((row) => row.projectId !== projectId),
+  };
+}
 
 /** 删除项目或异常中断后，清理不再指向有效项目/卡片的纯视图元数据。 */
 function pruneProjectScopedState(input: {
@@ -393,10 +463,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       ]);
       if (!active) return;
       const now = Date.now();
-      const next = saved ?? seed;
-      if (!saved) await saveWorkspace(seed);
+      // 播种在事务内重新确认库是空的，两个标签页同时冷启不会各写一份种子。
+      const next = saved ?? (await seedIfEmpty(seed));
+      if (!active) return;
       // 落库基线 = 此刻库里真正的内容。下面的裁剪与默认值补齐会成为第一次
-      // 增量保存的 diff 内容。
+      // 增量保存的 diff 内容。注意力基线用 savedAttention 而不是裁剪后的结果：
+      // 基线要如实反映库里有什么。
       persistedRef.current = next;
       persistedAttentionRef.current = savedAttention;
       const withDefaults: AppSettings = {
@@ -477,6 +549,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setReferenceStore(next.references);
       setView(pruned.view);
       setSettings(finalSettings);
+      // 水合时也会跑一次生命周期淘汰；被清理掉的提案要显式从库里删掉，否则
+      // 下次重载又会被读回来。
+      const purged = removedIds(savedAttention.proposals, processed.proposals);
+      if (purged.length) void deleteProposals(purged);
       attentionRef.current = {
         events: survivingAttention.events,
         sessions: processed.sessions,
@@ -630,6 +706,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const commitAttention = useCallback((next: AttentionSnapshot) => {
+    // 提案会被生命周期淘汰（冷却后 7 天清理、被更强候选替换）。这是变更点的显式
+    // 意图：前后两个内存值由同一段代码在同一 tick 产出，和「永不对账的持久化基线」
+    // 是两回事。不在这里删，被淘汰的提案会在下次重载时复活。
+    const gone = removedIds(attentionRef.current.proposals, next.proposals);
+    if (gone.length) void deleteProposals(gone);
     attentionRef.current = next;
     setInteractionEvents(next.events);
     setSessions(next.sessions);
@@ -779,7 +860,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     };
     const onPageHide = () => {
       closeAttentionSession(activeProjectId, "pagehide");
-      void saveAttentionState(attentionRef.current);
+      // 必须是 upsert-only：这里曾经 clear() 掉会话与提案再用本标签页的内存重写，
+      // 于是关闭第二个标签页就会销毁第一个标签页生成的全部提案。
+      void putAttentionState(attentionRef.current);
     };
     // 即使页面一直开着也要让 30 分钟空闲、72 小时冷却和 7 天清理自然推进；
     // 这里只跑本地状态机，绝不会触发任何模型请求。
@@ -808,15 +891,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const id = streamingTurnId;
     setStreamingTurnId(null);
     if (id)
+      // 只重建拥有这条轮次的卡片、以及那一条轮次。之前这里无条件重建了每张卡片
+      // 和每条轮次的对象，而增量保存按引用比较——一次停止会把整个工作区的轮次
+      // 全部重写一遍。
       setCards((current) =>
-        current.map((card) => ({
-          ...card,
-          turns: card.turns.map((turn) =>
-            turn.id === id
-              ? { ...turn, streaming: false, status: "stopped" }
-              : turn,
-          ),
-        })),
+        current.map((card) =>
+          card.turns.some((turn) => turn.id === id)
+            ? {
+                ...card,
+                turns: card.turns.map((turn) =>
+                  turn.id === id
+                    ? { ...turn, streaming: false, status: "stopped" }
+                    : turn,
+                ),
+              }
+            : card,
+        ),
       );
   }, [streamingTurnId]);
 
@@ -854,7 +944,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }),
       ]);
       if (newTitle.status === "fulfilled") {
-        const clean = newTitle.value
+        // 必须在 28 字截断之前 sanitize，否则截断只会留下一段推理片段当标题。
+        const clean = visibleModelOutput(newTitle.value)
           .replace(/[\n#*`"“”]/g, "")
           .trim()
           .slice(0, 28);
@@ -864,7 +955,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           );
       }
       if (conceptText.status === "fulfilled") {
-        const terms = parseStructuredArray(conceptText.value)
+        const terms = parseStructuredArray(
+          visibleModelOutput(conceptText.value),
+        )
           .filter(
             (term) =>
               term.length >= 2 && term.length <= 32 && answer.includes(term),
@@ -911,7 +1004,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setStreamingTurnId(aiId);
       const controller = new AbortController();
       controllerRef.current = controller;
-      let rawAnswer = "";
+      // 闸门的缓冲区只存在于这个闭包里，从不进入 state，所以被停止时结构上
+      // 不可能把未释放的草稿刷到盘上。
+      const gate = createAnswerGate();
       let answer = "";
       try {
         const built = buildContext({
@@ -927,8 +1022,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           signal: controller.signal,
         })) {
           if (event.type !== "token") continue;
-          rawAnswer += event.text;
-          const nextAnswer = visibleModelOutput(rawAnswer);
+          gate.push(event.text, event.channel);
+          const nextAnswer = gate.visible();
           if (nextAnswer === answer) continue;
           answer = nextAnswer;
           updateCard(input.cardId, (card) => ({
@@ -939,13 +1034,20 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }));
         }
         if (!controller.signal.aborted) {
+          // 收尾 flush 只在正常结束时发生；中断路径永远不会走到这里。
+          answer = gate.finish();
           if (!answer.trim())
             throw new Error("模型没有返回可显示的最终文本，请重试。");
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
               turn.id === aiId
-                ? { ...turn, streaming: false, status: "complete" }
+                ? {
+                    ...turn,
+                    content: answer,
+                    streaming: false,
+                    status: "complete",
+                  }
                 : turn,
             ),
           }));
@@ -1208,9 +1310,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       );
       const activeReferences = references;
       setCards(nextCards);
-      setReferenceStore((current) =>
-        current.filter((reference) => reference.projectId !== activeProjectId),
-      );
+      setReferenceStore((current) => {
+        const cleared = current
+          .filter((reference) => reference.projectId === activeProjectId)
+          .map((reference) => reference.id);
+        if (cleared.length) void deleteReferences(cleared);
+        return current.filter(
+          (reference) => reference.projectId !== activeProjectId,
+        );
+      });
       setView((current) => ({
         ...current,
         drafts: { ...current.drafts, [activeProjectId]: "" },
@@ -1699,20 +1807,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     },
     [activeProjectId, showToast],
   );
-  const removeReference = useCallback(
-    (id: string) =>
-      setReferenceStore((current) =>
-        current.filter((reference) => reference.id !== id),
-      ),
-    [],
-  );
-  const clearReferences = useCallback(
-    () =>
-      setReferenceStore((current) =>
-        current.filter((reference) => reference.projectId !== activeProjectId),
-      ),
-    [activeProjectId],
-  );
+  // 引用是普通交互里唯一的硬删除。调用点永远拿得到具体 id，所以直接告诉存储层
+  // 删哪几行，而不是让它去比较内存基线。
+  const removeReference = useCallback((id: string) => {
+    setReferenceStore((current) =>
+      current.filter((reference) => reference.id !== id),
+    );
+    void deleteReferences([id]);
+  }, []);
+  const clearReferences = useCallback(() => {
+    setReferenceStore((current) => {
+      const cleared = current
+        .filter((reference) => reference.projectId === activeProjectId)
+        .map((reference) => reference.id);
+      if (cleared.length) void deleteReferences(cleared);
+      return current.filter(
+        (reference) => reference.projectId !== activeProjectId,
+      );
+    });
+  }, [activeProjectId]);
   const renameProject = useCallback(
     (id: string, name: string) =>
       setProjects((current) =>
@@ -1811,7 +1924,20 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           (proposal) => proposal.projectId !== id,
         ),
       });
-      void deleteAttentionForProject(id);
+      // 在事务内按 projectId 重新查库定位从属行，不依赖任何内存基线——另一个
+      // 标签页刚建在这个项目下的卡片也会被正确删除。返回值是「删除前库里真正
+      // 有什么」，撤销据此精确还原，比还原本标签页记得的内容更完整。
+      const removed: { current: RemovedProject | null } = { current: null };
+      void deleteProjectCascade(id).then((rows) => {
+        removed.current = rows;
+        // 库里已经删干净，两条基线必须跟上，否则撤销时 diff 会认为这些行
+        // 「没变」而不重写。
+        persistedRef.current = withoutProject(persistedRef.current, id, rows);
+        persistedAttentionRef.current = withoutAttentionProject(
+          persistedAttentionRef.current,
+          id,
+        );
+      });
       const nextCards = cards.filter((card) => card.projectId !== id);
       const nextCard = next
         ? preferredProjectCard(nextCards, next.id)
@@ -1853,10 +1979,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           setView(snapshot.view);
           setSettings(snapshot.settings);
           commitAttention(attentionSnapshot);
-          // 撤销要把 deleteAttentionForProject 删掉的行整体写回，之后基线随之复位。
-          void saveAttentionState(attentionSnapshot).then(() => {
-            persistedAttentionRef.current = attentionSnapshot;
-          });
+          // 把级联删掉的行按 id 原样写回。用库返回的快照而不是 attentionSnapshot，
+          // 因为后者只包含本标签页记得的内容。
+          const rows = removed.current;
+          if (rows) {
+            void applyChanges(rows.workspace);
+            void applyAttentionChanges(rows.attention);
+          } else {
+            void applyAttentionChanges(attentionAsUpsert(attentionSnapshot));
+          }
+          persistedAttentionRef.current = attentionSnapshot;
           dismissToast();
         },
       });
