@@ -20,6 +20,13 @@ cp .env.example .env.local
 # 编辑 .env.local，填写轮换后的 COZAI_API_KEY
 ```
 
+桌面版（Tauri + SQLite + Obsidian 知识库同步）见 [docs/DESKTOP.md](docs/DESKTOP.md)：
+
+```bash
+pnpm desktop          # 开发
+pnpm desktop:signed   # 构建并 ad-hoc 签名，自用
+```
+
 常用检查：
 
 ```bash
@@ -28,6 +35,7 @@ pnpm lint
 pnpm test
 pnpm test:e2e
 pnpm build
+pnpm test:rust  # 桌面版的持久化与知识库同步语义
 pnpm start # 构建后在 http://127.0.0.1:8787 提供网页与本机 API
 ```
 
@@ -69,7 +77,15 @@ src/
   lib/memory.ts         # MemoryProvider / NoopProvider 占位，不连接 MemOS
   lib/provider.ts       # 浏览器到本机 API 的客户端
   lib/delta.ts          # 与存储后端无关的增量计算；删除永不由内存基线推导
-  lib/storage.ts        # Dexie/IndexedDB、版本化 schema、显式删除入口与适配器接缝
+  lib/storage/          # 适配器接缝：dexie（web）/ tauri（桌面）；store 换后端零改动
+  lib/vaultNote.ts      # 知识库笔记序列化（纯内容，不碰磁盘）
+  lib/vaultPlan.ts      # 「这次要写哪些文件」（纯函数）
+  lib/wikilink.ts       # [[双链]] 解析：只生成引用，绝不推断继承边
+src-tauri/src/
+  db.rs                 # SQLite；语义与 dexie 逐条对齐，外键顺序父→子
+  vault.rs              # 容纳规则、归一化哈希、冲突隔离
+  watcher.rs            # 三层环路防护；入向只新增 ReferenceChip
+  llm.rs                # 模型通道；推理只发长度、不发文本
   lib/formats.ts        # Markdown / JSON Canvas / 无损包格式适配器
   store.tsx             # 业务编排；组件只使用其公开动作
   components/           # 卡片堆叠、关系树、输入器、概念预览、对话框

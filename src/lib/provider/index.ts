@@ -10,11 +10,17 @@
 import * as http from "./http";
 import * as tauri from "./tauri";
 
-export type { ModelTask, ProviderConfig, ProviderHealth } from "./http";
+export type {
+  KeySource,
+  ModelTask,
+  ProviderConfig,
+  ProviderHealth,
+} from "./http";
 
 const impl = __PAPERTABLE_TARGET__ === "desktop" ? tauri : http;
 
 export const getProviderHealth = impl.getProviderHealth;
+export const getKeySource = impl.getKeySource;
 export const getProviderConfig = impl.getProviderConfig;
 export const saveProviderConfig = impl.saveProviderConfig;
 export const streamModel = impl.streamModel;

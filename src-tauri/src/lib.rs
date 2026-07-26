@@ -4,7 +4,7 @@ mod vault;
 mod watcher;
 
 use db::{AttentionSnapshot, AttentionUpsert, RemovedProject, WorkspaceSnapshot, WorkspaceUpsert};
-use llm::{ChatRequest, ProviderConfig, ProviderHealth, PublicConfig, StreamEvent};
+use llm::{ChatRequest, KeySource, ProviderConfig, ProviderHealth, PublicConfig, StreamEvent};
 use rusqlite::Connection;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -19,6 +19,8 @@ pub struct SharedDb(Arc<Mutex<Connection>>);
 pub struct Provider {
     config: Mutex<ProviderConfig>,
     path: PathBuf,
+    /// 密钥实际是从钥匙串读到的，还是回落到了文件。设置页要如实展示。
+    from_keychain: Mutex<bool>,
 }
 
 /// 单写者。SQLite 自己是单写者 + WAL，这把锁额外保证的是调用方观察到的完成顺序，
@@ -146,9 +148,23 @@ fn save_provider_config(state: State<Provider>, input: Value) -> Result<PublicCo
         .lock()
         .map_err(|_| "配置锁被毒化".to_string())?;
     let next = llm::normalize(&input, &guard)?;
-    llm::save_config(&state.path, &next)?;
+    let in_keychain = llm::save_config(&state.path, &next)?;
     *guard = next;
+    if let Ok(mut source) = state.from_keychain.lock() {
+        *source = in_keychain;
+    }
     Ok(PublicConfig::from(&*guard))
+}
+
+/// 密钥存在哪：钥匙串、回落文件，还是没设置。
+#[tauri::command]
+fn provider_key_source(state: State<Provider>) -> Result<KeySource, llm::Error> {
+    let config = provider_snapshot(&state)?;
+    let from_keychain = *state
+        .from_keychain
+        .lock()
+        .map_err(|_| "配置锁被毒化".to_string())?;
+    Ok(llm::key_source(&config, from_keychain))
 }
 
 #[tauri::command]
@@ -349,9 +365,11 @@ pub fn run() {
             app.manage(watcher::VaultWatcher::default());
 
             let path = llm::config_path(&dir);
+            let (config, from_keychain) = llm::load_config_with_source(&path);
             app.manage(Provider {
-                config: Mutex::new(llm::load_config(&path)),
+                config: Mutex::new(config),
                 path,
+                from_keychain: Mutex::new(from_keychain),
             });
             Ok(())
         })
@@ -371,6 +389,7 @@ pub fn run() {
             provider_health,
             provider_config,
             save_provider_config,
+            provider_key_source,
             llm_generate,
             llm_stream,
             vault_sync,

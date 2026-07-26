@@ -12,8 +12,10 @@ import {
   X,
 } from "lucide-react";
 import {
+  getKeySource,
   getProviderConfig,
   saveProviderConfig,
+  type KeySource,
   type ProviderConfig,
 } from "../lib/provider";
 import { useStore } from "../store";
@@ -314,6 +316,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   );
   const [model, setModel] = useState(provider?.model ?? "claude-opus-5");
   const [apiKey, setApiKey] = useState("");
+  const [keySource, setKeySource] = useState<KeySource>("none");
   useEffect(() => {
     let active = true;
     void getProviderConfig()
@@ -322,6 +325,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         setConnection(config);
         setBaseUrl(config.baseUrl);
         setModel(config.model);
+        void getKeySource().then((source) => active && setKeySource(source));
       })
       .catch((error) => {
         if (!active) return;
@@ -351,6 +355,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       setBaseUrl(saved.baseUrl);
       setModel(saved.model);
       setApiKey("");
+      setKeySource(await getKeySource());
       const health = await refreshProvider();
       showToast({
         text: health?.configured
@@ -435,6 +440,17 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             aria-label="API 密钥"
           />
         </label>
+        {/*
+          如实展示密钥到底存在哪。钥匙串取不到时会回落到 0600 文件——把回落显示成
+          「已进钥匙串」，会让人以为磁盘上没有明文密钥。
+        */}
+        {keySource !== "none" && (
+          <p className="note-line" style={{ marginTop: 6 }}>
+            {keySource === "keychain"
+              ? "密钥保存在系统钥匙串。"
+              : "密钥保存在应用数据目录的 0600 文件里（系统钥匙串不可用时的回落）。"}
+          </p>
+        )}
         <button
           className="btn primary"
           style={{ marginTop: 12 }}

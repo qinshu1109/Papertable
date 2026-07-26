@@ -8,10 +8,19 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type { LlmMessage } from "../../types";
 import type { OutputChannel } from "../modelOutput";
-import type { ModelTask, ProviderConfig, ProviderHealth } from "./http";
+import type {
+  KeySource,
+  ModelTask,
+  ProviderConfig,
+  ProviderHealth,
+} from "./http";
 
 export function getProviderHealth(): Promise<ProviderHealth> {
   return invoke<ProviderHealth>("provider_health");
+}
+
+export function getKeySource(): Promise<KeySource> {
+  return invoke<KeySource>("provider_key_source");
 }
 
 export function getProviderConfig(): Promise<ProviderConfig> {

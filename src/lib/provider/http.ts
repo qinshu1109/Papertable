@@ -18,6 +18,14 @@ export interface ProviderConfig {
 
 export type ModelTask = "chat" | "concept-preview" | "title" | "concepts";
 
+/** 密钥实际存在哪。web 端只有本机服务的 .env.local 这一种。 */
+export type KeySource = "keychain" | "file" | "none";
+
+export async function getKeySource(): Promise<KeySource> {
+  const config = await getProviderConfig();
+  return config.hasApiKey ? "file" : "none";
+}
+
 export async function getProviderHealth(): Promise<ProviderHealth> {
   const response = await fetch("/api/health", { cache: "no-store" });
   const body = (await response.json()) as ProviderHealth;

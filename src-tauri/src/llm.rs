@@ -252,15 +252,73 @@ fn url_parts(raw: &str) -> Option<UrlParts> {
 // ---------------------------------------------------------------------------
 // 配置持久化
 //
-// 与 Node 版 `.env.local` 的安全姿态一致：写在应用数据目录，权限 0600，
-// 临时文件 + rename 保证原子。
+// 密钥进系统钥匙串，其余（接口地址、模型名）留在应用数据目录的 0600 文件里。
 //
-// **钥匙串留到 S5**：macOS 把钥匙串 ACL 绑在代码签名身份上，而稳定签名正是 S5
-// 的内容。在那之前用钥匙串意味着每次重新构建都会丢掉已存的密钥。
+// 这一步之所以放在 ad-hoc 签名之后：macOS 把钥匙串 ACL 绑在**代码签名身份**上，
+// 没有稳定身份时，每次重新构建都是一个「新」应用，会丢掉已存的密钥。
+//
+// 钥匙串取不到时回落到文件（未签名的开发构建、或用户拒绝了授权）。回落是显式的，
+// 不是静默的——`key_source()` 会把实际来源报给设置页，免得用户以为密钥进了钥匙串
+// 而其实躺在文件里。
 // ---------------------------------------------------------------------------
+
+const KEYRING_SERVICE: &str = "com.papertable.app";
+const KEYRING_USER: &str = "provider-api-key";
+
+#[derive(Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeySource {
+    Keychain,
+    /// 钥匙串不可用时的回落：应用数据目录里的 0600 文件。
+    File,
+    None,
+}
+
+fn keyring_entry() -> Option<keyring::Entry> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()
+}
+
+fn read_keychain() -> Option<String> {
+    let value = keyring_entry()?.get_password().ok()?;
+    (!value.is_empty()).then_some(value)
+}
+
+/// 写钥匙串；不可用时返回 false，由调用方回落到文件。
+fn write_keychain(key: &str) -> bool {
+    let Some(entry) = keyring_entry() else {
+        return false;
+    };
+    if key.is_empty() {
+        // 清空密钥时把条目一并删掉，别在钥匙串里留一条空记录。
+        let _ = entry.delete_credential();
+        return true;
+    }
+    entry.set_password(key).is_ok()
+}
 
 pub fn config_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("provider.json")
+}
+
+/// 密钥实际来自哪里。设置页要如实展示，不能让用户以为它在钥匙串里。
+pub fn key_source(config: &ProviderConfig, from_keychain: bool) -> KeySource {
+    if config.api_key.is_empty() {
+        KeySource::None
+    } else if from_keychain {
+        KeySource::Keychain
+    } else {
+        KeySource::File
+    }
+}
+
+/// 读配置：密钥优先取钥匙串，取不到再看文件里的回落值。
+pub fn load_config_with_source(path: &Path) -> (ProviderConfig, bool) {
+    let mut config = load_config(path);
+    if let Some(key) = read_keychain() {
+        config.api_key = key;
+        return (config, true);
+    }
+    (config, false)
 }
 
 pub fn load_config(path: &Path) -> ProviderConfig {
@@ -287,21 +345,24 @@ pub fn load_config(path: &Path) -> ProviderConfig {
         .unwrap_or_default()
 }
 
-pub fn save_config(path: &Path, config: &ProviderConfig) -> Result<()> {
+/// 保存配置。密钥优先进钥匙串；进去了就**不再写进文件**，避免磁盘上留一份副本。
+pub fn save_config(path: &Path, config: &ProviderConfig) -> Result<bool> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let in_keychain = write_keychain(&config.api_key);
     let body = serde_json::to_string_pretty(&json!({
         "baseUrl": config.base_url,
         "model": config.model,
-        "apiKey": config.api_key,
+        // 钥匙串写成功后文件里不再留密钥；失败才回落。
+        "apiKey": if in_keychain { "" } else { config.api_key.as_str() },
     }))?;
     let temp = path.with_extension("json.tmp");
     std::fs::write(&temp, body)?;
     set_owner_only(&temp)?;
     std::fs::rename(&temp, path)?;
     set_owner_only(path)?;
-    Ok(())
+    Ok(in_keychain)
 }
 
 fn set_owner_only(path: &Path) -> Result<()> {
@@ -608,21 +669,40 @@ mod tests {
     }
 
     #[test]
-    fn config_is_written_owner_only() {
+    fn the_config_file_is_owner_only() {
         let dir = tempfile::tempdir().unwrap();
         let path = config_path(dir.path());
         let config = ProviderConfig {
             api_key: "k".into(),
             ..Default::default()
         };
-        save_config(&path, &config).unwrap();
-        assert_eq!(load_config(&path).api_key, "k");
+        let in_keychain = save_config(&path, &config).unwrap();
+        // 钥匙串写成功时文件里不该再留密钥；失败才回落到文件。
+        assert_eq!(
+            load_config(&path).api_key,
+            if in_keychain { "" } else { "k" }
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o077, 0, "组和其他用户不得有任何权限");
         }
+    }
+
+    /// 密钥来源必须如实上报。回落到文件却显示「已进钥匙串」，会让用户以为磁盘上
+    /// 没有明文密钥。
+    #[test]
+    fn the_key_source_is_reported_honestly() {
+        let empty = ProviderConfig::default();
+        assert_eq!(key_source(&empty, true), KeySource::None);
+        assert_eq!(key_source(&empty, false), KeySource::None);
+        let with_key = ProviderConfig {
+            api_key: "k".into(),
+            ..Default::default()
+        };
+        assert_eq!(key_source(&with_key, true), KeySource::Keychain);
+        assert_eq!(key_source(&with_key, false), KeySource::File);
     }
 
     #[test]
