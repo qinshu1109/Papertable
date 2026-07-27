@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::error::Error as _;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -189,6 +190,8 @@ pub enum StreamEvent {
     },
     Error {
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<&'static str>,
     },
     Done {
         stopped: bool,
@@ -316,19 +319,49 @@ fn validate_internal_probe(request: &ChatRequest) -> Result<()> {
     validate_with_probe_permission(request, true)
 }
 
-pub fn friendly_provider_error(status: u16, body: &str) -> String {
+pub fn provider_error_code_for_status(status: u16) -> &'static str {
     match status {
-        401 => "模型服务未配置或密钥无效，请在设置页填写。".into(),
-        429 => "模型服务暂时限流，请稍后重试。".into(),
-        s if s >= 500 => "模型服务暂时不可用，请稍后重试。".into(),
-        _ => {
-            let trimmed: String = body.chars().take(280).collect();
-            if trimmed.is_empty() {
-                "模型服务返回了无法处理的响应。".into()
-            } else {
-                trimmed
-            }
-        }
+        401 | 403 => "unauthorized",
+        429 => "rate-limited",
+        408 | 504 => "timeout",
+        500..=599 => "service-unavailable",
+        _ => "invalid-response",
+    }
+}
+
+pub fn provider_error_message(code: &str) -> &'static str {
+    match code {
+        "unauthorized" => "模型服务未配置或密钥无效，请在设置页检查。",
+        "rate-limited" => "模型服务暂时限流，请稍后重试。",
+        "timeout" => "请求超时，请重试。",
+        "disconnected" => "连接意外中断，请重试。",
+        "empty-response" => "模型没有返回文本，请重试。",
+        "invalid-response" => "模型服务返回了无法处理的响应，请重试。",
+        "service-unavailable" => "模型服务暂时不可用，请稍后重试。",
+        _ => "模型请求未能完成，请重试。",
+    }
+}
+
+pub fn friendly_provider_error(status: u16, _body: &str) -> String {
+    provider_error_message(provider_error_code_for_status(status)).to_string()
+}
+
+fn transport_error_code(error: &ureq::Transport) -> &'static str {
+    let timed_out = error
+        .source()
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .is_some_and(|source| source.kind() == std::io::ErrorKind::TimedOut);
+    if timed_out {
+        "timeout"
+    } else {
+        "disconnected"
+    }
+}
+
+fn request_error_code(error: &ureq::Error) -> &'static str {
+    match error {
+        ureq::Error::Transport(transport) => transport_error_code(transport),
+        ureq::Error::Status(status, _) => provider_error_code_for_status(*status),
     }
 }
 
@@ -414,97 +447,31 @@ fn url_parts(raw: &str) -> Option<UrlParts> {
 // ---------------------------------------------------------------------------
 // 配置持久化
 //
-// 密钥进系统钥匙串，其余（接口地址、模型名）留在应用数据目录的 0600 文件里。
-//
-// 这一步之所以放在 ad-hoc 签名之后：macOS 把钥匙串 ACL 绑在**代码签名身份**上，
-// 没有稳定身份时，每次重新构建都是一个「新」应用，会丢掉已存的密钥。
-//
-// 钥匙串取不到时回落到文件（未签名的开发构建、或用户拒绝了授权）。回落是显式的，
-// 不是静默的——`key_source()` 会把实际来源报给设置页，免得用户以为密钥进了钥匙串
-// 而其实躺在文件里。
+// 桌面版把接口地址、模型名和 API 密钥都保存在应用数据目录的 owner-only（0600）文件。
+// 不调用 macOS 钥匙串：Papertable 的本地 ad-hoc 签名在每次重建后都会变更，钥匙串会
+// 因此把它当成新的程序并反复索要登录钥匙串密码。0600 文件只允许当前 macOS 用户读取，
+// 且密钥仍然绝不进入 SQLite、前端、导出包、日志或 Git。
 // ---------------------------------------------------------------------------
-
-#[cfg(not(test))]
-const KEYRING_SERVICE: &str = "com.papertable.app";
-#[cfg(not(test))]
-const KEYRING_USER: &str = "provider-api-key";
 
 #[derive(Serialize, Debug, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 pub enum KeySource {
-    Keychain,
-    /// 钥匙串不可用时的回落：应用数据目录里的 0600 文件。
+    /// 应用数据目录里的 0600 文件。
     File,
     None,
-}
-
-/// **单元测试完全不碰钥匙串。**
-///
-/// 两个理由，都是踩过的：
-/// 1. 用真实服务名时，`cargo test` 把假密钥 `"k"` 写进了用户真实的钥匙串，覆盖掉
-///    真密钥——应用随后拿着 `"k"` 请求，报 INVALID_API_KEY。测试破坏了环境。
-/// 2. 换成独立服务名之后，未签名的测试二进制创建新条目会弹系统授权框，在
-///    非交互环境里直接把 `cargo test` 挂死。
-///
-/// 单元测试因此只走文件回落分支——那本来也是它该验的部分。钥匙串路径由签名后的
-/// 应用在首次保存时走通，见 docs/DESKTOP.md。
-#[cfg(test)]
-fn read_keychain() -> Option<String> {
-    None
-}
-#[cfg(test)]
-fn write_keychain(_key: &str) -> bool {
-    false
-}
-
-#[cfg(not(test))]
-fn keyring_entry() -> Option<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()
-}
-
-#[cfg(not(test))]
-fn read_keychain() -> Option<String> {
-    let value = keyring_entry()?.get_password().ok()?;
-    (!value.is_empty()).then_some(value)
-}
-
-/// 写钥匙串；不可用时返回 false，由调用方回落到文件。
-#[cfg(not(test))]
-fn write_keychain(key: &str) -> bool {
-    let Some(entry) = keyring_entry() else {
-        return false;
-    };
-    if key.is_empty() {
-        // 清空密钥时把条目一并删掉，别在钥匙串里留一条空记录。
-        let _ = entry.delete_credential();
-        return true;
-    }
-    entry.set_password(key).is_ok()
 }
 
 pub fn config_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("provider.json")
 }
 
-/// 密钥实际来自哪里。设置页要如实展示，不能让用户以为它在钥匙串里。
-pub fn key_source(config: &ProviderConfig, from_keychain: bool) -> KeySource {
+/// 密钥实际来源。设置页要如实展示，不能让用户以为它还在系统钥匙串里。
+pub fn key_source(config: &ProviderConfig) -> KeySource {
     if config.api_key.is_empty() {
         KeySource::None
-    } else if from_keychain {
-        KeySource::Keychain
     } else {
         KeySource::File
     }
-}
-
-/// 读配置：密钥优先取钥匙串，取不到再看文件里的回落值。
-pub fn load_config_with_source(path: &Path) -> (ProviderConfig, bool) {
-    let mut config = load_config(path);
-    if let Some(key) = read_keychain() {
-        config.api_key = key;
-        return (config, true);
-    }
-    (config, false)
 }
 
 pub fn load_config(path: &Path) -> ProviderConfig {
@@ -531,24 +498,22 @@ pub fn load_config(path: &Path) -> ProviderConfig {
         .unwrap_or_default()
 }
 
-/// 保存配置。密钥优先进钥匙串；进去了就**不再写进文件**，避免磁盘上留一份副本。
-pub fn save_config(path: &Path, config: &ProviderConfig) -> Result<bool> {
+/// 保存配置到仅当前用户可读的文件。永远不接触系统钥匙串。
+pub fn save_config(path: &Path, config: &ProviderConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let in_keychain = write_keychain(&config.api_key);
     let body = serde_json::to_string_pretty(&json!({
         "baseUrl": config.base_url,
         "model": config.model,
-        // 钥匙串写成功后文件里不再留密钥；失败才回落。
-        "apiKey": if in_keychain { "" } else { config.api_key.as_str() },
+        "apiKey": config.api_key,
     }))?;
     let temp = path.with_extension("json.tmp");
     std::fs::write(&temp, body)?;
     set_owner_only(&temp)?;
     std::fs::rename(&temp, path)?;
     set_owner_only(path)?;
-    Ok(in_keychain)
+    Ok(())
 }
 
 fn set_owner_only(path: &Path) -> Result<()> {
@@ -850,12 +815,15 @@ pub fn health(config: &ProviderConfig) -> ProviderHealth {
             base_url: config.base_url.clone(),
             message: friendly_provider_error(status, &response.into_string().unwrap_or_default()),
         },
-        Err(e) => ProviderHealth {
-            configured: false,
-            model: config.model.clone(),
-            base_url: config.base_url.clone(),
-            message: format!("无法连接模型服务：{e}"),
-        },
+        Err(e) => {
+            let code = request_error_code(&e);
+            ProviderHealth {
+                configured: false,
+                model: config.model.clone(),
+                base_url: config.base_url.clone(),
+                message: provider_error_message(code).into(),
+            }
+        }
     }
 }
 
@@ -870,7 +838,7 @@ fn complete_with_probe_permission(
         validate(request)?;
     }
     if config.api_key.is_empty() {
-        return Err("模型服务未配置或密钥无效，请在设置页填写。".into());
+        return Err(provider_error_message("unauthorized").into());
     }
     let response = agent()
         .post(&format!("{}/chat/completions", config.base_url))
@@ -880,13 +848,17 @@ fn complete_with_probe_permission(
         .send_json(body_for(config, request, false));
     match response {
         Ok(res) => {
-            let value: Value = serde_json::from_str(&res.into_string()?)?;
+            let text = res
+                .into_string()
+                .map_err(|_| Error(provider_error_message("invalid-response").into()))?;
+            let value: Value = serde_json::from_str(&text)
+                .map_err(|_| Error(provider_error_message("invalid-response").into()))?;
             let completion = Completion {
                 content: extract_message(&value),
                 tool_calls: extract_tool_calls(&value),
             };
             if completion.content.is_empty() && completion.tool_calls.is_empty() {
-                Err("模型没有返回内容。".into())
+                Err(provider_error_message("empty-response").into())
             } else {
                 Ok(completion)
             }
@@ -895,7 +867,7 @@ fn complete_with_probe_permission(
             status,
             &res.into_string().unwrap_or_default(),
         ))),
-        Err(e) => Err(Error(format!("模型连接中断，请重试：{e}"))),
+        Err(e) => Err(Error(provider_error_message(request_error_code(&e)).into())),
     }
 }
 
@@ -913,7 +885,7 @@ fn complete_internal_probe(config: &ProviderConfig, request: &ChatRequest) -> Re
 pub fn generate(config: &ProviderConfig, request: &ChatRequest) -> Result<String> {
     let completion = complete(config, request)?;
     if completion.content.is_empty() {
-        Err("模型没有返回内容。".into())
+        Err(provider_error_message("empty-response").into())
     } else {
         Ok(completion.content)
     }
@@ -927,9 +899,10 @@ pub fn stream(
     tap: &SseTap,
     cancelled: &AtomicBool,
 ) -> Result<()> {
-    if let Err(e) = validate(request) {
+    if let Err(_e) = validate(request) {
         let _ = channel.send(StreamEvent::Error {
-            message: e.to_string(),
+            message: provider_error_message("invalid-response").into(),
+            code: Some("invalid-response"),
         });
         let _ = channel.send(StreamEvent::Done {
             stopped: false,
@@ -939,7 +912,8 @@ pub fn stream(
     }
     if config.api_key.is_empty() {
         let _ = channel.send(StreamEvent::Error {
-            message: "模型服务未配置或密钥无效，请在设置页填写。".into(),
+            message: provider_error_message("unauthorized").into(),
+            code: Some("unauthorized"),
         });
         let _ = channel.send(StreamEvent::Done {
             stopped: false,
@@ -967,6 +941,7 @@ pub fn stream(
         Err(ureq::Error::Status(status, res)) => {
             let _ = channel.send(StreamEvent::Error {
                 message: friendly_provider_error(status, &res.into_string().unwrap_or_default()),
+                code: Some(provider_error_code_for_status(status)),
             });
             let _ = channel.send(StreamEvent::Done {
                 stopped: false,
@@ -975,8 +950,10 @@ pub fn stream(
             return Ok(());
         }
         Err(e) => {
+            let code = request_error_code(&e);
             let _ = channel.send(StreamEvent::Error {
-                message: format!("模型连接中断，请重试：{e}"),
+                message: provider_error_message(code).into(),
+                code: Some(code),
             });
             let _ = channel.send(StreamEvent::Done {
                 stopped: false,
@@ -990,12 +967,31 @@ pub fn stream(
     let mut emitted_tool_call = false;
     let mut finish_reason = None;
     let mut stopped = cancelled.load(Ordering::Relaxed);
-    for line in BufReader::new(reader).lines() {
+    let mut reader = BufReader::new(reader);
+    let mut stream_error = false;
+    loop {
         if cancelled.load(Ordering::Relaxed) {
             stopped = true;
             break;
         }
-        let Ok(line) = line else { break };
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => {
+                let code = if error.kind() == std::io::ErrorKind::TimedOut {
+                    "timeout"
+                } else {
+                    "disconnected"
+                };
+                let _ = channel.send(StreamEvent::Error {
+                    message: provider_error_message(code).into(),
+                    code: Some(code),
+                });
+                stream_error = true;
+                break;
+            }
+        }
         let Some(data) = line.strip_prefix("data:") else {
             continue;
         };
@@ -1031,9 +1027,10 @@ pub fn stream(
         }
     }
 
-    if !emitted && !emitted_tool_call && !stopped {
+    if !emitted && !emitted_tool_call && !stopped && !stream_error {
         let _ = channel.send(StreamEvent::Error {
-            message: "模型没有返回可显示的文本，请重试。".into(),
+            message: provider_error_message("empty-response").into(),
+            code: Some("empty-response"),
         });
     }
     let _ = channel.send(StreamEvent::Done {
@@ -1282,12 +1279,8 @@ mod tests {
             api_key: "k".into(),
             ..Default::default()
         };
-        let in_keychain = save_config(&path, &config).unwrap();
-        // 钥匙串写成功时文件里不该再留密钥；失败才回落到文件。
-        assert_eq!(
-            load_config(&path).api_key,
-            if in_keychain { "" } else { "k" }
-        );
+        save_config(&path, &config).unwrap();
+        assert_eq!(load_config(&path).api_key, "k");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1296,19 +1289,16 @@ mod tests {
         }
     }
 
-    /// 密钥来源必须如实上报。回落到文件却显示「已进钥匙串」，会让用户以为磁盘上
-    /// 没有明文密钥。
+    /// 密钥来源必须如实上报，避免用户以为它还在系统钥匙串里。
     #[test]
     fn the_key_source_is_reported_honestly() {
         let empty = ProviderConfig::default();
-        assert_eq!(key_source(&empty, true), KeySource::None);
-        assert_eq!(key_source(&empty, false), KeySource::None);
+        assert_eq!(key_source(&empty), KeySource::None);
         let with_key = ProviderConfig {
             api_key: "k".into(),
             ..Default::default()
         };
-        assert_eq!(key_source(&with_key, true), KeySource::Keychain);
-        assert_eq!(key_source(&with_key, false), KeySource::File);
+        assert_eq!(key_source(&with_key), KeySource::File);
     }
 
     #[test]
@@ -1438,5 +1428,17 @@ mod tests {
         assert!(!result.streaming_tool_calls);
         assert!(!result.tool_result_accepted);
         assert!(result.error.unwrap_or_default().contains("密钥"));
+    }
+
+    #[test]
+    fn provider_error_contract_is_stable_and_never_uses_upstream_body() {
+        assert_eq!(provider_error_code_for_status(401), "unauthorized");
+        assert_eq!(provider_error_code_for_status(429), "rate-limited");
+        assert_eq!(provider_error_code_for_status(504), "timeout");
+        assert_eq!(provider_error_code_for_status(500), "service-unavailable");
+        let message = friendly_provider_error(418, "http://127.0.0.1 EOF stack");
+        assert!(!message.contains("127.0.0.1"));
+        assert!(!message.contains("EOF"));
+        assert_eq!(provider_error_message("timeout"), "请求超时，请重试。");
     }
 }

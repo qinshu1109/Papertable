@@ -2,6 +2,9 @@ dist
 node_modules
 playwright-report
 test-results
+qa-evidence
+QA_REPORT.md
+conversation-*.txt
 *.tsbuildinfo
 pnpm-lock.yaml
 DESIGN_NOTES.md

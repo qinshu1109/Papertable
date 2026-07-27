@@ -56,9 +56,23 @@ function showStartupFailure(cause: unknown) {
   console.error("Papertable startup failure", cause);
 }
 
-window.addEventListener("error", (event) => showStartupFailure(event.error));
-window.addEventListener("unhandledrejection", (event) =>
-  showStartupFailure(event.reason),
-);
+// The bootstrap screen is only for failures that stop the application module
+// from loading.  A later, recoverable runtime promise (for example a Vault
+// rescan of a directory that was moved in Finder) must stay inside its feature
+// surface; turning it into a full-page "startup failure" made the product
+// claim that the app could not launch even though cards and local data were
+// still perfectly usable.
+let booting = true;
+window.addEventListener("error", (event) => {
+  if (booting) showStartupFailure(event.error);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  if (booting) showStartupFailure(event.reason);
+});
 
-void import("./main").catch(showStartupFailure);
+void import("./main").then(
+  () => {
+    booting = false;
+  },
+  (cause) => showStartupFailure(cause),
+);

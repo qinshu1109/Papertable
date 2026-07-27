@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layers, X } from "lucide-react";
 import { useStore } from "../store";
 import type { Turn } from "../types";
@@ -55,6 +55,8 @@ export function TempCardLayer({
   const previousCount = useRef(0);
   const dockWasOpen = useRef(false);
   const swipe = useRef<number | null>(null);
+  const openerByCardId = useRef(new Map<string, HTMLElement>());
+  const knownCardIds = useRef(new Set<string>());
 
   const topCard = useMemo(
     () => [...cards].sort((a, b) => b.z - a.z)[0],
@@ -80,17 +82,49 @@ export function TempCardLayer({
     previousCount.current = cards.length;
   }, [activeMobileId, cards, topCard?.id]);
 
+  // A temporary card is a foreground reading layer, not a graph mutation.
+  // Remember the concept trigger so Escape/close leaves keyboard users where
+  // they started instead of dumping focus onto the document body.
+  useEffect(() => {
+    const active =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    for (const card of cards) {
+      if (!knownCardIds.current.has(card.id) && active)
+        openerByCardId.current.set(card.id, active);
+    }
+    const nextIds = new Set(cards.map((card) => card.id));
+    for (const id of openerByCardId.current.keys()) {
+      if (!nextIds.has(id)) openerByCardId.current.delete(id);
+    }
+    knownCardIds.current = nextIds;
+  }, [cards]);
+
+  const closeWithFocus = useCallback(
+    (id: string) => {
+      const opener = openerByCardId.current.get(id);
+      onClose(id);
+      window.requestAnimationFrame(() => {
+        if (opener?.isConnected) opener.focus();
+      });
+    },
+    [onClose],
+  );
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented) return;
       const top = [...cards]
         .filter((card) => !card.minimized)
         .sort((a, b) => b.z - a.z)[0];
-      if (top) onClose(top.id);
+      if (!top) return;
+      event.preventDefault();
+      closeWithFocus(top.id);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [cards, onClose]);
+  }, [cards, closeWithFocus]);
 
   useEffect(() => {
     const dockOpen = !mobile && cards.some((card) => card.minimized);
@@ -210,7 +244,7 @@ export function TempCardLayer({
             </button>
             <button
               aria-label={`关闭临时卡片：${tempCard.term}`}
-              onClick={() => onClose(tempCard.id)}
+              onClick={() => closeWithFocus(tempCard.id)}
             >
               <X size={11} />
             </button>
@@ -258,7 +292,7 @@ export function TempCardLayer({
               if (mobile) setMobileCollapsed(true);
               else onMinimize(tempCard.id);
             }}
-            onClose={() => onClose(tempCard.id)}
+            onClose={() => closeWithFocus(tempCard.id)}
             onReference={(intent, content) =>
               addTempReference(tempCard, intent, content)
             }
@@ -284,7 +318,7 @@ export function TempCardLayer({
                   {tempCard.term}
                 </button>
                 <button
-                  onClick={() => onClose(tempCard.id)}
+                  onClick={() => closeWithFocus(tempCard.id)}
                   aria-label={`关闭临时卡片：${tempCard.term}`}
                 >
                   <X size={11} />

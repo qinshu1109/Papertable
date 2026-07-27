@@ -1,10 +1,36 @@
 const encoder = new TextEncoder();
 
-export function friendlyProviderError(status, body = "") {
-  if (status === 401) return "模型服务未配置或密钥无效，请检查 .env.local。";
-  if (status === 429) return "模型服务暂时限流，请稍后重试。";
-  if (status >= 500) return "模型服务暂时不可用，请稍后重试。";
-  return body.slice(0, 280) || "模型服务返回了无法处理的响应。";
+export function providerErrorCode(status) {
+  if (status === 401 || status === 403) return "unauthorized";
+  if (status === 429) return "rate-limited";
+  if (status === 408 || status === 504) return "timeout";
+  if (status >= 500) return "service-unavailable";
+  return "invalid-response";
+}
+
+export function providerErrorMessage(code) {
+  switch (code) {
+    case "unauthorized":
+      return "模型服务未配置或密钥无效，请在设置页检查。";
+    case "rate-limited":
+      return "模型服务暂时限流，请稍后重试。";
+    case "timeout":
+      return "请求超时，请重试。";
+    case "disconnected":
+      return "连接意外中断，请重试。";
+    case "empty-response":
+      return "模型没有返回文本，请重试。";
+    case "invalid-response":
+      return "模型服务返回了无法处理的响应，请重试。";
+    case "service-unavailable":
+      return "模型服务暂时不可用，请稍后重试。";
+    default:
+      return "模型请求未能完成，请重试。";
+  }
+}
+
+export function friendlyProviderError(status) {
+  return providerErrorMessage(providerErrorCode(status));
 }
 
 /**
@@ -90,13 +116,18 @@ export function sseEvent(event, payload) {
   );
 }
 
-export async function relayOpenAiStream({ upstream, write, signal }) {
+export async function relayOpenAiStream({
+  upstream,
+  write,
+  signal,
+  timeoutCode,
+}) {
   if (!upstream.ok || !upstream.body) {
     const body = await upstream.text();
     write(
       sseEvent("error", {
         message: friendlyProviderError(upstream.status, body),
-        status: upstream.status,
+        code: providerErrorCode(upstream.status),
       }),
     );
     write(sseEvent("done", { stopped: false }));
@@ -146,14 +177,31 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
     }
   } catch {
     if (!signal?.aborted) {
-      write(sseEvent("error", { message: "模型连接中断，请重试。" }));
+      write(
+        sseEvent("error", {
+          message: providerErrorMessage("disconnected"),
+          code: "disconnected",
+        }),
+      );
     }
   } finally {
     reader.cancel().catch(() => undefined);
   }
 
-  if (!emittedText && !emittedToolCall && !signal?.aborted) {
-    write(sseEvent("error", { message: "模型没有返回可显示的文本，请重试。" }));
+  if (signal?.aborted && timeoutCode === "timeout") {
+    write(
+      sseEvent("error", {
+        message: providerErrorMessage("timeout"),
+        code: "timeout",
+      }),
+    );
+  } else if (!emittedText && !emittedToolCall && !signal?.aborted) {
+    write(
+      sseEvent("error", {
+        message: providerErrorMessage("empty-response"),
+        code: "empty-response",
+      }),
+    );
   }
   write(
     sseEvent("done", {

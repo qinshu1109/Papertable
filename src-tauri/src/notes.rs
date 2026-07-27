@@ -11,6 +11,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
+/// 单篇 Markdown 的硬上限。超过它不应该继续占住桌面数据库锁或让浏览器主线程
+/// 因切块而失去响应；更重要的是，旧版本留下的索引也必须一并删除，不能把已经
+/// 不可用的内容继续伪装成当前资料。
+pub const MAX_MARKDOWN_BYTES: usize = 20 * 1024 * 1024;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -142,6 +147,57 @@ pub struct IndexReport {
     pub documents_indexed: usize,
     pub chunks_indexed: usize,
     pub skipped: usize,
+    #[serde(default)]
+    pub issues: Vec<IndexIssue>,
+}
+
+/// 只向用户暴露相对路径和可操作原因，绝不把 Vault 根目录或系统错误原文带到
+/// WebView。这个对象既用于首次导入，也用于桌面端重扫报告。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexIssue {
+    pub relative_path: String,
+    pub code: String,
+    pub message: String,
+}
+
+impl IndexIssue {
+    pub fn too_large(relative_path: impl Into<String>) -> Self {
+        Self {
+            relative_path: relative_path.into(),
+            code: "too-large".into(),
+            message: "文件超过 20 MiB，已跳过并移除旧索引。".into(),
+        }
+    }
+}
+
+/// 可检索性是运行期事实，不能只根据“用户以前绑定过”判断。`indexing` 预留给
+/// UI 的进行中状态；Rust 在没有持久任务表时不会伪造这个状态。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoteLibraryAvailability {
+    Ready,
+    Indexing,
+    Missing,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnavailableNoteLibrary {
+    pub id: String,
+    pub name: String,
+    pub availability: NoteLibraryAvailability,
+    pub reason: String,
+}
+
+/// 每轮工具调用、读取和引用解析都使用这个瞬时 scope。它不保存任何绝对路径，
+/// 也不允许模型参与决定 libraryId。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedNoteScope {
+    pub available_library_ids: Vec<String>,
+    pub unavailable_libraries: Vec<UnavailableNoteLibrary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +216,9 @@ pub struct PublicNoteLibrary {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root_label: Option<String>,
+    pub availability: NoteLibraryAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -195,11 +254,47 @@ pub struct PublicIndexReport {
     pub documents: usize,
     pub chunks: usize,
     pub skipped: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<IndexIssue>,
     pub updated_at: i64,
+}
+
+/// IPC 输入只包含历史引用已经持久化的安全标识；它从不接受本地路径。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CitationResolveRequest {
+    pub library_id: String,
+    pub document_id: String,
+    pub relative_path: String,
+    pub document_hash: String,
+    #[serde(default)]
+    pub chunk_id: Option<String>,
+    #[serde(default)]
+    pub excerpt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CitationResolutionState {
+    Current,
+    Updated,
+    Missing,
+    LibraryUnavailable,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicCitationResolution {
+    pub state: CitationResolutionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk: Option<PublicNoteChunk>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl From<&NoteLibrary> for PublicNoteLibrary {
     fn from(library: &NoteLibrary) -> Self {
+        let (availability, availability_reason) = library_availability(library);
         let root_label = library.root_path.as_deref().and_then(|path| {
             Path::new(path)
                 .file_name()
@@ -216,6 +311,8 @@ impl From<&NoteLibrary> for PublicNoteLibrary {
                 "vault".into()
             },
             root_label,
+            availability,
+            availability_reason,
             created_at: library.created_at,
             updated_at: library.updated_at,
         }
@@ -289,6 +386,7 @@ impl From<&IndexReport> for PublicIndexReport {
             documents: report.documents_indexed,
             chunks: report.chunks_indexed,
             skipped: report.skipped,
+            issues: report.issues.clone(),
             updated_at: now_millis(),
         }
     }
@@ -384,15 +482,19 @@ pub fn chunk_markdown(
         .to_string();
     let tags = tags_of(markdown);
     let sections = sections(markdown, &fallback_title);
+    // 对 10–20 MiB 的长 Markdown，逐块从字符串开头重新数 UTF-16 会退化成
+    // O(块数 × 文件长度)。稀疏索引把每次换算限制在约 512 个 UTF-16 code units，
+    // 保持与 Web 的 UTF-16 anchor 语义一致而不会为整篇文件分配巨大的逐字映射。
+    let utf16 = Utf16Lookup::build(markdown);
     let mut chunks = Vec::new();
     let mut ordinal = 0usize;
     for section in sections {
-        for piece in split_section(markdown, section.start_char, section.end_char) {
-            let (start, end) = trim_utf16_range(markdown, piece.0, piece.1);
+        for piece in split_section(markdown, &utf16, section.start_char, section.end_char) {
+            let (start, end) = trim_utf16_range_with(markdown, &utf16, piece.0, piece.1);
             if end <= start {
                 continue;
             }
-            let content = slice_utf16(markdown, start, end).to_string();
+            let content = slice_utf16_with(markdown, &utf16, start, end).to_string();
             let id = stable_id(
                 "chunk",
                 &[
@@ -534,13 +636,18 @@ fn sections(markdown: &str, fallback_title: &str) -> Vec<Section> {
     output
 }
 
-fn split_section(markdown: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+fn split_section(
+    markdown: &str,
+    utf16: &Utf16Lookup,
+    start: usize,
+    end: usize,
+) -> Vec<(usize, usize)> {
     const MAX: usize = 800;
     const OVERLAP: usize = 80;
     if end.saturating_sub(start) <= MAX {
         return vec![(start, end)];
     }
-    let section = slice_utf16(markdown, start, end);
+    let section = slice_utf16_with(markdown, utf16, start, end);
     let mut paragraphs = Vec::<(usize, usize)>::new();
     let mut cursor = 0usize;
     for raw in section.split_inclusive("\n\n") {
@@ -597,6 +704,59 @@ fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
+/// 稀疏 UTF-16→UTF-8 边界表。检查点始终落在 Rust 字符边界；对代理项中间的异常
+/// 输入也会向前收紧，和旧 `byte_for_utf16()` 的安全行为一致。
+struct Utf16Lookup {
+    checkpoints: Vec<(usize, usize)>,
+}
+
+impl Utf16Lookup {
+    const STRIDE: usize = 512;
+
+    fn build(text: &str) -> Self {
+        let mut checkpoints = vec![(0, 0)];
+        let mut units = 0usize;
+        let mut next = Self::STRIDE;
+        for (byte, character) in text.char_indices() {
+            while units >= next {
+                checkpoints.push((units, byte));
+                next += Self::STRIDE;
+            }
+            units += character.len_utf16();
+        }
+        checkpoints.push((units, text.len()));
+        Self { checkpoints }
+    }
+
+    fn byte_for(&self, text: &str, utf16_index: usize) -> usize {
+        let mut low = 0usize;
+        let mut high = self.checkpoints.len();
+        while low + 1 < high {
+            let middle = (low + high) / 2;
+            if self.checkpoints[middle].0 <= utf16_index {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        let (mut units, byte) = self.checkpoints[low];
+        if units >= utf16_index {
+            return byte;
+        }
+        for (offset, character) in text[byte..].char_indices() {
+            if units >= utf16_index {
+                return byte + offset;
+            }
+            let next = units + character.len_utf16();
+            if next > utf16_index {
+                return byte + offset;
+            }
+            units = next;
+        }
+        text.len()
+    }
+}
+
 fn byte_for_utf16(text: &str, utf16_index: usize) -> usize {
     let mut units = 0usize;
     for (byte, character) in text.char_indices() {
@@ -620,8 +780,19 @@ fn slice_utf16(text: &str, start: usize, end: usize) -> &str {
     &text[start_byte..end_byte]
 }
 
-fn trim_utf16_range(text: &str, start: usize, end: usize) -> (usize, usize) {
-    let slice = slice_utf16(text, start, end);
+fn slice_utf16_with<'a>(text: &'a str, utf16: &Utf16Lookup, start: usize, end: usize) -> &'a str {
+    let start_byte = utf16.byte_for(text, start);
+    let end_byte = utf16.byte_for(text, end);
+    &text[start_byte..end_byte]
+}
+
+fn trim_utf16_range_with(
+    text: &str,
+    utf16: &Utf16Lookup,
+    start: usize,
+    end: usize,
+) -> (usize, usize) {
+    let slice = slice_utf16_with(text, utf16, start, end);
     let leading = slice
         .chars()
         .take_while(|character| character.is_whitespace())
@@ -783,6 +954,70 @@ pub fn library(conn: &Connection, library_id: &str) -> Result<Option<NoteLibrary
         .optional()?)
 }
 
+/// 返回只读资料库的运行期状态。数据库中的 `root_path` 是私有宿主数据；所有调用
+/// 方拿到的只有状态和适合 UI 显示的原因。不能以“索引表还有数据”为理由把已经被
+/// 移走的 Vault 当成可用资料。
+pub fn library_availability(library: &NoteLibrary) -> (NoteLibraryAvailability, Option<String>) {
+    if library.kind != "vault" {
+        return (NoteLibraryAvailability::Ready, None);
+    }
+    let Some(root) = library.root_path.as_deref() else {
+        return (
+            NoteLibraryAvailability::Missing,
+            Some("资料库目录已不可用。".into()),
+        );
+    };
+    match std::fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => match std::fs::read_dir(root) {
+            Ok(_) => (NoteLibraryAvailability::Ready, None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+                NoteLibraryAvailability::Missing,
+                Some("资料库目录已不存在。".into()),
+            ),
+            Err(_) => (
+                NoteLibraryAvailability::Error,
+                Some("无法读取资料库目录。".into()),
+            ),
+        },
+        Ok(_) => (
+            NoteLibraryAvailability::Missing,
+            Some("资料库目录已不存在。".into()),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            NoteLibraryAvailability::Missing,
+            Some("资料库目录已不存在。".into()),
+        ),
+        Err(_) => (
+            NoteLibraryAvailability::Error,
+            Some("无法访问资料库目录。".into()),
+        ),
+    }
+}
+
+/// 项目绑定是候选范围，实际可读范围必须在每次搜索/读取前重算。这样 Vault 被 Finder
+/// 移走、外置盘拔出或权限被撤销之后，旧 SQLite 索引不会继续进入模型上下文。
+pub fn resolve_project_scope(conn: &Connection, project_id: &str) -> Result<ResolvedNoteScope> {
+    let ids = project_library_ids(conn, project_id)?;
+    let mut scope = ResolvedNoteScope::default();
+    for id in ids {
+        let Some(library) = library(conn, &id)? else {
+            continue;
+        };
+        let (availability, reason) = library_availability(&library);
+        if availability == NoteLibraryAvailability::Ready {
+            scope.available_library_ids.push(library.id);
+        } else {
+            scope.unavailable_libraries.push(UnavailableNoteLibrary {
+                id: library.id,
+                name: library.name,
+                availability,
+                reason: reason.unwrap_or_else(|| "资料库当前不可用。".into()),
+            });
+        }
+    }
+    Ok(scope)
+}
+
 pub fn connect_vault(conn: &Connection, root: &Path, now: Option<i64>) -> Result<NoteLibrary> {
     let root_path = root_key(root);
     let id = stable_id("vault", &[&root_path]);
@@ -831,6 +1066,7 @@ pub fn import_files(conn: &Connection, input: &NoteImportInput) -> Result<IndexR
     let mut valid = Vec::new();
     let mut seen_paths = BTreeSet::new();
     let mut skipped = 0usize;
+    let mut issues = Vec::new();
     for file in &input.files {
         if !is_safe_relative_markdown(&file.path) {
             skipped += 1;
@@ -838,6 +1074,11 @@ pub fn import_files(conn: &Connection, input: &NoteImportInput) -> Result<IndexR
         }
         if !seen_paths.insert(file.path.as_str()) {
             return Err(format!("资料库导入包含重复路径：{}", file.path).into());
+        }
+        if file.content.len() > MAX_MARKDOWN_BYTES {
+            skipped += 1;
+            issues.push(IndexIssue::too_large(&file.path));
+            continue;
         }
         valid.push(file);
     }
@@ -853,6 +1094,7 @@ pub fn import_files(conn: &Connection, input: &NoteImportInput) -> Result<IndexR
     let mut report = IndexReport {
         library_id: input.id.clone(),
         skipped,
+        issues,
         ..Default::default()
     };
     // 与 Web adapter 一样，重新导入同一资料库代表一份新的完整快照；不能让已
@@ -860,7 +1102,7 @@ pub fn import_files(conn: &Connection, input: &NoteImportInput) -> Result<IndexR
     clear_library_documents(&tx, &input.id)?;
     for file in valid {
         report.documents_indexed += 1;
-        report.chunks_indexed += index_document(&tx, &input.id, &file.path, &file.content, now)?;
+        report.chunks_indexed += index_document_in(&tx, &input.id, &file.path, &file.content, now)?;
     }
     tx.commit()?;
     Ok(report)
@@ -895,7 +1137,13 @@ pub fn index_vault_file(
         return Ok(None);
     };
     let path = relative.to_string_lossy().replace('\\', "/");
-    Ok(Some(index_document(
+    if markdown.len() > MAX_MARKDOWN_BYTES {
+        // 已连接的 Vault 也不能因为一篇文件后来变大就继续保留旧块。这里清理
+        // 发生在 watcher 事件与全量扫描两条路径，确保“跳过”不是“继续使用旧版”。
+        remove_document(conn, &library_id, &path)?;
+        return Ok(Some(0));
+    }
+    Ok(Some(index_document_transactional(
         conn,
         &library_id,
         &path,
@@ -935,13 +1183,33 @@ pub fn retain_vault_documents(
     Ok(())
 }
 
-fn index_document(
+/// 单文件 watcher 更新必须是一个事务：任何一条 FTS / chunk 写入失败都不能留下
+/// “文档是新版本、块还是旧版本”的半成品。文件夹导入已经有外层事务，改走
+/// `index_document_in()`，避免嵌套事务。
+fn index_document_transactional(
     conn: &Connection,
     library_id: &str,
     relative_path: &str,
     markdown: &str,
     now: i64,
 ) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let chunks = index_document_in(&tx, library_id, relative_path, markdown, now)?;
+    tx.commit()?;
+    Ok(chunks)
+}
+
+fn index_document_in(
+    conn: &Connection,
+    library_id: &str,
+    relative_path: &str,
+    markdown: &str,
+    now: i64,
+) -> Result<usize> {
+    if markdown.len() > MAX_MARKDOWN_BYTES {
+        remove_document(conn, library_id, relative_path)?;
+        return Ok(0);
+    }
     let version_hash = crate::vault::normalized_hash(markdown);
     let document_id = stable_id("doc", &[library_id, relative_path]);
     let title = title_of(relative_path, markdown);
@@ -950,17 +1218,11 @@ fn index_document(
 
     // 先删 FTS 再删实体行：FTS 虚表没有 FK 触发器。文档 ID 对同一路径稳定，
     // 所以删除后重建是处理标题移动、段落重排最不容易留下陈旧 chunk 的方式。
-    let mut old = conn.prepare("SELECT id FROM note_chunks WHERE document_id = ?1")?;
-    let old_ids = old
-        .query_map(params![document_id], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(old);
-    for id in &old_ids {
-        conn.execute(
-            "DELETE FROM note_chunks_fts WHERE chunk_id = ?1",
-            params![id],
-        )?;
-    }
+    conn.execute(
+        "DELETE FROM note_chunks_fts
+         WHERE chunk_id IN (SELECT id FROM note_chunks WHERE document_id = ?1)",
+        params![document_id],
+    )?;
     conn.execute(
         "DELETE FROM note_chunks WHERE document_id = ?1",
         params![document_id],
@@ -973,27 +1235,28 @@ fn index_document(
            version_hash = excluded.version_hash, updated_at = excluded.updated_at",
         params![document_id, library_id, relative_path, title, tags, version_hash, now],
     )?;
+    // 复用 prepared statement，避免 10 MiB 文档的几万块每块都重新编译两条 SQL。
+    let mut insert_chunk = conn.prepare(
+        "INSERT INTO note_chunks (id, library_id, document_id, ordinal, heading_path, content,
+                                  char_start, char_end, version_hash)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+    )?;
+    let mut insert_fts = conn
+        .prepare("INSERT INTO note_chunks_fts (chunk_id, library_id, content) VALUES (?1,?2,?3)")?;
     for chunk in &chunks {
-        conn.execute(
-            "INSERT INTO note_chunks (id, library_id, document_id, ordinal, heading_path, content,
-                                      char_start, char_end, version_hash)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![
-                chunk.id,
-                chunk.library_id,
-                chunk.document_id,
-                chunk.ordinal as i64,
-                serde_json::to_string(&chunk.heading_path)?,
-                chunk.content,
-                chunk.char_start as i64,
-                chunk.char_end as i64,
-                chunk.version_hash,
-            ],
-        )?;
-        conn.execute(
-            "INSERT INTO note_chunks_fts (chunk_id, library_id, content) VALUES (?1,?2,?3)",
-            params![chunk.id, chunk.library_id, chunk.content],
-        )?;
+        let heading = serde_json::to_string(&chunk.heading_path)?;
+        insert_chunk.execute(params![
+            chunk.id,
+            chunk.library_id,
+            chunk.document_id,
+            chunk.ordinal as i64,
+            heading,
+            chunk.content,
+            chunk.char_start as i64,
+            chunk.char_end as i64,
+            chunk.version_hash,
+        ])?;
+        insert_fts.execute(params![chunk.id, chunk.library_id, chunk.content])?;
     }
     Ok(chunks.len())
 }
@@ -1009,17 +1272,11 @@ fn remove_document(conn: &Connection, library_id: &str, relative_path: &str) -> 
     let Some(document_id) = document_id else {
         return Ok(());
     };
-    let mut statement = conn.prepare("SELECT id FROM note_chunks WHERE document_id = ?1")?;
-    let ids = statement
-        .query_map(params![document_id], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(statement);
-    for id in ids {
-        conn.execute(
-            "DELETE FROM note_chunks_fts WHERE chunk_id = ?1",
-            params![id],
-        )?;
-    }
+    conn.execute(
+        "DELETE FROM note_chunks_fts
+         WHERE chunk_id IN (SELECT id FROM note_chunks WHERE document_id = ?1)",
+        params![document_id],
+    )?;
     conn.execute(
         "DELETE FROM note_documents WHERE id = ?1",
         params![document_id],
@@ -1083,10 +1340,14 @@ pub fn search_project(
     query: &str,
     requested_limit: Option<usize>,
 ) -> Result<Vec<NoteHit>> {
-    let library_ids = project_library_ids(conn, project_id)?;
+    let scope = resolve_project_scope(conn, project_id)?;
+    let library_ids = scope.available_library_ids;
     let limit = requested_limit.unwrap_or(5).clamp(1, 8);
     if library_ids.is_empty() || query.trim().is_empty() {
         return Ok(vec![]);
+    }
+    if query.trim() == "*" {
+        return list_project_documents(conn, &library_ids, limit);
     }
     let fts_query = safe_fts_query(query);
     let hits = fts_query
@@ -1210,12 +1471,42 @@ fn search_like(
                 d.tags, c.content, c.ordinal, c.char_start, c.char_end, c.version_hash, 0.0
          FROM note_chunks c JOIN note_documents d ON d.id = c.document_id
          WHERE c.library_id IN ({clause}) AND
-           (c.content LIKE '%' || ? || '%' OR d.title LIKE '%' || ? || '%')
+           (c.content LIKE '%' || ? || '%' OR d.title LIKE '%' || ? || '%'
+            OR d.relative_path LIKE '%' || ? || '%')
          ORDER BY d.updated_at DESC, d.relative_path, c.ordinal LIMIT ?"
     );
     let mut values: Vec<SqlValue> = library_ids.iter().cloned().map(SqlValue::Text).collect();
     values.push(SqlValue::Text(query.to_string()));
     values.push(SqlValue::Text(query.to_string()));
+    values.push(SqlValue::Text(query.to_string()));
+    values.push(SqlValue::Integer(limit as i64));
+    let mut statement = conn.prepare(&sql)?;
+    let hits = statement
+        .query_map(params_from_iter(values), row_to_hit)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(hits)
+}
+
+/// `search_notes("*")` is the bounded, read-only document inventory path.
+/// It returns the first chunk of at most eight documents, including each safe
+/// relative path, without revealing the Vault root or accepting a scope from
+/// the model.
+fn list_project_documents(
+    conn: &Connection,
+    library_ids: &[String],
+    limit: usize,
+) -> Result<Vec<NoteHit>> {
+    let clause = library_clause(library_ids);
+    let sql = format!(
+        "SELECT c.id, c.library_id, c.document_id, d.relative_path, d.title, c.heading_path,
+                d.tags, c.content, c.ordinal, c.char_start, c.char_end, c.version_hash, 0.0
+         FROM note_chunks c JOIN note_documents d ON d.id = c.document_id
+         WHERE c.library_id IN ({clause}) AND c.ordinal = (
+           SELECT MIN(first.ordinal) FROM note_chunks first WHERE first.document_id = c.document_id
+         )
+         ORDER BY d.relative_path LIMIT ?"
+    );
+    let mut values: Vec<SqlValue> = library_ids.iter().cloned().map(SqlValue::Text).collect();
     values.push(SqlValue::Integer(limit as i64));
     let mut statement = conn.prepare(&sql)?;
     let hits = statement
@@ -1239,24 +1530,29 @@ pub fn read_project(
         .filter(|id| seen.insert(id.as_str()))
         .take(4)
         .collect();
-    if ids.is_empty() || project_library_ids(conn, project_id)?.is_empty() {
+    let scope = resolve_project_scope(conn, project_id)?;
+    if ids.is_empty() || scope.available_library_ids.is_empty() {
         return Ok(vec![]);
     }
     let placeholders = std::iter::repeat("?")
         .take(ids.len())
         .collect::<Vec<_>>()
         .join(",");
+    let scope_clause = library_clause(&scope.available_library_ids);
     let sql = format!(
         "SELECT c.id, c.library_id, c.document_id, d.relative_path, d.title, c.heading_path,
                 d.tags, c.content, c.char_start, c.char_end, c.version_hash, c.ordinal
          FROM note_chunks c JOIN note_documents d ON d.id = c.document_id
-         WHERE c.id IN ({placeholders}) AND EXISTS (
-           SELECT 1 FROM project_note_libraries b
-           WHERE b.project_id = ? AND b.library_id = c.library_id
-         )"
+         WHERE c.id IN ({placeholders}) AND c.library_id IN ({scope_clause})"
     );
     let mut values: Vec<SqlValue> = ids.iter().map(|id| SqlValue::Text((*id).clone())).collect();
-    values.push(SqlValue::Text(project_id.to_string()));
+    values.extend(
+        scope
+            .available_library_ids
+            .iter()
+            .cloned()
+            .map(SqlValue::Text),
+    );
     let mut statement = conn.prepare(&sql)?;
     let chunks = statement
         .query_map(params_from_iter(values), |row| {
@@ -1286,6 +1582,100 @@ pub fn read_project(
         .into_iter()
         .filter_map(|id| by_id.get(id.as_str()).cloned())
         .collect())
+}
+
+/// 检查历史引用在“当前、已更新、已删除、资料库不可用”之间的真实状态。这里故意
+/// 不复用 `read_project(chunk_id)`：文档更新会改变 chunk id，直接读旧 id 会把一个
+/// 已更新来源误报成“不可用”。
+pub fn resolve_project_citation(
+    conn: &Connection,
+    project_id: &str,
+    request: &CitationResolveRequest,
+) -> Result<PublicCitationResolution> {
+    let scope = resolve_project_scope(conn, project_id)?;
+    if !scope
+        .available_library_ids
+        .iter()
+        .any(|id| id == &request.library_id)
+    {
+        let reason = scope
+            .unavailable_libraries
+            .iter()
+            .find(|library| library.id == request.library_id)
+            .map(|library| library.reason.clone())
+            .unwrap_or_else(|| "这个资料库未绑定到当前项目。".into());
+        return Ok(PublicCitationResolution {
+            state: CitationResolutionState::LibraryUnavailable,
+            chunk: None,
+            reason: Some(reason),
+        });
+    }
+
+    let document: Option<(String, String)> = conn
+        .query_row(
+            "SELECT id, version_hash FROM note_documents
+             WHERE library_id = ?1 AND id = ?2 AND relative_path = ?3",
+            params![
+                &request.library_id,
+                &request.document_id,
+                &request.relative_path
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((document_id, version_hash)) = document else {
+        return Ok(PublicCitationResolution {
+            state: CitationResolutionState::Missing,
+            chunk: None,
+            reason: Some("原笔记已删除或不再位于该资料库。".into()),
+        });
+    };
+
+    let preferred_chunk = request.chunk_id.as_deref().unwrap_or_default();
+    let excerpt = request.excerpt.as_deref().unwrap_or_default();
+    let chunk: Option<NoteReadChunk> = conn
+        .query_row(
+            "SELECT c.id, c.library_id, c.document_id, d.relative_path, d.title, c.heading_path,
+                    d.tags, c.content, c.char_start, c.char_end, c.version_hash, c.ordinal
+             FROM note_chunks c JOIN note_documents d ON d.id = c.document_id
+             WHERE c.document_id = ?1
+             ORDER BY CASE WHEN c.id = ?2 THEN 0
+                           WHEN ?3 <> '' AND instr(c.content, ?3) > 0 THEN 1
+                           ELSE 2 END,
+                      c.ordinal
+             LIMIT 1",
+            params![document_id, preferred_chunk, excerpt],
+            |row| {
+                let heading: String = row.get(5)?;
+                let tags: String = row.get(6)?;
+                Ok(NoteReadChunk {
+                    chunk_id: row.get(0)?,
+                    library_id: row.get(1)?,
+                    document_id: row.get(2)?,
+                    relative_path: row.get(3)?,
+                    title: row.get(4)?,
+                    heading_path: serde_json::from_str(&heading).unwrap_or_default(),
+                    tags: serde_json::from_str(&tags).unwrap_or_default(),
+                    content: row.get(7)?,
+                    char_start: row.get::<_, i64>(8)? as usize,
+                    char_end: row.get::<_, i64>(9)? as usize,
+                    version_hash: row.get(10)?,
+                    ordinal: row.get::<_, i64>(11)? as usize,
+                })
+            },
+        )
+        .optional()?;
+
+    let state = if version_hash == request.document_hash {
+        CitationResolutionState::Current
+    } else {
+        CitationResolutionState::Updated
+    };
+    Ok(PublicCitationResolution {
+        state,
+        chunk: chunk.as_ref().map(PublicNoteChunk::from),
+        reason: None,
+    })
 }
 
 pub fn remove_library(conn: &Connection, library_id: &str) -> Result<()> {
@@ -1332,6 +1722,7 @@ fn is_safe_relative_markdown(path: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tempfile::tempdir;
 
     fn database() -> Connection {
         crate::db::open_in_memory().unwrap()
@@ -1420,6 +1811,46 @@ mod tests {
         let read = read_project(&conn, "p", &[hits[0].chunk_id.clone()]).unwrap();
         assert_eq!(read.len(), 1);
         assert!(read[0].content.contains("B-42"));
+    }
+
+    #[test]
+    fn bound_scope_can_list_documents_and_search_relative_paths() {
+        let conn = database();
+        conn.execute(
+            "INSERT INTO projects (id, name, pinned, updated_at) VALUES ('p', 'P', 0, 1)",
+            [],
+        )
+        .unwrap();
+        import_files(
+            &conn,
+            &NoteImportInput {
+                id: "lib".into(),
+                name: "资料".into(),
+                files: vec![
+                    NoteImportFile {
+                        path: "知识教练/方法/提炼.md".into(),
+                        content: "# 提炼\n\n先核对来源。".into(),
+                    },
+                    NoteImportFile {
+                        path: "知识教练/流程/发布.md".into(),
+                        content: "# 发布\n\n人工确认后发布。".into(),
+                    },
+                ],
+                now: Some(1),
+            },
+        )
+        .unwrap();
+        bind_project(&conn, "p", &["lib".into()]).unwrap();
+
+        let inventory = search_project(&conn, "p", "*", Some(8)).unwrap();
+        assert_eq!(inventory.len(), 2);
+        assert!(inventory
+            .iter()
+            .any(|hit| hit.relative_path == "知识教练/方法/提炼.md"));
+
+        let by_path = search_project(&conn, "p", "方法/提炼", Some(3)).unwrap();
+        assert_eq!(by_path.len(), 1);
+        assert_eq!(by_path[0].relative_path, "知识教练/方法/提炼.md");
     }
 
     #[test]
@@ -1803,5 +2234,173 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(paths, vec!["alive.md"]);
+    }
+
+    #[test]
+    fn missing_vault_is_excluded_from_search_and_read_even_if_sqlite_has_old_chunks() {
+        let conn = database();
+        conn.execute(
+            "INSERT INTO projects (id, name, pinned, updated_at) VALUES ('p', 'P', 0, 1)",
+            [],
+        )
+        .unwrap();
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("可移动资料库");
+        std::fs::create_dir_all(&root).unwrap();
+        let library = connect_vault(&conn, &root, Some(1)).unwrap();
+        index_vault_file(
+            &conn,
+            &root,
+            Path::new("唯一事实.md"),
+            "# 唯一事实\n\n离线编号是 VAULT-42。",
+            1,
+        )
+        .unwrap();
+        bind_project(&conn, "p", &[library.id.clone()]).unwrap();
+        let hit = search_project(&conn, "p", "VAULT-42", Some(3))
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let scope = resolve_project_scope(&conn, "p").unwrap();
+        assert!(scope.available_library_ids.is_empty());
+        assert_eq!(scope.unavailable_libraries.len(), 1);
+        assert_eq!(
+            scope.unavailable_libraries[0].availability,
+            NoteLibraryAvailability::Missing
+        );
+        assert!(search_project(&conn, "p", "VAULT-42", Some(3))
+            .unwrap()
+            .is_empty());
+        assert!(read_project(&conn, "p", &[hit.chunk_id])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn citation_resolution_distinguishes_current_updated_missing_and_unavailable() {
+        let conn = database();
+        conn.execute(
+            "INSERT INTO projects (id, name, pinned, updated_at) VALUES ('p', 'P', 0, 1)",
+            [],
+        )
+        .unwrap();
+        import_files(
+            &conn,
+            &NoteImportInput {
+                id: "lib".into(),
+                name: "资料".into(),
+                now: Some(1),
+                files: vec![NoteImportFile {
+                    path: "证据.md".into(),
+                    content: "# 证据\n\n旧事实是 CIT-1。".into(),
+                }],
+            },
+        )
+        .unwrap();
+        bind_project(&conn, "p", &["lib".into()]).unwrap();
+        let hit = search_project(&conn, "p", "CIT-1", Some(1))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let request = CitationResolveRequest {
+            library_id: "lib".into(),
+            document_id: hit.document_id.clone(),
+            relative_path: hit.relative_path.clone(),
+            document_hash: hit.version_hash.clone(),
+            chunk_id: Some(hit.chunk_id.clone()),
+            excerpt: Some("旧事实是 CIT-1。".into()),
+        };
+        let current = resolve_project_citation(&conn, "p", &request).unwrap();
+        assert!(matches!(current.state, CitationResolutionState::Current));
+        assert!(current.chunk.is_some());
+
+        import_files(
+            &conn,
+            &NoteImportInput {
+                id: "lib".into(),
+                name: "资料".into(),
+                now: Some(2),
+                files: vec![NoteImportFile {
+                    path: "证据.md".into(),
+                    content: "# 证据\n\n新事实是 CIT-2。".into(),
+                }],
+            },
+        )
+        .unwrap();
+        let updated = resolve_project_citation(&conn, "p", &request).unwrap();
+        assert!(matches!(updated.state, CitationResolutionState::Updated));
+        assert!(updated
+            .chunk
+            .as_ref()
+            .is_some_and(|chunk| chunk.text.contains("CIT-2")));
+
+        import_files(
+            &conn,
+            &NoteImportInput {
+                id: "lib".into(),
+                name: "资料".into(),
+                now: Some(3),
+                files: vec![],
+            },
+        )
+        .unwrap();
+        let missing = resolve_project_citation(&conn, "p", &request).unwrap();
+        assert!(matches!(missing.state, CitationResolutionState::Missing));
+
+        bind_project(&conn, "p", &[]).unwrap();
+        let unavailable = resolve_project_citation(&conn, "p", &request).unwrap();
+        assert!(matches!(
+            unavailable.state,
+            CitationResolutionState::LibraryUnavailable
+        ));
+    }
+
+    #[test]
+    fn oversized_reimport_removes_any_old_index_and_reports_a_safe_issue() {
+        let conn = database();
+        conn.execute(
+            "INSERT INTO projects (id, name, pinned, updated_at) VALUES ('p', 'P', 0, 1)",
+            [],
+        )
+        .unwrap();
+        import_files(
+            &conn,
+            &NoteImportInput {
+                id: "lib".into(),
+                name: "资料".into(),
+                now: Some(1),
+                files: vec![NoteImportFile {
+                    path: "会变大.md".into(),
+                    content: "旧编号 OLD-INDEX-9".into(),
+                }],
+            },
+        )
+        .unwrap();
+        bind_project(&conn, "p", &["lib".into()]).unwrap();
+        assert!(!search_project(&conn, "p", "OLD-INDEX-9", Some(1))
+            .unwrap()
+            .is_empty());
+
+        let report = import_files(
+            &conn,
+            &NoteImportInput {
+                id: "lib".into(),
+                name: "资料".into(),
+                now: Some(2),
+                files: vec![NoteImportFile {
+                    path: "会变大.md".into(),
+                    content: "x".repeat(MAX_MARKDOWN_BYTES + 1),
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.issues[0].code, "too-large");
+        assert!(search_project(&conn, "p", "OLD-INDEX-9", Some(1))
+            .unwrap()
+            .is_empty());
     }
 }

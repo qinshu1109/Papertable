@@ -6,6 +6,8 @@ import {
   extractToolCallDeltas,
   extractToolCalls,
   friendlyProviderError,
+  providerErrorCode,
+  providerErrorMessage,
   relayOpenAiStream,
 } from "./cozai.mjs";
 import { fakeCompletion, fakeToolCalls } from "./fake-provider.mjs";
@@ -37,6 +39,19 @@ test("provider errors are mapped to readable Chinese messages", () => {
   assert.match(friendlyProviderError(401), /密钥/);
   assert.match(friendlyProviderError(429), /限流/);
   assert.match(friendlyProviderError(503), /暂时不可用/);
+});
+
+test("provider error contract never forwards an upstream response body", () => {
+  assert.equal(providerErrorCode(401), "unauthorized");
+  assert.equal(providerErrorCode(429), "rate-limited");
+  assert.equal(providerErrorCode(504), "timeout");
+  assert.equal(providerErrorCode(500), "service-unavailable");
+  assert.equal(providerErrorCode(418), "invalid-response");
+  assert.doesNotMatch(
+    friendlyProviderError(418, "http://127.0.0.1:9876/EOF stack trace"),
+    /127\.0\.0\.1|EOF|stack/i,
+  );
+  assert.match(providerErrorMessage("disconnected"), /连接意外中断/);
 });
 
 test("stream relay emits normalized token and done events", async () => {
@@ -88,8 +103,24 @@ test("content without any reasoning delta stays unlabelled", async () => {
 
 test("a reasoning-only response still reports no displayable text", async () => {
   const output = await relay([deltaFrame({ reasoning_content: "draft only" })]);
-  assert.match(output, /没有返回可显示的文本/);
+  assert.match(output, /模型没有返回文本/);
+  assert.match(output, /"code":"empty-response"/);
   assert.ok(!output.includes("draft only"));
+});
+
+test("a timed-out relay emits the timeout error code instead of empty response", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const chunks = [];
+  await relayOpenAiStream({
+    upstream: new Response(new ReadableStream(), { status: 200 }),
+    write: (chunk) => chunks.push(new TextDecoder().decode(chunk)),
+    signal: controller.signal,
+    timeoutCode: "timeout",
+  });
+  const output = chunks.join("");
+  assert.match(output, /"code":"timeout"/);
+  assert.doesNotMatch(output, /empty-response/);
 });
 
 test("extractDelta separates the two fields, extractMessage keeps content only", () => {

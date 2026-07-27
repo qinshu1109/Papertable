@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 /// 监听线程要拿同一个连接，所以 Db 内部改成 Arc；这个别名只是给 setup 用。
 pub struct SharedDb(Arc<Mutex<Connection>>);
@@ -24,8 +24,6 @@ pub struct Provider {
     path: PathBuf,
     /// 应用数据目录，用于按标记文件开启 SSE 抓取。
     data_dir: PathBuf,
-    /// 密钥实际是从钥匙串读到的，还是回落到了文件。设置页要如实展示。
-    from_keychain: Mutex<bool>,
 }
 
 /// 与 WebView 生命周期解耦的模型任务表。切卡片、切项目或窗口失焦都不会碰它；
@@ -105,8 +103,7 @@ fn seed_if_empty(
 #[tauri::command]
 fn save_workspace(state: State<Db>, snapshot: WorkspaceSnapshot) -> Result<(), db::Error> {
     with_db!(state, conn, {
-        db::clear_workspace_data(conn)?;
-        db::write_snapshot(conn, &snapshot, &AttentionSnapshot::default())
+        db::replace_workspace_snapshot(conn, &snapshot)
     })
 }
 
@@ -181,19 +178,15 @@ fn save_provider_config(state: State<Provider>, input: Value) -> Result<PublicCo
         .lock()
         .map_err(|_| "配置锁被毒化".to_string())?;
     let next = llm::normalize(&input, &guard)?;
-    let in_keychain = llm::save_config(&state.path, &next)?;
+    llm::save_config(&state.path, &next)?;
     *guard = next;
-    if let Ok(mut source) = state.from_keychain.lock() {
-        *source = in_keychain;
-    }
     Ok(PublicConfig::from(&*guard))
 }
 
 /// 这一份构建是什么。
 ///
-/// 存在的理由：ad-hoc 签名下 `/Applications` 里那份和 `target/` 里的构建产物
-/// bundle id 相同、版本号相同、共用同一个数据库，界面上分辨不出打开的是哪一份。
-/// 曾经因此运行了三小时前的旧代码而毫无察觉。
+/// 常规构建会共用 bundle id；隔离验收构建则会显式使用不同 id。把 id 一并交给
+/// 前端，避免设置页把隔离构建误报成“与正式版共用数据库”。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BuildInfo {
@@ -204,31 +197,75 @@ struct BuildInfo {
     exe: String,
     /// 从 /Applications 启动的才是正式安装的那份。
     installed: bool,
+    /// Tauri 配置中的 bundle id；它同时决定 macOS 应用数据隔离范围。
+    identifier: String,
+    /// 非正式 id 的构建是明确隔离的 QA/开发副本，不与正式版共享本地数据。
+    isolated: bool,
 }
 
 #[tauri::command]
-fn build_info() -> BuildInfo {
+fn build_info(app: AppHandle) -> BuildInfo {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
+    let identifier = app.config().identifier.clone();
     BuildInfo {
         version: env!("CARGO_PKG_VERSION"),
         commit: env!("PAPERTABLE_COMMIT"),
         built_at: env!("PAPERTABLE_BUILT_AT"),
         installed: exe.starts_with("/Applications/"),
         exe,
+        isolated: identifier != "com.papertable.app",
+        identifier,
     }
 }
 
-/// 密钥存在哪：钥匙串、回落文件，还是没设置。
+/// 桌面导出只能在原生保存对话框返回的落点写入。先写同目录临时文件，再 rename，
+/// 并回读字节校验；取消对话框时前端不会调用此命令，也就不能错误提示“导出成功”。
+#[tauri::command]
+fn write_export_artifact(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    let destination = PathBuf::from(path);
+    let parent = destination
+        .parent()
+        .filter(|parent| parent.is_dir())
+        .ok_or_else(|| "导出位置不可用。".to_string())?;
+    let name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "导出文件名不可用。".to_string())?;
+    let temporary = parent.join(format!(
+        ".{name}.papertable-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "无法准备导出文件。".to_string())?
+            .as_nanos()
+    ));
+    std::fs::write(&temporary, &bytes).map_err(|_| "无法写入导出文件。".to_string())?;
+    if let Err(error) = std::fs::rename(&temporary, &destination) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(match error.kind() {
+            std::io::ErrorKind::PermissionDenied => "没有写入该位置的权限。".to_string(),
+            _ => "无法完成导出文件写入。".to_string(),
+        });
+    }
+    let persisted = std::fs::read(&destination).map_err(|_| "无法验证导出文件。".to_string())?;
+    if persisted != bytes {
+        return Err("导出文件校验失败。".to_string());
+    }
+    Ok(())
+}
+
+/// 密钥存在哪：本机 0600 文件，还是没设置。
+///
+/// 桌面版刻意不再访问 macOS 钥匙串。自用的 ad-hoc 签名每次构建都会改变，
+/// 钥匙串会把它当成新应用并在每次启动时索要登录密码；这比 0600 配置文件更妨碍
+/// 日常使用。密钥不进入 SQLite、前端、导出包或日志。
 #[tauri::command]
 fn provider_key_source(state: State<Provider>) -> Result<KeySource, llm::Error> {
     let config = provider_snapshot(&state)?;
-    let from_keychain = *state
-        .from_keychain
-        .lock()
-        .map_err(|_| "配置锁被毒化".to_string())?;
-    Ok(llm::key_source(&config, from_keychain))
+    Ok(llm::key_source(&config))
 }
 
 #[tauri::command]
@@ -545,7 +582,7 @@ fn vault_watch(
     let excluded = vault::subtree_or_default(subtree.as_deref().unwrap_or_default())?;
     let excluded_path = std::path::PathBuf::from(excluded);
     let now = now_millis();
-    let count = {
+    let report = {
         let conn = shared.0.lock().map_err(|_| "数据库锁被毒化".to_string())?;
         watcher::scan_excluding(&conn, &root, Some(&excluded_path), now)
             .map_err(|e| vault::Error::from(e.to_string()))?
@@ -562,7 +599,7 @@ fn vault_watch(
             },
         )
         .map_err(|e| vault::Error::from(e.to_string()))?;
-    Ok(count)
+    Ok(report.documents_indexed)
 }
 
 /// 把 `[[双链]]` 解析成 vault 里的真实笔记。
@@ -666,6 +703,16 @@ fn note_library_project_bindings(
     with_db!(db, conn, notes::project_library_ids(conn, &project_id))
 }
 
+/// UI 和 Agent 都可以读到“绑定”与“当前可用”之间的差异；绝对 Vault 路径仍留在
+/// Rust 内部，不会进入 WebView 或模型请求。
+#[tauri::command]
+fn note_library_project_scope(
+    db: State<Db>,
+    project_id: String,
+) -> Result<notes::ResolvedNoteScope, notes::Error> {
+    with_db!(db, conn, notes::resolve_project_scope(conn, &project_id))
+}
+
 #[tauri::command]
 fn note_library_search(
     db: State<Db>,
@@ -696,6 +743,17 @@ fn note_library_read(
 }
 
 #[tauri::command]
+fn note_library_resolve_citation(
+    db: State<Db>,
+    project_id: String,
+    citation: notes::CitationResolveRequest,
+) -> Result<notes::PublicCitationResolution, notes::Error> {
+    with_db!(db, conn, {
+        notes::resolve_project_citation(conn, &project_id, &citation)
+    })
+}
+
+#[tauri::command]
 fn note_library_rebuild(
     db: State<Db>,
     id: String,
@@ -704,15 +762,14 @@ fn note_library_rebuild(
     with_db!(db, conn, {
         let root = notes::vault_root(conn, &id)?
             .ok_or_else(|| notes::Error::from("这个资料库不是可重建的本地 Vault。"))?;
-        let count = watcher::scan(conn, &root, now)
+        let scan = watcher::scan(conn, &root, now)
             .map_err(|error| notes::Error::from(error.to_string()))?;
-        let library =
-            notes::library(conn, &id)?.ok_or_else(|| notes::Error::from("资料库不存在。"))?;
         let report = notes::IndexReport {
             library_id: id,
-            documents_indexed: count,
-            chunks_indexed: library.chunk_count as usize,
-            skipped: 0,
+            documents_indexed: scan.documents_indexed,
+            chunks_indexed: scan.chunks_indexed,
+            skipped: scan.skipped,
+            issues: scan.issues,
         };
         Ok(notes::PublicIndexReport::from(&report))
     })
@@ -763,12 +820,13 @@ pub fn run() {
             app.manage(Generations::default());
 
             let path = llm::config_path(&dir);
-            let (config, from_keychain) = llm::load_config_with_source(&path);
+            // 不在启动阶段碰系统钥匙串：本应用改为只使用 0600 的本机配置文件，
+            // 因而不会因打开应用而弹出登录钥匙串密码框。
+            let config = llm::load_config(&path);
             app.manage(Provider {
                 config: Mutex::new(config),
                 path,
                 data_dir: dir.clone(),
-                from_keychain: Mutex::new(from_keychain),
             });
             Ok(())
         })
@@ -791,6 +849,7 @@ pub fn run() {
             save_provider_config,
             provider_key_source,
             build_info,
+            write_export_artifact,
             llm_generate,
             llm_complete,
             provider_probe_capability,
@@ -808,8 +867,10 @@ pub fn run() {
             note_library_import,
             note_library_bind_project,
             note_library_project_bindings,
+            note_library_project_scope,
             note_library_search,
             note_library_read,
+            note_library_resolve_citation,
             note_library_rebuild,
             note_library_remove,
             vault_written_paths,
@@ -818,4 +879,28 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod artifact_writer_tests {
+    use super::write_export_artifact;
+
+    #[test]
+    fn desktop_artifact_writer_only_succeeds_after_a_real_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("Papertable-验收.zip");
+        write_export_artifact(
+            destination.display().to_string(),
+            vec![0, 1, 2, 3, 0xff],
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), vec![0, 1, 2, 3, 0xff]);
+    }
+
+    #[test]
+    fn desktop_artifact_writer_refuses_a_nonexistent_save_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("not-created").join("backup.zip");
+        assert!(write_export_artifact(destination.display().to_string(), vec![1]).is_err());
+    }
 }

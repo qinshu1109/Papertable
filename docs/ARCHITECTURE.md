@@ -79,7 +79,7 @@ Markdown / 已连接 Vault
 
 - Web 端把导入文件切为标题层级块；超过约 800 字继续按段落切分并保留约 80 字重叠，MiniSearch 在 Web Worker 中建立中文友好的索引，避免阻塞 React。
 - 桌面端把已连接 Vault 作为资料源，在 SQLite 中保存可重建的文档/块索引，并用 FTS5 检索；隐藏目录、`.obsidian`、`.trash` 与 Papertable 的输出子树都不进入语料。外部笔记不会自动创建 Card，也不会被写回。
-- 每个请求开始时，宿主冻结当前项目绑定的资料库。模型没有路径、Vault、scope 或任意文件读取参数；未绑定资料库的项目没有可检索范围。
+- 每个请求开始时，宿主冻结当前项目绑定的资料库，并只把安全资料库名称交给模型。`search_notes` 可返回安全相对路径，文档清单使用宿主限定的 `*` 查询；真实 Vault 根目录、scope 参数和任意文件读取能力都不会暴露。未绑定资料库的项目没有可检索范围。
 - `search_notes(query, limit?)` 只接受短查询，`limit` 被钳制到 1–8；`read_notes(chunkIds)` 最多读 4 块，且只能读同一轮搜索实际返回过的 chunk id。所有调用统一经过 normalize → validate → gate → execute → post-process，异常作为结构化工具结果回给模型。
 - 笔记内容被视为不可信资料。资料中的提示词、命令、路径或“改写规则”要求不能改变系统指令或扩大工具范围。
 

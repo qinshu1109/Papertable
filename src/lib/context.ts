@@ -2,12 +2,15 @@ import { incomingEdge } from "./graph";
 import { SENTINEL_INSTRUCTION } from "./modelOutput";
 import type {
   AnswerMode,
+  AgentRunTrace,
   BuiltContext,
   Card,
   CardEdge,
   ContextSnapshot,
+  HistoricalRetrievalEvidence,
   LlmMessage,
   ReferenceChip,
+  Turn,
 } from "../types";
 
 export interface BuildContextInput {
@@ -30,6 +33,195 @@ export interface BuildContextInput {
  */
 const answerContract = SENTINEL_INSTRUCTION;
 
+const MAX_HISTORICAL_RETRIEVAL_EVIDENCE = 8;
+
+/** Render untrusted note labels as inert one-line literals in a system prompt. */
+const auditLiteral = (value: string) =>
+  JSON.stringify(value.replace(/[\r\n\t]+/g, " ").slice(0, 240));
+
+/**
+ * User turns are always part of the visible conversation.  Assistant turns
+ * only become model history after they have finished successfully.  This is
+ * deliberately stricter than the UI: stopped/interrupted text remains visible
+ * to the user, but a later request must never treat it as an answer.
+ */
+export function isTurnEligibleForContext(turn: Turn): boolean {
+  if (turn.role !== "ai") return true;
+  return (
+    !turn.streaming &&
+    turn.status !== "streaming" &&
+    turn.status !== "interrupted" &&
+    turn.status !== "stopped" &&
+    turn.status !== "error"
+  );
+}
+
+/**
+ * A process cannot resume an in-flight provider stream after a cold start.
+ * Preserve the visible partial text, but settle its status before the UI is
+ * hydrated so future context construction has no orphan assistant response.
+ */
+export function recoverInterruptedTurns(cards: Card[]): {
+  cards: Card[];
+  recoveredTurnIds: string[];
+} {
+  const recoveredTurnIds: string[] = [];
+  let cardsChanged = false;
+  const nextCards = cards.map((card) => {
+    let cardChanged = false;
+    const turns = card.turns.map((turn) => {
+      if (
+        turn.role !== "ai" ||
+        (turn.status !== "streaming" && !turn.streaming)
+      )
+        return turn;
+      cardChanged = true;
+      recoveredTurnIds.push(turn.id);
+      return {
+        ...turn,
+        streaming: false,
+        status: "interrupted" as const,
+        agentPhase: undefined,
+      };
+    });
+    if (!cardChanged) return card;
+    cardsChanged = true;
+    return { ...card, turns };
+  });
+  return {
+    cards: cardsChanged ? nextCards : cards,
+    recoveredTurnIds,
+  };
+}
+
+/**
+ * Relation creation is a data invariant, not merely a disabled UI state.
+ * A trashed or cross-project source can never mint a new edge or snapshot.
+ */
+export function requireLiveSourceCard(
+  cards: Card[],
+  activeProjectId: string,
+  sourceCardId: string,
+): Card {
+  const source = cards.find((card) => card.id === sourceCardId);
+  if (!source || source.projectId !== activeProjectId)
+    throw new Error("不能从其他项目创建卡片。");
+  if (source.trashed) throw new Error("不能从回收站卡片创建关系。");
+  return source;
+}
+
+/**
+ * ViewState stores a string id for backwards compatibility, including for an
+ * empty project.  The empty string is the only valid "no active card" value;
+ * a trashed or another project's card is never a valid fallback.
+ */
+export function resolveLiveCurrentCardId(input: {
+  cards: Card[];
+  projectId: string;
+  currentCardId: string;
+  preferredCardId?: string;
+}): string {
+  const live = input.cards.filter(
+    (card) => card.projectId === input.projectId && !card.trashed,
+  );
+  const usable = new Set(live.map((card) => card.id));
+  if (usable.has(input.currentCardId)) return input.currentCardId;
+  if (input.preferredCardId && usable.has(input.preferredCardId))
+    return input.preferredCardId;
+  return live[0]?.id ?? "";
+}
+
+/**
+ * Keep a small, non-evidentiary audit trail for past successful tool use.
+ * These rows do not restore a library scope and must never be turned into a
+ * current-round citation.  Dedupe makes repeated retry histories compact.
+ */
+export function historicalRetrievalEvidenceForTurns(
+  turns: readonly Turn[],
+): HistoricalRetrievalEvidence[] {
+  const evidence: HistoricalRetrievalEvidence[] = [];
+  const seen = new Set<string>();
+  for (const turn of turns) {
+    if (
+      turn.role !== "ai" ||
+      !isTurnEligibleForContext(turn) ||
+      !turn.agentRun?.retrievalEvidence?.length
+    )
+      continue;
+    for (const item of turn.agentRun.retrievalEvidence) {
+      const key = `${item.relativePath}\u0000${item.title}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      evidence.push(item);
+      if (evidence.length >= MAX_HISTORICAL_RETRIEVAL_EVIDENCE) return evidence;
+    }
+  }
+  return evidence;
+}
+
+/**
+ * Convert only actually-read chunks into the persisted audit subset attached
+ * to a completed AgentRunTrace.  The model's search terms describe the run as
+ * a whole; we intentionally do not invent a one-query-per-chunk mapping.
+ */
+export function withHistoricalRetrievalEvidence(
+  trace: AgentRunTrace,
+  chunks: ReadonlyArray<{
+    relativePath: string;
+    titlePath: string[];
+  }>,
+  hits: ReadonlyArray<{
+    chunk: { relativePath: string; titlePath: string[] };
+  }> = [],
+): AgentRunTrace {
+  const evidence: HistoricalRetrievalEvidence[] = [];
+  const seen = new Set<string>();
+  const append = (item: HistoricalRetrievalEvidence) => {
+    const key = `${item.relativePath}\u0000${item.title}`;
+    if (seen.has(key) || evidence.length >= MAX_HISTORICAL_RETRIEVAL_EVIDENCE)
+      return;
+    seen.add(key);
+    evidence.push(item);
+  };
+  const existing = trace.retrievalEvidence ?? [];
+  // A read is stronger provenance than a search snippet.  Keep that ordering
+  // stable so the eight-row cap cannot crowd out actual source reads.
+  for (const item of existing.filter((item) => item.hitType === "read"))
+    append(item);
+  if (!trace.searchQueries.length) {
+    for (const item of existing.filter((item) => item.hitType === "search-hit"))
+      append(item);
+    return evidence.length ? { ...trace, retrievalEvidence: evidence } : trace;
+  }
+  const query = trace.searchQueries.join(" / ").slice(0, 240);
+  for (const chunk of chunks) {
+    const title =
+      chunk.titlePath[chunk.titlePath.length - 1] ?? chunk.relativePath;
+    append({
+      query,
+      relativePath: chunk.relativePath,
+      title,
+      hitType: "read",
+    });
+    if (evidence.length >= MAX_HISTORICAL_RETRIEVAL_EVIDENCE) break;
+  }
+  for (const item of existing.filter((item) => item.hitType === "search-hit"))
+    append(item);
+  for (const hit of hits) {
+    const title =
+      hit.chunk.titlePath[hit.chunk.titlePath.length - 1] ??
+      hit.chunk.relativePath;
+    append({
+      query,
+      relativePath: hit.chunk.relativePath,
+      title,
+      hitType: "search-hit",
+    });
+    if (evidence.length >= MAX_HISTORICAL_RETRIEVAL_EVIDENCE) break;
+  }
+  return evidence.length ? { ...trace, retrievalEvidence: evidence } : trace;
+}
+
 const instructionFor = (answerMode: AnswerMode) =>
   answerMode === "sources-only"
     ? `你是 Papertable 的知识探索助手。只能使用下方明确提供的上下文；若证据不足，请直接说明，不得用通用知识补齐结论。不得伪造引用、来源或已提供的证据。使用清晰的 Markdown 回答。\n${answerContract}`
@@ -37,7 +229,7 @@ const instructionFor = (answerMode: AnswerMode) =>
 
 const toMessages = (card: Card, pendingUserText?: string): LlmMessage[] => {
   const messages: LlmMessage[] = card.turns
-    .filter((turn) => turn.status !== "error" && turn.status !== "stopped")
+    .filter(isTurnEligibleForContext)
     // Card 的内部角色叫 `ai`，但 OpenAI-compatible API 只接受 `assistant`。
     // 首轮没有 AI 历史时这个问题不会出现，因此必须在这里做唯一的边界转换。
     .map((turn) => ({
@@ -118,7 +310,9 @@ export function buildContext(input: BuildContextInput): BuiltContext {
 
   if (edge?.type === "branch") {
     const title = snapshot?.sourceTitle ?? source?.title ?? "来源卡片";
-    const turns = snapshot?.sourceTurns ?? [];
+    const turns = (snapshot?.sourceTurns ?? []).filter(
+      isTurnEligibleForContext,
+    );
     if (turns.length) {
       const history = turns
         .map(
@@ -157,6 +351,32 @@ export function buildContext(input: BuildContextInput): BuiltContext {
       detail: reference.sourceTitle,
       cardId: reference.anchor.cardId,
       turnId: reference.anchor.turnId,
+    });
+  }
+
+  // A past tool-assisted answer remains part of the conversation.  If its
+  // library was later unbound, the model still needs to know that it was not
+  // fabricated.  This audit block explicitly withholds any current evidence,
+  // scope, or citation authority from those historic records.
+  const historicalEvidence = historicalRetrievalEvidenceForTurns([
+    ...card.turns,
+    ...(edge?.type === "branch" ? (snapshot?.sourceTurns ?? []) : []),
+  ]);
+  if (historicalEvidence.length) {
+    system.push(
+      [
+        "历史工具审计（非本轮证据）：以下仅说明已有助手回答当时曾通过 Papertable 的只读检索工具取得资料。它们不是当前可访问的资料、不能作为本轮事实依据、不能作为引用，也不能扩大本轮检索范围。",
+        ...historicalEvidence.map(
+          (item) =>
+            `- 查询 ${auditLiteral(item.query)}：${item.hitType === "read" ? "读取" : "搜索命中"} ${auditLiteral(item.title)}（相对路径 ${auditLiteral(item.relativePath)}）`,
+        ),
+      ].join("\n"),
+    );
+    provenance.push({
+      kind: "historical-retrieval",
+      label: "历史检索审计（非本轮证据）",
+      detail: `${historicalEvidence.length} 条已验证的历史工具记录`,
+      cardId: card.id,
     });
   }
 

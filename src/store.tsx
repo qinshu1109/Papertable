@@ -15,7 +15,14 @@ import {
   DEMO_REFERENCES,
   PROJECT_DEFAULT_CARD_IDS,
 } from "./data/demo";
-import { buildContext } from "./lib/context";
+import {
+  buildContext,
+  isTurnEligibleForContext,
+  recoverInterruptedTurns,
+  requireLiveSourceCard,
+  resolveLiveCurrentCardId,
+  withHistoricalRetrievalEvidence,
+} from "./lib/context";
 import {
   activeProposalsForProject,
   buildAttentionMetrics,
@@ -27,7 +34,8 @@ import {
   recoverSessions,
   SESSION_IDLE_MS,
 } from "./lib/attention";
-import { downloadArtifact, formatAdapters } from "./lib/formats";
+import { writeArtifact } from "./lib/artifactWriter";
+import { formatAdapters } from "./lib/formats";
 import { incomingEdge, subtreeIds } from "./lib/graph";
 import {
   generateModel,
@@ -39,13 +47,17 @@ import {
   AgentRunFailure,
   controlledCitations,
   runAgentTurn,
+  type AgentOutcome,
 } from "./lib/agent";
 import {
   exportNoteCorpusForBackup,
   importNoteCorpusFromBackup,
   noteLibraries,
 } from "./lib/notes";
-import { connectDesktopVault } from "./lib/notes/tauri";
+import {
+  connectDesktopVault,
+  desktopProjectNoteScope,
+} from "./lib/notes/tauri";
 import {
   backupCounts,
   buildLibraryBackup,
@@ -206,19 +218,22 @@ function pruneProjectScopedState(input: {
   settings: AppSettings;
 }) {
   const projectIds = new Set(input.projects.map((project) => project.id));
-  const cardIds = new Set(input.cards.map((card) => card.id));
+  const cardsById = new Map(input.cards.map((card) => [card.id, card]));
   const fallbackProjectId = input.projects[0]?.id ?? input.view.activeProjectId;
   const activeProjectId = projectIds.has(input.view.activeProjectId)
     ? input.view.activeProjectId
     : fallbackProjectId;
-  const fallbackCardId = input.cards.find(
-    (card) => card.projectId === activeProjectId && !card.trashed,
-  )?.id;
-  const currentCardId = cardIds.has(input.view.currentCardId)
-    ? input.view.currentCardId
-    : (fallbackCardId ?? input.view.currentCardId);
+  const currentCardId = resolveLiveCurrentCardId({
+    cards: input.cards,
+    projectId: activeProjectId,
+    currentCardId: input.view.currentCardId,
+    preferredCardId: input.view.lastCardByProject[activeProjectId],
+  });
   const belongsToLiveProject = (id: string) => projectIds.has(id);
-  const belongsToLiveCard = (id: string) => cardIds.has(id);
+  const belongsToLiveCard = (id: string) => {
+    const card = cardsById.get(id);
+    return Boolean(card && !card.trashed);
+  };
   const promptDates = Object.fromEntries(
     Object.entries(input.settings.attentionPromptedDates ?? {}).filter(([id]) =>
       belongsToLiveProject(id),
@@ -240,7 +255,9 @@ function pruneProjectScopedState(input: {
       lastCardByProject: Object.fromEntries(
         Object.entries(input.view.lastCardByProject).filter(
           ([id, cardId]) =>
-            belongsToLiveProject(id) && belongsToLiveCard(cardId),
+            belongsToLiveProject(id) &&
+            belongsToLiveCard(cardId) &&
+            cardsById.get(cardId)?.projectId === id,
         ),
       ),
       collapsed: input.view.collapsed.filter(belongsToLiveCard),
@@ -255,6 +272,92 @@ function pruneProjectScopedState(input: {
       attentionPromptedDates: promptDates,
       attentionPromptHistory: promptHistory,
     },
+  };
+}
+
+function emptyProjectContext(): BuiltContext {
+  const instruction =
+    "当前项目没有可用卡片。不要调用模型；请先新建根卡片或从回收站恢复卡片。";
+  return {
+    answerMode: "general",
+    system: [instruction],
+    messages: [{ role: "system", content: instruction }],
+    provenance: [],
+    excluded: [],
+    estimatedTokens: Math.ceil(instruction.length / 1.7),
+  };
+}
+
+/**
+ * The desktop host revalidates Vault roots before every tool call.  This
+ * companion notice makes the *model-facing* round equally truthful when a
+ * bound library has disappeared between opening Settings and sending.
+ */
+function withNoteScopeAvailabilityNotice(
+  built: BuiltContext,
+  notice: string | undefined,
+): BuiltContext {
+  if (!notice) return built;
+  const first = built.messages[0];
+  const messages =
+    first?.role === "system"
+      ? [
+          { ...first, content: `${first.content}\n\n${notice}` },
+          ...built.messages.slice(1),
+        ]
+      : [{ role: "system" as const, content: notice }, ...built.messages];
+  return {
+    ...built,
+    system: [...built.system, notice],
+    messages,
+    estimatedTokens: Math.ceil(
+      (built.messages.reduce(
+        (total, message) => total + message.content.length,
+        0,
+      ) +
+        notice.length) /
+        1.7,
+    ),
+  };
+}
+
+function noteScopeWarning(
+  unavailable: Array<{ name: string; reason: string }>,
+  hasAvailableLibraries: boolean,
+): string | undefined {
+  if (!unavailable.length) return undefined;
+  const names = unavailable
+    .map((library) => library.name.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const label = names.length ? `：${names.join("、")}` : "";
+  const reason = unavailable[0]?.reason.trim();
+  const suffix = reason ? `（${reason}）` : "";
+  return hasAvailableLibraries
+    ? `部分已绑定的只读资料库当前不可用${label}${suffix}。本轮只能检索其余可用资料库；不得声称已检索不可用资料。`
+    : `本轮已绑定的只读资料库当前全部不可用${label}${suffix}。本轮没有可检索的笔记资料；不得把旧索引、历史工具记录或通用知识伪装成当前资料库证据。`;
+}
+
+function unavailableSourcesOnlyOutcome(
+  mode: AgentExecutionMode,
+  warning: string,
+): AgentOutcome {
+  const now = Date.now();
+  return {
+    trace: {
+      mode,
+      startedAt: now,
+      finishedAt: now,
+      searchQueries: [],
+      hitCount: 0,
+      readChunkIds: [],
+      errors: [warning],
+      retrievalUnavailable: true,
+    },
+    readChunks: [],
+    searchHits: [],
+    directAnswer:
+      "当前项目绑定的只读资料库暂时不可用，因此我不会在“仅依据材料”模式下补充无来源结论。请重新定位或恢复资料库后再试。",
   };
 }
 
@@ -297,6 +400,8 @@ interface Ctx {
   proposalTrayOpen: boolean;
   selectedProposalId: string | null;
   currentCardId: string;
+  /** False when every card in the active project is in the recycle bin. */
+  hasCurrentCard: boolean;
   references: ReferenceChip[];
   draft: string;
   collapsed: Set<string>;
@@ -316,6 +421,8 @@ interface Ctx {
   renameProject: (id: string, name: string) => void;
   togglePinProject: (id: string) => void;
   createProject: () => void;
+  /** Creates a root only when the active project has no live cards. */
+  createRootCard: () => string | null;
   deleteProject: (id: string) => void;
   setCurrentCard: (id: string) => void;
   createCard: (input: CreateCardInput) => string;
@@ -498,6 +605,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const activeProjectId = view.activeProjectId;
   const currentCardId = view.currentCardId;
+  const hasCurrentCard = Boolean(
+    cards.find(
+      (card) =>
+        card.id === currentCardId &&
+        card.projectId === activeProjectId &&
+        !card.trashed,
+    ),
+  );
   const streamingCardIds = useMemo(
     () => new Set(Object.keys(streamingTurnsByCard)),
     [streamingTurnsByCard],
@@ -561,8 +676,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       if (!active) return;
       const now = Date.now();
       // 播种在事务内重新确认库是空的，两个标签页同时冷启不会各写一份种子。
-      const next = saved ?? (await seedIfEmpty(seed));
+      let next = saved ?? (await seedIfEmpty(seed));
       if (!active) return;
+      // A killed process cannot resume an old provider stream.  Settle every
+      // persisted streaming assistant turn before any UI state is exposed, and
+      // wait for the storage transaction so refresh cannot resurrect it.
+      const interrupted = recoverInterruptedTurns(next.cards);
+      if (interrupted.recoveredTurnIds.length) {
+        const recoveredWorkspace = { ...next, cards: interrupted.cards };
+        await applyChanges(diffWorkspace(next, recoveredWorkspace));
+        if (!active) return;
+        next = recoveredWorkspace;
+      }
       // 落库基线 = 此刻库里真正的内容。下面的裁剪与默认值补齐会成为第一次
       // 增量保存的 diff 内容。注意力基线用 savedAttention 而不是裁剪后的结果：
       // 基线要如实反映库里有什么。
@@ -1291,20 +1416,61 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           references: input.references,
           currentCardId: input.cardId,
         });
-        // 资料库范围在一轮开始时从宿主绑定表冻结。模型工具永远拿不到
-        // libraryId、Vault 路径或项目 scope，切项目也不会改变这次后台任务的范围。
-        const libraryIds = await noteLibraries.projectLibraryIds(
+        // 资料库绑定和“当前可用”是不同事实。桌面端在这一轮开始时重新检查
+        // Vault 根目录，失效库绝不能继续把旧 SQLite 索引喂给模型。后续搜索/read
+        // 仍会在 Rust 宿主侧再次检查，防止本轮运行中目录又被移走。
+        const boundLibraryIds = await noteLibraries.projectLibraryIds(
           target.projectId,
         );
-        // 普通卡片聊天不需要先花一次真实模型请求探测工具能力。只有用户明确
-        // 绑定了只读资料库，才探测并进入 Harness；这也避免无资料项目首问变慢。
+        const libraries = boundLibraryIds.length
+          ? await noteLibraries.listLibraries()
+          : [];
+        let libraryIds = boundLibraryIds;
+        let unavailableLibraries: Array<{ name: string; reason: string }> = [];
+        if (vault.available && boundLibraryIds.length) {
+          try {
+            const resolved = await desktopProjectNoteScope(target.projectId);
+            libraryIds = resolved.availableLibraryIds.filter((id) =>
+              boundLibraryIds.includes(id),
+            );
+            unavailableLibraries = resolved.unavailableLibraries
+              .filter((library) => boundLibraryIds.includes(library.id))
+              .map(({ name, reason }) => ({ name, reason }));
+          } catch {
+            // Scope status itself is a host operation.  If it cannot be read,
+            // fail closed rather than silently falling back to stale indexes.
+            libraryIds = [];
+            unavailableLibraries = boundLibraryIds.map((id) => ({
+              name:
+                libraries.find((library) => library.id === id)?.name ??
+                "已绑定资料库",
+              reason: "无法确认资料库当前是否可用。",
+            }));
+          }
+        }
+        const allBoundLibrariesUnavailable =
+          boundLibraryIds.length > 0 && libraryIds.length === 0;
+        const scopeWarning = noteScopeWarning(
+          unavailableLibraries,
+          libraryIds.length > 0,
+        );
+        const libraryScopes = libraries
+          .filter((library) => libraryIds.includes(library.id))
+          .map((library) => ({ id: library.id, name: library.name }));
+        // 普通卡片聊天不需要先花一次真实模型请求探测工具能力。只有本轮仍有
+        // 可用只读资料库时才进入 Harness；不可用范围也不能触发探测请求。
         const capability = libraryIds.length
           ? await ensureProviderCapability()
           : undefined;
-        const outcome = await runAgentTurn({
+        const builtForRun = withNoteScopeAvailabilityNotice(
           built,
+          scopeWarning,
+        );
+        const runInput: Parameters<typeof runAgentTurn>[0] = {
+          built: builtForRun,
           projectId: target.projectId,
           libraryIds,
+          libraryScopes,
           capability,
           signal: controller.signal,
           onPhase: (agentPhase) =>
@@ -1323,7 +1489,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             answer = nextAnswer;
             throttle.push(answer);
           },
-        });
+        };
+        const outcome =
+          allBoundLibrariesUnavailable && built.answerMode === "sources-only"
+            ? unavailableSourcesOnlyOutcome(
+                capability?.mode ?? "two-stage",
+                scopeWarning ?? "已绑定资料库当前不可用。",
+              )
+            : await runAgentTurn(runInput);
+        if (scopeWarning && !allBoundLibrariesUnavailable) {
+          outcome.trace.errors = [
+            ...new Set([...(outcome.trace.errors ?? []), scopeWarning]),
+          ];
+        }
         if (!controller.signal.aborted) {
           // 收尾 flush 只在正常结束时发生；中断路径永远不会走到这里。
           answer = outcome.directAnswer ?? gate.finish();
@@ -1332,6 +1510,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             throw new Error("模型没有返回可显示的最终文本，请重试。");
           const cited = controlledCitations(answer, outcome.readChunks);
           answer = cited.content;
+          const agentRun = withHistoricalRetrievalEvidence(
+            outcome.trace,
+            outcome.readChunks,
+            outcome.searchHits ?? [],
+          );
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
@@ -1342,13 +1525,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                     streaming: false,
                     status: "complete",
                     agentPhase: undefined,
-                    agentRun: outcome.trace,
+                    agentRun,
                     citations: cited.citations,
                   }
                 : turn,
             ),
           }));
-          if (answer.trim())
+          // A host-produced strict refusal must not quietly create title /
+          // concept background model calls.  That would defeat the promise
+          // that an unavailable sources-only scope makes no model request.
+          if (answer.trim() && !outcome.directAnswer)
             void runBackgroundTasks(input.cardId, target.title, answer);
         }
       } catch (error) {
@@ -1444,9 +1630,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const createCard = useCallback(
     (input: CreateCardInput) => {
-      const source = cards.find((card) => card.id === input.sourceCardId);
-      if (!source || source.projectId !== activeProjectId)
-        throw new Error("不能从其他项目创建卡片。");
+      const source = requireLiveSourceCard(
+        cards,
+        activeProjectId,
+        input.sourceCardId,
+      );
       const cardId = uid("card");
       const edgeId = uid("edge");
       const anchorId = input.sourceText ? uid("anchor") : undefined;
@@ -1457,14 +1645,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const sourceTurns =
         input.type === "branch"
           ? branchCutoff
-            ? source.turns.slice(
-                0,
-                Math.max(
+            ? source.turns
+                .slice(
                   0,
-                  source.turns.findIndex((turn) => turn.id === branchCutoff) +
-                    1,
-                ),
-              )
+                  Math.max(
+                    0,
+                    source.turns.findIndex((turn) => turn.id === branchCutoff) +
+                      1,
+                  ),
+                )
+                .filter(isTurnEligibleForContext)
             : []
           : undefined;
       const snapshotId = uid("snapshot");
@@ -1599,7 +1789,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const card = cards.find(
         (candidate) =>
           candidate.id === currentCardId &&
-          candidate.projectId === activeProjectId,
+          candidate.projectId === activeProjectId &&
+          !candidate.trashed,
       );
       if (!card) return;
       const userTurn: Turn = {
@@ -1857,17 +2048,27 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const deleteCard = useCallback(
     (id: string) => {
       const card = cards.find((candidate) => candidate.id === id);
-      if (!card || card.projectId !== activeProjectId) return;
+      if (!card || card.trashed || card.projectId !== activeProjectId) return;
       const ids = subtreeIds(edges, id);
       ids.forEach((cardId) => stopStream(cardId));
+      const parentId = incomingEdge(edges, id)?.sourceCardId;
+      const parent = parentId
+        ? cards.find(
+            (candidate) =>
+              candidate.id === parentId &&
+              candidate.projectId === activeProjectId &&
+              !candidate.trashed,
+          )
+        : undefined;
       const fallback =
-        incomingEdge(edges, id)?.sourceCardId ??
+        parent?.id ??
         cards.find(
           (candidate) =>
             candidate.projectId === activeProjectId &&
             !candidate.trashed &&
             !ids.includes(candidate.id),
-        )?.id;
+        )?.id ??
+        "";
       // 进回收站的卡片要连带删掉知识库里的笔记，否则它会永远留在那里。
       forgetInVault(ids);
       setCards((current) =>
@@ -1877,8 +2078,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             : candidate,
         ),
       );
-      if (ids.includes(currentCardId) && fallback)
-        setView((current) => ({ ...current, currentCardId: fallback }));
+      if (ids.includes(currentCardId))
+        setView((current) => {
+          const lastCardByProject = { ...current.lastCardByProject };
+          if (fallback) lastCardByProject[activeProjectId] = fallback;
+          else delete lastCardByProject[activeProjectId];
+          return { ...current, currentCardId: fallback, lastCardByProject };
+        });
       showToast({
         text: `已移入回收站 · ${card.title}${ids.length > 1 ? ` 及 ${ids.length - 1} 张下游卡片` : ""}`,
         actionLabel: "撤销",
@@ -1916,17 +2122,23 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       closeAttentionSession(activeProjectId, "project-switch");
       setProposalTrayOpenState(false);
       setSelectedProposalId(null);
-      const nextCard = preferredProjectCard(
+      const nextCardId = resolveLiveCurrentCardId({
         cards,
-        id,
-        view.lastCardByProject[id],
-      );
-      if (!nextCard) return;
+        projectId: id,
+        currentCardId: view.currentCardId,
+        preferredCardId: view.lastCardByProject[id],
+      });
       setView((current) => ({
         ...current,
         activeProjectId: id,
-        currentCardId: nextCard.id,
-        lastCardByProject: { ...current.lastCardByProject, [id]: nextCard.id },
+        currentCardId: nextCardId,
+        lastCardByProject: nextCardId
+          ? { ...current.lastCardByProject, [id]: nextCardId }
+          : Object.fromEntries(
+              Object.entries(current.lastCardByProject).filter(
+                ([projectId]) => projectId !== id,
+              ),
+            ),
       }));
       processAttention(Date.now(), id);
     },
@@ -1940,15 +2152,24 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     ],
   );
 
-  const contextForCurrent = useCallback(
-    () => buildContext({ cards, edges, snapshots, references, currentCardId }),
-    [cards, currentCardId, edges, references, snapshots],
-  );
+  const contextForCurrent = useCallback(() => {
+    const card = cards.find(
+      (candidate) =>
+        candidate.id === currentCardId &&
+        candidate.projectId === activeProjectId &&
+        !candidate.trashed,
+    );
+    return card
+      ? buildContext({ cards, edges, snapshots, references, currentCardId })
+      : emptyProjectContext();
+  }, [activeProjectId, cards, currentCardId, edges, references, snapshots]);
   const setCardAnswerMode = useCallback(
     (cardId: string, mode: AnswerMode) => {
       const card = cards.find(
         (candidate) =>
-          candidate.id === cardId && candidate.projectId === activeProjectId,
+          candidate.id === cardId &&
+          candidate.projectId === activeProjectId &&
+          !candidate.trashed,
       );
       if (!card || card.answerMode === mode) return;
       updateCard(cardId, (current) => ({ ...current, answerMode: mode }));
@@ -1996,12 +2217,24 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
   const renameCard = useCallback(
     (id: string, title: string) => {
-      const clean = title.replace(/\s+/g, " ").trim().slice(0, 80);
+      // UI validation is not an integrity boundary: imports, keyboard paths
+      // and future callers all pass through this Store method.  Keep the
+      // original value intact on invalid input rather than silently cutting a
+      // Unicode title in the middle and pretending the user's edit succeeded.
+      const clean = title.normalize("NFC").replace(/\s+/gu, " ").trim();
       const card = cards.find(
         (candidate) =>
           candidate.id === id && candidate.projectId === activeProjectId,
       );
-      if (!card || !clean || clean === card.title) return;
+      if (!card || clean === card.title) return;
+      if (!clean) {
+        showToast({ text: "卡片标题不能为空。" });
+        return;
+      }
+      if ([...clean].length > 80) {
+        showToast({ text: "卡片标题最多 80 个字符。" });
+        return;
+      }
       updateCard(id, (current) => ({ ...current, title: clean }));
       // ContextSnapshot already holds sourceTitle; renaming must never rewrite it.
       recordInteraction({
@@ -2011,7 +2244,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         sourceCardId: id,
       });
     },
-    [activeProjectId, cards, recordInteraction, updateCard],
+    [activeProjectId, cards, recordInteraction, showToast, updateCard],
   );
   const rerouteEditedQuestion = useCallback(
     (cardId: string, turnId: string, text: string) => {
@@ -2221,6 +2454,59 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       lastCardByProject: { ...current.lastCardByProject, [projectId]: rootId },
     }));
   }, []);
+  const createRootCard = useCallback(() => {
+    const project = projects.find(
+      (candidate) => candidate.id === activeProjectId,
+    );
+    if (!project) return null;
+    const existing = cards.find(
+      (candidate) =>
+        candidate.projectId === activeProjectId && !candidate.trashed,
+    );
+    if (existing) {
+      setView((current) => ({
+        ...current,
+        currentCardId: existing.id,
+        lastCardByProject: {
+          ...current.lastCardByProject,
+          [activeProjectId]: existing.id,
+        },
+      }));
+      return existing.id;
+    }
+    const rootId = uid("card");
+    const createdAt = Date.now();
+    setCards((current) => [
+      ...current,
+      {
+        id: rootId,
+        projectId: activeProjectId,
+        title: "未命名卡片",
+        turns: [],
+        favorite: false,
+        unread: false,
+        concepts: [],
+        answerMode: "general",
+        createdAt,
+      },
+    ]);
+    setProjects((current) =>
+      current.map((candidate) =>
+        candidate.id === activeProjectId
+          ? { ...candidate, updatedAt: createdAt }
+          : candidate,
+      ),
+    );
+    setView((current) => ({
+      ...current,
+      currentCardId: rootId,
+      lastCardByProject: {
+        ...current.lastCardByProject,
+        [activeProjectId]: rootId,
+      },
+    }));
+    return rootId;
+  }, [activeProjectId, cards, projects]);
   const deleteProject = useCallback(
     (id: string) => {
       const project = projects.find((candidate) => candidate.id === id);
@@ -2385,7 +2671,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const artifacts = await formatAdapters[format].export(
         portable(activeProjectId),
       );
-      artifacts.forEach(downloadArtifact);
+      for (const artifact of artifacts) {
+        const result = await writeArtifact(artifact);
+        if (result.status === "cancelled") return;
+      }
       showToast({
         text: `已导出 ${artifacts.length} 个「${format === "bundle" ? "无损项目包" : format === "canvas" ? "JSON Canvas + Markdown" : "Markdown 文件夹"}」文件。`,
       });
@@ -2410,10 +2699,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       exportedAt: Date.now(),
     });
     const counts = backupCounts(backup);
-    downloadArtifact({
+    const result = await writeArtifact({
       filename: `papertable-library-${new Date().toISOString().slice(0, 10)}.json`,
       blob: new Blob([JSON.stringify(backup)], { type: "application/json" }),
     });
+    if (result.status === "cancelled") return;
     showToast({
       text: `已导出整库备份：${counts.projects} 个项目 · ${counts.cards} 张卡片 · ${counts.turns} 条轮次${counts.noteLibraries ? ` · ${counts.noteLibraries} 个只读资料库` : ""}。请自己收好，迁移到桌面版时需要它。`,
     });
@@ -2561,13 +2851,30 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const chooseVaultPath = useCallback(async () => {
-    const picked = await vault.chooseVault();
+    let picked: string | null;
+    try {
+      picked = await vault.chooseVault();
+    } catch {
+      showToast({ text: "无法打开知识库目录选择器，请稍后重试。" });
+      return;
+    }
     if (!picked) return;
+
+    let indexed: number;
+    try {
+      indexed = await vault.watch(picked);
+    } catch {
+      showToast({
+        text: "无法使用所选知识库目录。请确认目录仍存在且 Papertable 有访问权限。",
+      });
+      return;
+    }
+
     setSettings((current) => ({ ...current, vaultPath: picked }));
-    const indexed = await vault.watch(picked);
     setVaultIndexed(indexed);
     // Desktop-only: connection creates/updates a read-only library separate
     // from the existing optional Papertable→Vault export sync.
+    let boundForSearch = false;
     try {
       const library = await connectDesktopVault(picked);
       const bound = await noteLibraries.projectLibraryIds(activeProjectId);
@@ -2576,22 +2883,38 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         library.id,
       ]);
       await refreshNoteLibraries();
+      boundForSearch = true;
     } catch {
       // The vault watcher remains useful for ordinary wikilinks even if the
       // Harness corpus cannot be built (for example a transient DB lock).
     }
     showToast({
-      text: `已选择知识库：${picked}，索引到 ${indexed} 篇笔记；当前项目已尝试绑定为只读资料库。Papertable 只会写入其中的 ${settings.vaultSubtree ?? DEFAULT_VAULT_SUBTREE}/。`,
+      text: boundForSearch
+        ? `已选择知识库，索引到 ${indexed} 篇笔记；当前项目已绑定为只读资料库。Papertable 只会写入其中的 ${settings.vaultSubtree ?? DEFAULT_VAULT_SUBTREE}/。`
+        : `已选择知识库，索引到 ${indexed} 篇笔记；只读资料库暂未建立，可在设置中重新扫描后重试。Papertable 只会写入其中的 ${settings.vaultSubtree ?? DEFAULT_VAULT_SUBTREE}/。`,
     });
   }, [activeProjectId, refreshNoteLibraries, settings.vaultSubtree, showToast]);
 
   /** 监听器出问题时的手动兜底。 */
   const rescanVault = useCallback(async () => {
     if (!settings.vaultPath) return;
-    const indexed = await vault.watch(settings.vaultPath);
-    setVaultIndexed(indexed);
-    showToast({ text: `已重新扫描知识库，共 ${indexed} 篇笔记。` });
-  }, [settings.vaultPath, showToast]);
+    try {
+      const indexed = await vault.watch(settings.vaultPath);
+      setVaultIndexed(indexed);
+      await refreshNoteLibraries().catch(() => undefined);
+      showToast({ text: `已重新扫描知识库，共 ${indexed} 篇笔记。` });
+    } catch {
+      // A moved/deleted Vault is a local feature failure, never an app-start
+      // failure.  Re-listing lets the read-only library UI expose its current
+      // unavailable state while cards and the rest of the workspace remain
+      // usable.
+      setVaultIndexed(0);
+      await refreshNoteLibraries().catch(() => undefined);
+      showToast({
+        text: "无法重新扫描当前知识库目录。目录可能已移动或不可访问，请重新选择目录。",
+      });
+    }
+  }, [refreshNoteLibraries, settings.vaultPath, showToast]);
 
   /**
    * 把提问里的 `[[双链]]` 解析成引用。**只生成 ReferenceChip，绝不推断 CardEdge**
@@ -2699,7 +3022,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           .then((items) => items[0]),
       ),
     );
-    artifacts.forEach(downloadArtifact);
+    for (const artifact of artifacts) {
+      const result = await writeArtifact(artifact);
+      if (result.status === "cancelled") return;
+    }
     showToast({ text: `已导出全部 ${artifacts.length} 个项目备份。` });
   }, [portable, projects, showToast]);
   const importFiles = useCallback(
@@ -2855,6 +3181,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       proposalTrayOpen,
       selectedProposalId,
       currentCardId,
+      hasCurrentCard,
       references,
       draft,
       collapsed,
@@ -2873,6 +3200,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       renameProject,
       togglePinProject,
       createProject,
+      createRootCard,
       deleteProject,
       setCurrentCard,
       createCard,
@@ -2943,6 +3271,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       proposalTrayOpen,
       selectedProposalId,
       currentCardId,
+      hasCurrentCard,
       references,
       draft,
       collapsed,
@@ -2961,6 +3290,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       renameProject,
       togglePinProject,
       createProject,
+      createRootCard,
       deleteProject,
       setCurrentCard,
       createCard,

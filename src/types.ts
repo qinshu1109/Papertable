@@ -15,7 +15,13 @@ export type ContextPolicy =
 export type AnswerMode = "general" | "sources-only";
 
 export type TurnRole = "user" | "ai";
-export type TurnStatus = "complete" | "streaming" | "stopped" | "error";
+/**
+ * `interrupted` means the app was closed or killed while a response was
+ * streaming.  Its visible partial text is retained for the user, but it is
+ * never treated as a completed assistant message in a later model request.
+ */
+export type TurnStatus =
+  "complete" | "streaming" | "stopped" | "interrupted" | "error";
 
 /** 精确来源锚点：定位到卡片 / 轮次 / 文本片段 */
 export interface SourceAnchor {
@@ -48,7 +54,9 @@ export interface ContextProvenance {
     | "source-topic"
     | "source-selection"
     | "branch-history"
-    | "reference";
+    | "reference"
+    /** Historical tool provenance only; it is explicitly not current evidence. */
+    | "historical-retrieval";
   label: string;
   detail: string;
   cardId?: string;
@@ -92,6 +100,21 @@ export type ProviderMessage =
 
 export type OutputChannel = "unknown" | "final";
 
+/**
+ * Host-neutral error vocabulary shared by web SSE and the Tauri provider.
+ * User-facing layers map these codes to Chinese copy; raw transport details
+ * never need to cross the provider boundary.
+ */
+export type ProviderErrorCode =
+  | "unauthorized"
+  | "rate-limited"
+  | "upstream"
+  | "timeout"
+  | "disconnected"
+  | "empty-response"
+  | "invalid-response"
+  | "service-unavailable";
+
 export type ProviderStreamEvent =
   | { type: "token"; text: string; channel: OutputChannel }
   | {
@@ -102,7 +125,7 @@ export type ProviderStreamEvent =
       arguments?: string;
     }
   | { type: "done"; finishReason?: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; code?: ProviderErrorCode };
 
 export type AgentExecutionMode = "native-tools" | "two-stage";
 
@@ -128,6 +151,19 @@ export interface NoteCitation {
   excerpt: string;
 }
 
+/**
+ * A bounded audit record for a completed historical tool-assisted answer.
+ * It deliberately carries only a query and a vault-relative source label:
+ * it proves that an earlier answer used a real read-only tool, but is not a
+ * reusable current-round source, scope grant, or citation.
+ */
+export interface HistoricalRetrievalEvidence {
+  query: string;
+  relativePath: string;
+  title: string;
+  hitType: "read" | "search-hit";
+}
+
 export interface AgentRunTrace {
   mode: AgentExecutionMode;
   startedAt: number;
@@ -140,6 +176,8 @@ export interface AgentRunTrace {
   errors?: string[];
   /** Explicitly records a strict source-only refusal instead of hiding it. */
   retrievalUnavailable?: boolean;
+  /** At most eight safe historical tool audit records, populated on success. */
+  retrievalEvidence?: HistoricalRetrievalEvidence[];
 }
 
 export interface BuiltContext {

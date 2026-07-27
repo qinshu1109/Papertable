@@ -7,6 +7,10 @@
 
 export type NoteLibraryKind = "web-import" | "vault";
 
+/** Runtime availability, not a persisted promise that an old Vault still exists. */
+export type NoteLibraryAvailability =
+  "ready" | "indexing" | "missing" | "error";
+
 export interface NoteLibrary {
   id: string;
   /** 用户看得到的名称，例如「产品研究资料」。 */
@@ -14,6 +18,9 @@ export interface NoteLibrary {
   kind: NoteLibraryKind;
   /** Vault 才有的根目录提示；Web 导入不保存本机绝对路径。 */
   rootLabel?: string;
+  /** Desktop host revalidates this before every search/read; no absolute path. */
+  availability?: NoteLibraryAvailability;
+  availabilityReason?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -65,7 +72,15 @@ export interface IndexReport {
   documents: number;
   chunks: number;
   skipped: number;
+  /** Safe, relative-path-only feedback for files that were not indexed. */
+  issues?: IndexIssue[];
   updatedAt: number;
+}
+
+export interface IndexIssue {
+  relativePath: string;
+  code: "too-large" | string;
+  message: string;
 }
 
 /**
@@ -88,6 +103,40 @@ export interface NoteHit {
   score: number;
   /** 搜索实现可给 UI 的简短命中片段；没有时为原文前段。 */
   snippet: string;
+}
+
+/** Structural input so source previews do not need to import the Card domain. */
+export interface NoteCitationLookup {
+  libraryId: string;
+  documentId: string;
+  relativePath: string;
+  documentHash: string;
+  chunkId?: string;
+  excerpt?: string;
+}
+
+export type NoteCitationResolutionState =
+  "current" | "updated" | "missing" | "library-unavailable";
+
+/**
+ * Resolving a historical citation is deliberately separate from `read()`:
+ * a document update changes chunk IDs, but must not be misreported as a
+ * missing source. The optional chunk is always current and scope-validated.
+ */
+export interface NoteCitationResolution {
+  state: NoteCitationResolutionState;
+  chunk?: NoteChunk;
+  reason?: string;
+}
+
+export interface ResolvedNoteScope {
+  availableLibraryIds: string[];
+  unavailableLibraries: Array<{
+    id: string;
+    name: string;
+    availability: Exclude<NoteLibraryAvailability, "ready" | "indexing">;
+    reason: string;
+  }>;
 }
 
 /**

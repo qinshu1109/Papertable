@@ -190,6 +190,13 @@ fn adopt(conn: &Connection, root: &Path, relative: &Path, now: i64) -> Option<In
         let _ = crate::notes::remove_vault_file(conn, root, relative);
         return None;
     };
+    if text.len() > crate::notes::MAX_MARKDOWN_BYTES {
+        // 大文件不能继续占用检索索引；尤其不能因为它此前较小而把旧版本留在 FTS
+        // 中。对 watcher 来说它等同于“从可检索资料中移除”，前端会收到变更事件。
+        let _ = crate::db::drop_indexed(conn, &key);
+        let _ = crate::notes::remove_vault_file(conn, root, relative);
+        return None;
+    }
     let hash = crate::vault::normalized_hash(&text);
     let name = note_name(relative);
     let note_id = note_id_of(&text);
@@ -241,8 +248,11 @@ pub fn process_settled(
     adopted
 }
 
+/// 全量重扫报告。它不包含绝对路径，便于直接作为桌面资料库 UI 的安全状态。
+pub type ScanReport = crate::notes::IndexReport;
+
 /// 全量重扫。监听器出问题时的手动兜底，也是首次开启同步时建立索引的方式。
-pub fn scan(conn: &Connection, root: &Path, now: i64) -> std::io::Result<usize> {
+pub fn scan(conn: &Connection, root: &Path, now: i64) -> std::io::Result<ScanReport> {
     scan_excluding(
         conn,
         root,
@@ -256,16 +266,25 @@ pub fn scan_excluding(
     root: &Path,
     excluded: Option<&Path>,
     now: i64,
-) -> std::io::Result<usize> {
+) -> std::io::Result<ScanReport> {
     // 与 start() 用同一套解析后的根，否则扫描出来的相对路径和监听事件的相对路径
-    // 对不上，同一篇笔记会在索引里存成两条。
-    let root = &root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // 对不上，同一篇笔记会在索引里存成两条。不能 fallback 到不存在的 raw path：那会
+    // 把失效 Vault 的旧索引误清空或重新当作可用资料库。
+    let root = root.canonicalize()?;
+    if !root.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "资料库目录已不存在或不是文件夹。",
+        ));
+    }
     // 保留既有 Vault 监听入口，但它现在也建立一个独立的只读资料库。资料不会成为
     // Card；是否能被某个项目检索仍要显式绑定。
-    let library = crate::notes::connect_vault(conn, root, Some(now))
+    let library = crate::notes::connect_vault(conn, &root, Some(now))
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let mut alive = Vec::new();
-    for entry in walkdir::WalkDir::new(root)
+    let mut skipped = 0usize;
+    let mut issues = Vec::new();
+    for entry in walkdir::WalkDir::new(&root)
         .into_iter()
         .filter_entry(|e| {
             // 不进以 . 开头的目录：.obsidian 里有成千上万个文件。
@@ -280,14 +299,27 @@ pub fn scan_excluding(
         if !entry.file_type().is_file() {
             continue;
         }
-        let Ok(relative) = entry.path().strip_prefix(root) else {
+        let Ok(relative) = entry.path().strip_prefix(&root) else {
             continue;
         };
         if !should_watch(relative) || is_excluded(relative, excluded) {
             continue;
         }
-        if adopt(conn, root, relative, now).is_some() {
-            alive.push(relative.to_string_lossy().to_string());
+        let path = relative.to_string_lossy().replace('\\', "/");
+        if entry
+            .metadata()
+            .map(|metadata| metadata.len() as usize)
+            .unwrap_or(0)
+            > crate::notes::MAX_MARKDOWN_BYTES
+        {
+            skipped += 1;
+            issues.push(crate::notes::IndexIssue::too_large(&path));
+            let _ = crate::db::drop_indexed(conn, &path);
+            let _ = crate::notes::remove_vault_file(conn, &root, relative);
+            continue;
+        }
+        if adopt(conn, &root, relative, now).is_some() {
+            alive.push(path);
         }
     }
     // 监听器会处理运行期的删除；这里补上应用关闭期间发生的删除，避免已经从
@@ -295,7 +327,16 @@ pub fn scan_excluding(
     crate::notes::retain_vault_documents(conn, &library.id, &alive)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let _ = crate::db::retain_indexed(conn, &alive);
-    Ok(alive.len())
+    let library = crate::notes::library(conn, &library.id)
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .ok_or_else(|| std::io::Error::other("资料库扫描后无法读取。"))?;
+    Ok(ScanReport {
+        library_id: library.id,
+        documents_indexed: alive.len(),
+        chunks_indexed: library.chunk_count as usize,
+        skipped,
+        issues,
+    })
 }
 
 pub struct VaultWatcher {
@@ -395,6 +436,7 @@ impl VaultWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -500,6 +542,30 @@ mod tests {
         assert!(
             !inflight.take(&p("b.md"), start + INFLIGHT_TTL + Duration::from_millis(1)),
             "过期的抑制标记不能继续吞事件",
+        );
+    }
+
+    #[test]
+    fn rescanning_a_missing_vault_fails_without_wiping_the_old_corpus() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("临时资料库");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("事实.md"), "# 事实\n\n编号 ROOT-77").unwrap();
+        let report = scan(&conn, &root, 1).unwrap();
+        assert_eq!(report.documents_indexed, 1);
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM note_documents", [], |row| row.get(0))
+            .unwrap();
+
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(scan(&conn, &root, 2).is_err());
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM note_documents", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "failed rescan must not silently erase cached rows"
         );
     }
 }

@@ -9,6 +9,8 @@ export default tseslint.config(
       "node_modules",
       "playwright-report",
       "test-results",
+      // 人工 QA 的截图、脱敏请求记录和一次性辅助脚本是证据，不是产品源码。
+      "qa-evidence",
       "*.tsbuildinfo",
       // Rust 侧：图标是二进制，target/ 是构建产物。
       "src-tauri",

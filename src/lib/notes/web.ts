@@ -1,9 +1,12 @@
-import { chunkMarkdown } from "./chunk";
+import { chunkMarkdown, MAX_NOTE_DOCUMENT_BYTES } from "./chunk";
 import { rankNoteChunks } from "./search";
 import type {
   BoundNoteRead,
   BoundNoteSearch,
+  IndexIssue,
   IndexReport,
+  NoteCitationLookup,
+  NoteCitationResolution,
   NoteChunk,
   NoteHit,
   NoteImportInput,
@@ -63,6 +66,57 @@ function workerRank(
   });
 }
 
+let chunkWorker: Worker | null = null;
+let chunkWorkerRequest = 0;
+const pendingChunkWorkers = new Map<
+  string,
+  {
+    resolve: (documents: ReturnType<typeof chunkMarkdown>[]) => void;
+    reject: (cause: Error) => void;
+  }
+>();
+
+function documentChunkWorker(): Worker | null {
+  if (typeof Worker === "undefined") return null;
+  if (chunkWorker) return chunkWorker;
+  chunkWorker = new Worker(new URL("./chunk.worker.ts", import.meta.url), {
+    type: "module",
+  });
+  chunkWorker.onmessage = (
+    event: MessageEvent<{
+      id: string;
+      documents?: ReturnType<typeof chunkMarkdown>[];
+      error?: string;
+    }>,
+  ) => {
+    const pending = pendingChunkWorkers.get(event.data.id);
+    if (!pending) return;
+    pendingChunkWorkers.delete(event.data.id);
+    if (event.data.error) pending.reject(new Error(event.data.error));
+    else pending.resolve(event.data.documents ?? []);
+  };
+  chunkWorker.onerror = () => {
+    for (const pending of pendingChunkWorkers.values())
+      pending.reject(new Error("资料库切块 Worker 已停止。"));
+    pendingChunkWorkers.clear();
+    chunkWorker?.terminate();
+    chunkWorker = null;
+  };
+  return chunkWorker;
+}
+
+function chunkDocumentsInWorker(
+  inputs: Parameters<typeof chunkMarkdown>[0][],
+): Promise<ReturnType<typeof chunkMarkdown>[]> {
+  const instance = documentChunkWorker();
+  if (!instance) return Promise.resolve(inputs.map(chunkMarkdown));
+  const id = `note-chunk-${++chunkWorkerRequest}`;
+  return new Promise((resolve, reject) => {
+    pendingChunkWorkers.set(id, { resolve, reject });
+    instance.postMessage({ id, inputs });
+  });
+}
+
 function safePath(path: string): string | null {
   const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
   if (
@@ -78,8 +132,16 @@ function report(
   documents: number,
   chunks: number,
   skipped: number,
+  issues: IndexIssue[] = [],
 ): IndexReport {
-  return { libraryId, documents, chunks, skipped, updatedAt: Date.now() };
+  return {
+    libraryId,
+    documents,
+    chunks,
+    skipped,
+    issues,
+    updatedAt: Date.now(),
+  };
 }
 
 export class WebNoteLibraryAdapter implements NoteLibraryAdapter {
@@ -88,21 +150,36 @@ export class WebNoteLibraryAdapter implements NoteLibraryAdapter {
   }
 
   async importFiles(input: NoteImportInput): Promise<IndexReport> {
-    const valid = input.files.filter(
-      (file) =>
-        safePath(file.relativePath) && /\.md(?:own)?$/i.test(file.relativePath),
-    );
+    const issues: IndexIssue[] = [];
+    const valid = input.files.flatMap((file) => {
+      const relativePath = safePath(file.relativePath);
+      if (!relativePath || !/\.md(?:own)?$/i.test(relativePath)) return [];
+      if (
+        new TextEncoder().encode(file.content).byteLength >
+        MAX_NOTE_DOCUMENT_BYTES
+      ) {
+        issues.push({
+          relativePath,
+          code: "too-large",
+          message: "文件超过 20 MiB，已跳过并移除旧索引。",
+        });
+        return [];
+      }
+      return [{ file, relativePath }];
+    });
     const skipped = input.files.length - valid.length;
-    const documents: NoteDocumentRecord[] = [];
-    const chunks: NoteChunk[] = [];
-    for (const file of valid) {
-      const relativePath = safePath(file.relativePath)!;
-      const chunked = chunkMarkdown({
+    const chunkedDocuments = await chunkDocumentsInWorker(
+      valid.map(({ file, relativePath }) => ({
         libraryId: input.library.id,
         relativePath,
         content: file.content,
         updatedAt: file.modifiedAt ?? Date.now(),
-      });
+      })),
+    );
+    const documents: NoteDocumentRecord[] = [];
+    const chunks: NoteChunk[] = [];
+    for (const [index, chunked] of chunkedDocuments.entries()) {
+      const file = valid[index].file;
       documents.push({ ...chunked.document, content: file.content });
       chunks.push(...chunked.chunks);
     }
@@ -128,7 +205,13 @@ export class WebNoteLibraryAdapter implements NoteLibraryAdapter {
         await db.noteChunks.bulkPut(chunks);
       },
     );
-    return report(input.library.id, documents.length, chunks.length, skipped);
+    return report(
+      input.library.id,
+      documents.length,
+      chunks.length,
+      skipped,
+      issues,
+    );
   }
 
   async search(input: BoundNoteSearch): Promise<NoteHit[]> {
@@ -138,6 +221,24 @@ export class WebNoteLibraryAdapter implements NoteLibraryAdapter {
       .where("libraryId")
       .anyOf(libraryIds)
       .toArray();
+    if (input.query.trim() === "*") {
+      const firstByDocument = new Map<string, NoteChunk>();
+      for (const chunk of chunks) {
+        const previous = firstByDocument.get(chunk.documentId);
+        if (!previous || chunk.ordinal < previous.ordinal)
+          firstByDocument.set(chunk.documentId, chunk);
+      }
+      return [...firstByDocument.values()]
+        .sort((left, right) =>
+          left.relativePath.localeCompare(right.relativePath, "zh-CN"),
+        )
+        .slice(0, Math.max(1, Math.min(8, input.limit)))
+        .map((chunk) => ({
+          chunk,
+          score: 0,
+          snippet: chunk.text.slice(0, 180).replace(/\s+/g, " ").trim(),
+        }));
+    }
     return workerRank(
       chunks,
       input.query,
@@ -238,6 +339,61 @@ export async function webSetProjectLibraries(
     }));
     await db.projectNoteLibraries.bulkPut(next);
   });
+}
+
+/**
+ * Web imports are immutable local copies, but historical citations still need
+ * the same four-way answer as desktop: current, updated, missing, or no
+ * longer available to this project. Do not use `chunkId` as the sole key:
+ * re-indexing changes it whenever the document hash changes.
+ */
+export async function resolveWebNoteCitation(input: {
+  projectId: string;
+  citation: NoteCitationLookup;
+}): Promise<NoteCitationResolution> {
+  const binding = await db.projectNoteLibraries.get([
+    input.projectId,
+    input.citation.libraryId,
+  ]);
+  const library = await db.noteLibraries.get(input.citation.libraryId);
+  if (!binding || !library) {
+    return {
+      state: "library-unavailable",
+      reason: binding
+        ? "这个资料库当前不可用。"
+        : "这个资料库未绑定到当前项目。",
+    };
+  }
+  const document = await db.noteDocuments.get(input.citation.documentId);
+  if (
+    !document ||
+    document.libraryId !== input.citation.libraryId ||
+    document.relativePath !== input.citation.relativePath
+  ) {
+    return {
+      state: "missing",
+      reason: "原笔记已删除或不再位于该资料库。",
+    };
+  }
+  const chunks = await db.noteChunks
+    .where("documentId")
+    .equals(document.id)
+    .sortBy("ordinal");
+  const current =
+    chunks.find((chunk) => chunk.id === input.citation.chunkId) ??
+    chunks.find(
+      (chunk) =>
+        Boolean(input.citation.excerpt) &&
+        chunk.text.includes(input.citation.excerpt ?? ""),
+    ) ??
+    chunks[0];
+  return {
+    state:
+      document.versionHash === input.citation.documentHash
+        ? "current"
+        : "updated",
+    chunk: current,
+  };
 }
 
 /** Used by full local backup, not ordinary project exports. */

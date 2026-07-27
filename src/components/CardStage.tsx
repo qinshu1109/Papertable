@@ -11,6 +11,8 @@ import {
   ArrowDownRight,
   ArrowUpLeft,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   CornerDownRight,
   Edit3,
@@ -20,6 +22,7 @@ import {
   Split,
   Star,
   Trash2,
+  X,
 } from "lucide-react";
 import { useStore } from "../store";
 import { EDGE_META } from "../types";
@@ -36,6 +39,43 @@ const spring = {
   damping: 30,
   mass: 0.9,
 };
+
+const TURN_PREVIEW_LIMIT = 6_000;
+const TURN_PAGE_LIMIT = 4_000;
+const CARD_TITLE_LIMIT = 80;
+
+/** `Array.from` avoids slicing a surrogate pair in the middle. */
+function unicodeLength(value: string) {
+  return Array.from(value).length;
+}
+
+function unicodeSlice(value: string, end: number) {
+  return Array.from(value).slice(0, end).join("");
+}
+
+function splitLongTurn(content: string, pageSize = TURN_PAGE_LIMIT) {
+  const characters = Array.from(content);
+  const pages: string[] = [];
+  let start = 0;
+  while (start < characters.length) {
+    let end = Math.min(characters.length, start + pageSize);
+    // Preserve readable Markdown boundaries when there is one in the latter
+    // half of a page. The maximum remains exactly pageSize Unicode characters.
+    if (end < characters.length) {
+      const page = characters.slice(start, end).join("");
+      const breakAt = Math.max(
+        page.lastIndexOf("\n\n"),
+        page.lastIndexOf("\n"),
+      );
+      if (breakAt >= Math.floor(page.length * 0.55)) {
+        end = start + Array.from(page.slice(0, breakAt + 1)).length;
+      }
+    }
+    pages.push(characters.slice(start, end).join(""));
+    start = end;
+  }
+  return pages.length ? pages : [""];
+}
 
 interface SelState {
   x: number;
@@ -59,7 +99,9 @@ export function CardStage() {
     cards,
     edges,
     currentCardId,
+    hasCurrentCard,
     setCurrentCard,
+    createRootCard,
     createCard,
     renameCard,
     rerouteEditedQuestion,
@@ -74,10 +116,13 @@ export function CardStage() {
     lastCreated,
     streamingTurnId,
     showToast,
-    boundNoteLibraryIds,
   } = useStore();
 
-  const card = cards.find((c) => c.id === currentCardId);
+  const card = hasCurrentCard
+    ? cards.find(
+        (candidate) => candidate.id === currentCardId && !candidate.trashed,
+      )
+    : undefined;
   const path = useMemo(
     () => pathToRoot(edges, currentCardId),
     [edges, currentCardId],
@@ -104,6 +149,7 @@ export function CardStage() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [noteSource, setNoteSource] = useState<NoteCitation | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
+  const [longTurnId, setLongTurnId] = useState<string | null>(null);
   const prevCard = useRef(currentCardId);
   const dwellRecordRef = useRef(recordCardDwell);
 
@@ -162,7 +208,12 @@ export function CardStage() {
     setTempFlashId(null);
     setTempShakeId(null);
     setNoteSource(null);
+    setLongTurnId(null);
   }, [activeProjectId, updateTempCards]);
+
+  useEffect(() => {
+    setLongTurnId(null);
+  }, [currentCardId]);
 
   useEffect(() => {
     dwellRecordRef.current = recordCardDwell;
@@ -170,6 +221,7 @@ export function CardStage() {
 
   /* 只统计页面前台状态下的连续有效阅读，后台挂起不算。 */
   useEffect(() => {
+    if (!hasCurrentCard) return;
     let elapsed = 0;
     let startedAt: number | null = null;
     let timer: number | null = null;
@@ -204,17 +256,18 @@ export function CardStage() {
       clearTimer();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [currentCardId]);
+  }, [currentCardId, hasCurrentCard]);
 
   /* ---------- 每张卡片独立滚动位置 ---------- */
   useLayoutEffect(() => {
+    if (!hasCurrentCard) return;
     const el = bodyRef.current;
     if (!el) return;
     if (prevCard.current !== currentCardId) prevCard.current = currentCardId;
     el.scrollTop = cardScroll(currentCardId);
     followStreamingTail.current =
       el.scrollHeight - el.clientHeight - el.scrollTop < 96;
-  }, [cardScroll, currentCardId]);
+  }, [cardScroll, currentCardId, hasCurrentCard]);
 
   const rememberScroll = () => {
     if (!bodyRef.current) return;
@@ -303,16 +356,44 @@ export function CardStage() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      // Higher foreground layers own Escape. Their handlers restore focus to
+      // their own opener; clearing a card selection underneath them would
+      // make the key feel like it acted on two different surfaces.
+      if (noteSource || longTurnId || tempCards.length) return;
+      if (!sel && !spawn && !menuOpen) return;
+      event.preventDefault();
       setSel(null);
       setSpawn(null);
       setMenuOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [longTurnId, menuOpen, noteSource, sel, spawn, tempCards.length]);
 
-  if (!card) return <div className="stage" />;
+  if (!card) {
+    return (
+      <div className="stage stage-empty" aria-live="polite">
+        <div className="empty-card-state">
+          <span className="empty-card-state-kicker">当前项目</span>
+          <h2>项目暂时没有可用卡片</h2>
+          <p>
+            已删除的卡片仍在回收站。新建一张根卡片后，就可以从一个问题开始新的探索。
+          </p>
+          <button
+            className="btn primary"
+            onClick={() => {
+              if (!createRootCard()) {
+                showToast({ text: "当前项目不可用，暂时无法新建根卡片。" });
+              }
+            }}
+          >
+            新建根卡片
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const inEdge = incomingEdge(edges, card.id);
   const sourceCard = inEdge
@@ -486,10 +567,27 @@ export function CardStage() {
       ? EDGE_META[lastCreated.type].enterFrom
       : { x: 0, y: 18, rotate: 0 };
   const aiTurns = card.turns.filter((t) => t.role === "ai");
+  const normalizedTitleDraft = titleDraft
+    .normalize("NFC")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const titleCount = unicodeLength(normalizedTitleDraft);
+  const titleIssue = !normalizedTitleDraft
+    ? "标题不能为空"
+    : titleCount > CARD_TITLE_LIMIT
+      ? `标题最多 ${CARD_TITLE_LIMIT} 个字符`
+      : null;
   const commitTitle = () => {
-    renameCard(card.id, titleDraft);
+    if (titleIssue) {
+      showToast({ text: titleIssue });
+      return;
+    }
+    renameCard(card.id, normalizedTitleDraft);
     setEditingTitle(false);
   };
+  const longTurn = longTurnId
+    ? card.turns.find((turn) => turn.id === longTurnId)
+    : undefined;
 
   return (
     <div
@@ -560,18 +658,30 @@ export function CardStage() {
             <header className="card-head">
               <div style={{ flex: 1, minWidth: 0 }}>
                 {editingTitle ? (
-                  <input
-                    className="card-title-input"
-                    value={titleDraft}
-                    onChange={(event) => setTitleDraft(event.target.value)}
-                    onBlur={commitTitle}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") commitTitle();
-                      if (event.key === "Escape") setEditingTitle(false);
-                    }}
-                    aria-label="编辑卡片标题"
-                    autoFocus
-                  />
+                  <>
+                    <input
+                      className="card-title-input"
+                      value={titleDraft}
+                      onChange={(event) => setTitleDraft(event.target.value)}
+                      onBlur={commitTitle}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") commitTitle();
+                        if (event.key === "Escape") setEditingTitle(false);
+                      }}
+                      aria-label="编辑卡片标题"
+                      aria-describedby="card-title-count"
+                      aria-invalid={Boolean(titleIssue)}
+                      autoFocus
+                    />
+                    <div
+                      className={`card-title-count${titleIssue ? " invalid" : ""}`}
+                      id="card-title-count"
+                      role={titleIssue ? "alert" : undefined}
+                    >
+                      {titleCount} / {CARD_TITLE_LIMIT}
+                      {titleIssue ? ` · ${titleIssue}` : ""}
+                    </div>
+                  </>
                 ) : (
                   <h1
                     className="card-title"
@@ -806,6 +916,7 @@ export function CardStage() {
                     }}
                     onRetry={retryLast}
                     onCitation={setNoteSource}
+                    onOpenLongTurn={(turnId) => setLongTurnId(turnId)}
                     copied={copied === turn.id}
                   />
                 ))}
@@ -1027,8 +1138,16 @@ export function CardStage() {
         <NoteSourcePreview
           citation={noteSource}
           projectId={activeProjectId}
-          libraryIds={boundNoteLibraryIds}
           onClose={() => setNoteSource(null)}
+        />
+      )}
+      {longTurn && (
+        <LongTurnViewer
+          turn={longTurn}
+          index={aiTurns.findIndex((turn) => turn.id === longTurn.id) + 1}
+          onClose={() => setLongTurnId(null)}
+          onCopy={() => copy(longTurn.content, longTurn.id)}
+          copied={copied === longTurn.id}
         />
       )}
     </div>
@@ -1053,6 +1172,7 @@ function TurnBlock({
   onEditQuestion,
   onRetry,
   onCitation,
+  onOpenLongTurn,
   copied,
 }: {
   turn: Turn;
@@ -1070,6 +1190,7 @@ function TurnBlock({
   onEditQuestion: (text: string) => void;
   onRetry: () => void;
   onCitation: (citation: NoteCitation) => void;
+  onOpenLongTurn: (turnId: string) => void;
   copied: boolean;
 }) {
   const [more, setMore] = useState(false);
@@ -1245,12 +1366,26 @@ function TurnBlock({
 
       <div className="md" data-turn-ai={turn.id}>
         <Markdown
-          content={turn.content}
+          content={
+            unicodeLength(turn.content) > TURN_PREVIEW_LIMIT
+              ? `${unicodeSlice(turn.content, TURN_PREVIEW_LIMIT)}\n\n…`
+              : turn.content
+          }
           concepts={card.concepts}
           onConcept={onConcept}
         />
         {streaming && turn.content.length > 0 && <span className="caret" />}
       </div>
+      {unicodeLength(turn.content) > TURN_PREVIEW_LIMIT && (
+        <div className="long-turn-preview">
+          <span>
+            为保证阅读流畅，仅显示前 {TURN_PREVIEW_LIMIT.toLocaleString()} 字。
+          </span>
+          <button className="chip-btn" onClick={() => onOpenLongTurn(turn.id)}>
+            查看完整内容 · {unicodeLength(turn.content).toLocaleString()} 字
+          </button>
+        </div>
+      )}
       {turn.citations && turn.citations.length > 0 && (
         <div className="note-citation-row" aria-label="笔记引用">
           {turn.citations.map((citation) => (
@@ -1266,6 +1401,120 @@ function TurnBlock({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Long model output stays out of the ordinary card DOM after its preview
+ * limit. The viewer is deliberately local UI state: it neither creates a
+ * Card nor changes the context for a later model call.
+ */
+function LongTurnViewer({
+  turn,
+  index,
+  onClose,
+  onCopy,
+  copied,
+}: {
+  turn: Turn;
+  index: number;
+  onClose: () => void;
+  onCopy: () => void;
+  copied: boolean;
+}) {
+  const pages = useMemo(() => splitLongTurn(turn.content), [turn.content]);
+  const [page, setPage] = useState(0);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    setPage(0);
+  }, [turn.id]);
+
+  useEffect(() => {
+    restoreFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const frame = window.requestAnimationFrame(() => closeRef.current?.focus());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft")
+        setPage((current) => Math.max(0, current - 1));
+      if (event.key === "ArrowRight")
+        setPage((current) => Math.min(pages.length - 1, current + 1));
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", onKeyDown);
+      if (restoreFocusRef.current?.isConnected) restoreFocusRef.current.focus();
+    };
+  }, [onClose, pages.length]);
+
+  const atFirstPage = page === 0;
+  const atLastPage = page === pages.length - 1;
+  return (
+    <div className="long-turn-overlay" onClick={onClose} role="presentation">
+      <section
+        className="long-turn-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`完整回答，第 ${index} 轮`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="long-turn-head">
+          <div>
+            <b>完整回答</b>
+            <span>
+              第 {index} 轮 · 共 {unicodeLength(turn.content).toLocaleString()}{" "}
+              字
+            </span>
+          </div>
+          <button
+            className="icon-btn"
+            ref={closeRef}
+            onClick={onClose}
+            aria-label="关闭完整回答"
+          >
+            <X size={16} />
+          </button>
+        </header>
+        <div className="long-turn-body scroll-y">
+          <Markdown content={pages[page] ?? ""} />
+        </div>
+        <footer className="long-turn-foot">
+          <span aria-live="polite">
+            第 {page + 1} / {pages.length} 页 · 每页最多{" "}
+            {TURN_PAGE_LIMIT.toLocaleString()} 字
+          </span>
+          <div className="long-turn-actions">
+            <button className="btn" onClick={onCopy}>
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+              {copied ? "已复制完整内容" : "复制完整内容"}
+            </button>
+            <button
+              className="icon-btn"
+              disabled={atFirstPage}
+              onClick={() => setPage((current) => Math.max(0, current - 1))}
+              aria-label="上一页"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <button
+              className="icon-btn"
+              disabled={atLastPage}
+              onClick={() =>
+                setPage((current) => Math.min(pages.length - 1, current + 1))
+              }
+              aria-label="下一页"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        </footer>
+      </section>
     </div>
   );
 }

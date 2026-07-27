@@ -1121,14 +1121,30 @@ pub fn write_snapshot(
     Ok(())
 }
 
+/// Replaces only the ordinary workspace snapshot.  Attention observations are
+/// intentionally outside that snapshot and remain append-only until an
+/// explicit project deletion, proposal purge, import, or clear-local-data
+/// action removes them.
+pub fn replace_workspace_snapshot(
+    conn: &mut Connection,
+    workspace: &WorkspaceSnapshot,
+) -> Result<()> {
+    clear_workspace_records(conn)?;
+    write_snapshot(conn, workspace, &AttentionSnapshot::default())
+}
+
 pub fn is_empty(conn: &Connection) -> Result<bool> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))?;
     Ok(count == 0)
 }
 
-/// 清空工作区/注意力表，但保留独立的只读资料库。用于整库工作区迁移、首次导入；
-/// 资料库不是项目快照的一部分，不能因导入一个项目包而被静默抹掉。
-pub fn clear_workspace_data(conn: &mut Connection) -> Result<()> {
+/// 清空普通工作区表，但保留注意力实验和独立的只读资料库。
+///
+/// `save_workspace` 是一个全量工作区替换 API，不是「清空整个应用」：如果它顺手
+/// 清掉 append-only 的 InteractionEvent / SessionBoundary / Proposal，普通快照保存
+/// 就会悄悄抹掉注意力观察状态。需要清注意力的调用必须显式走下方
+/// `clear_workspace_data()`。
+pub fn clear_workspace_records(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     for table in [
         "turns",
@@ -1140,10 +1156,19 @@ pub fn clear_workspace_data(conn: &mut Connection) -> Result<()> {
         "projects",
         "view",
         "settings",
-        "interaction_events",
-        "session_boundaries",
-        "proposals",
     ] {
+        tx.execute(&format!("DELETE FROM {table}"), [])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// 清空工作区**及其注意力观察表**，但保留独立的只读资料库。用于整库工作区迁移、
+/// 首次导入；资料库不是项目快照的一部分，不能因导入一个项目包而被静默抹掉。
+pub fn clear_workspace_data(conn: &mut Connection) -> Result<()> {
+    clear_workspace_records(conn)?;
+    let tx = conn.transaction()?;
+    for table in ["interaction_events", "session_boundaries", "proposals"] {
         tx.execute(&format!("DELETE FROM {table}"), [])?;
     }
     tx.commit()?;
@@ -1679,6 +1704,42 @@ mod tests {
             load_attention(&conn).unwrap().proposals.len(),
             2,
             "写回一份较少的状态不得销毁另一处生成的提案"
+        );
+    }
+
+    #[test]
+    fn replacing_workspace_snapshot_preserves_append_only_attention_rows() {
+        let mut conn = seeded();
+        put_attention_state(
+            &mut conn,
+            &AttentionSnapshot {
+                events: vec![json!({
+                    "id":"event-1", "projectId":"p", "createdAt":10,
+                    "type":"title-edited"
+                })],
+                sessions: vec![json!({
+                    "id":"session-1", "projectId":"p", "startedAt":1,
+                    "lastActiveAt":10
+                })],
+                proposals: vec![json!({
+                    "id":"proposal-1", "projectId":"p", "createdAt":10,
+                    "title":"保留这条提案"
+                })],
+            },
+        )
+        .unwrap();
+
+        let mut replacement = load_workspace(&conn).unwrap().unwrap();
+        replacement.projects[0].name = "普通工作区快照更新".into();
+        replace_workspace_snapshot(&mut conn, &replacement).unwrap();
+
+        let attention = load_attention(&conn).unwrap();
+        assert_eq!(attention.events.len(), 1);
+        assert_eq!(attention.sessions.len(), 1);
+        assert_eq!(attention.proposals.len(), 1);
+        assert_eq!(
+            load_workspace(&conn).unwrap().unwrap().projects[0].name,
+            "普通工作区快照更新"
         );
     }
 

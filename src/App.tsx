@@ -74,10 +74,12 @@ export function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setDrawer(false);
-        setModal(null);
-      }
+      // Foreground layers own Escape. App-level Escape is deliberately only a
+      // drawer shortcut: it must never close a modal/popover that has already
+      // handled the key and is responsible for restoring focus to its opener.
+      if (e.key !== "Escape" || e.defaultPrevented || !drawer) return;
+      e.preventDefault();
+      setDrawer(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

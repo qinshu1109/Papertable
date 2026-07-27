@@ -129,6 +129,42 @@ async function importReadOnlyFixture(page: import("@playwright/test").Page) {
   await expect(page.getByText(/已建立只读资料库：1 篇笔记/)).toBeVisible();
 }
 
+async function seedLongAnswer(page: import("@playwright/test").Page) {
+  const content =
+    "# 一段用于长文阅读器验收的回答\n\n" +
+    "这段文字用于确认普通卡片只保留轻量预览，而完整 Markdown 会在分页阅读器中打开。\n\n".repeat(
+      180,
+    );
+  await page.evaluate(async (answer) => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("papertable-web-v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(["turns", "view"], "readwrite");
+      const viewRequest = tx.objectStore("view").get("main");
+      viewRequest.onsuccess = () => {
+        const cardId = viewRequest.result?.currentCardId;
+        if (!cardId) return tx.abort();
+        tx.objectStore("turns").put({
+          id: "e2e-long-answer",
+          cardId,
+          role: "ai",
+          content: answer,
+          createdAt: Date.now() + 1,
+          status: "complete",
+        });
+      };
+      viewRequest.onerror = () => tx.abort();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error("无法写入长回答夹具"));
+    });
+    db.close();
+  }, content);
+}
+
 test("desktop flow creates a real streamed card without an API key", async ({
   page,
 }) => {
@@ -152,6 +188,39 @@ test("desktop flow creates a real streamed card without an API key", async ({
   await expect(
     page.getByRole("navigation", { name: "关系导航器" }),
   ).toBeVisible();
+});
+
+test("an empty project pauses the composer until a fresh root card is created", async ({
+  page,
+}) => {
+  const modelRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/llm/stream"))
+      modelRequests.push(request.url());
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "新建项目" }).click();
+  // The prior card may still be in Framer Motion's short exit animation;
+  // operate on the newly current card rather than treating the transient
+  // exiting DOM as a second actionable card.
+  await page.getByTitle("卡片菜单").last().click();
+  await page.getByRole("button", { name: "删除卡片及下游" }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "项目暂时没有可用卡片" }),
+  ).toBeVisible();
+  const composer = page.getByRole("textbox", { name: "提问输入框" });
+  await expect(composer).toBeDisabled();
+  await expect(page.getByRole("button", { name: "发送" })).toBeDisabled();
+  await expect(page.getByText("在此之前不会发送模型请求")).toBeVisible();
+  expect(modelRequests).toHaveLength(0);
+
+  await page.getByRole("button", { name: "新建根卡片" }).click();
+  await expect(
+    page.getByRole("heading", { name: "未命名卡片", exact: true }),
+  ).toBeVisible();
+  await expect(composer).toBeEnabled();
+  expect(modelRequests).toHaveLength(0);
 });
 
 test("390px mobile layout has no horizontal overflow", async ({ page }) => {
@@ -303,6 +372,126 @@ test("composer grows vertically and restores a separate in-memory draft per card
   await expect(textarea).toHaveValue(firstDraft);
 });
 
+test("long answers stay lightweight in the card and open a paginated full reader", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await seedLongAnswer(page);
+  await page.reload();
+
+  const openReader = page.getByRole("button", { name: /查看完整内容/ });
+  await expect(openReader).toBeVisible();
+  await openReader.click();
+  const reader = page.getByRole("dialog", { name: /完整回答/ });
+  await expect(reader).toContainText("每页最多 4,000 字");
+  const firstPageText = await reader.locator(".long-turn-body").innerText();
+  expect(Array.from(firstPageText).length).toBeLessThanOrEqual(4_000);
+  await reader.getByRole("button", { name: "下一页" }).click();
+  await expect(reader).toContainText("第 2 /");
+  await reader.getByRole("button", { name: "复制完整内容" }).click();
+  await expect(reader.getByText("已复制完整内容")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(reader).toHaveCount(0);
+  await expect(openReader).toBeFocused();
+});
+
+test("title editing shows the Unicode limit and never saves a truncated title", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const title = page.locator(".card-title");
+  await title.dblclick();
+  const input = page.getByRole("textbox", { name: "编辑卡片标题" });
+  await input.fill("😀".repeat(81));
+  await expect(page.getByRole("alert")).toContainText("标题最多 80 个字符");
+  await input.press("Enter");
+  await expect(input).toBeVisible();
+
+  const validTitle = "😀".repeat(80);
+  await input.fill(validTitle);
+  await input.press("Enter");
+  await expect(title).toHaveText(validTitle);
+  expect(
+    await title.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+});
+
+test("compact desktop composer keeps controls and popovers inside the viewport", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 600 });
+  await page.goto("/");
+  const contextButton = page.getByRole("button", { name: /本次上下文/ });
+  await expect(contextButton).toBeVisible();
+  const layout = await page.locator(".composer-control-row").evaluate((row) => {
+    const controls = Array.from(row.querySelectorAll("button"))
+      .map((button) => button.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .map(({ left, top, right, bottom }) => ({ left, top, right, bottom }));
+    const overlaps = controls.some((first, index) =>
+      controls
+        .slice(index + 1)
+        .some(
+          (second) =>
+            first.left < second.right &&
+            first.right > second.left &&
+            first.top < second.bottom &&
+            first.bottom > second.top,
+        ),
+    );
+    const rect = row.getBoundingClientRect();
+    return {
+      overlaps,
+      inBounds: rect.left >= 0 && rect.right <= innerWidth,
+    };
+  });
+  expect(layout.overlaps).toBe(false);
+  expect(layout.inBounds).toBe(true);
+
+  await contextButton.click();
+  const panel = page.getByRole("dialog", { name: "本次上下文" });
+  await expect(panel).toBeVisible();
+  expect(
+    await panel.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return (
+        rect.left >= 0 &&
+        rect.top >= 0 &&
+        rect.right <= innerWidth &&
+        rect.bottom <= innerHeight
+      );
+    }),
+  ).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(contextButton).toBeFocused();
+
+  const settings = page.getByRole("button", { name: "设置", exact: true });
+  await settings.click();
+  await expect(page.getByRole("dialog", { name: "设置" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(settings).toBeFocused();
+});
+
+test("rapid double-clicking send starts one model run", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  const before = await workspaceCounts(page);
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("快速双击发送只能触发一次。");
+  await page.getByRole("button", { name: "发送" }).dblclick();
+  await expect
+    .poll(async () => (await workspaceCounts(page)).turns.length)
+    .toBe(before.turns.length + 2);
+  await page.waitForTimeout(650);
+  expect((await workspaceCounts(page)).turns).toHaveLength(
+    before.turns.length + 2,
+  );
+});
+
 test("390px uses a tabbed temporary-card sheet and a collapsible handle", async ({
   page,
 }) => {
@@ -408,6 +597,26 @@ test("answer-mode chip changes the next real request and child cards inherit it"
   expect(requests.at(-1)?.messages?.[0]?.content).toContain(
     "只能使用下方明确提供的上下文",
   );
+});
+
+test("sources-only root cards refuse locally instead of sending an unsupported request", async ({
+  page,
+}) => {
+  const requests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/llm/stream")) requests.push(request.url());
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "新建项目" }).click();
+  await page.getByRole("button", { name: /回答依据：通用探索/ }).click();
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("没有提供材料时，这个问题的答案是什么？");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(
+    page.getByText(/不会在“仅依据材料”模式下补充无来源结论/),
+  ).toBeVisible();
+  expect(requests).toHaveLength(0);
 });
 
 test("workspace becomes interactive only after hydration and a new project survives refresh", async ({

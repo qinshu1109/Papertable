@@ -17,6 +17,7 @@ import {
   seedIfEmpty,
 } from "./dexie";
 import { diffAttention, diffWorkspace } from "../delta";
+import { recoverInterruptedTurns } from "../context";
 import type { AttentionSnapshot, WorkspaceSnapshot } from "../delta";
 
 const snapshot = (): WorkspaceSnapshot => ({
@@ -174,6 +175,24 @@ test("a streaming save writes exactly one turn row and never rewrites whole tabl
   assert.deepEqual(upsert.references, { upserts: [] });
   assert.equal(upsert.view, null);
   assert.equal(upsert.settings, null);
+});
+
+test("cold-start streaming recovery persists an interrupted turn before it is reloaded", async () => {
+  await freshDb();
+  const before = busySnapshot();
+  await saveWorkspace(before);
+  const recovered = recoverInterruptedTurns(before.cards);
+  const after = { ...before, cards: recovered.cards };
+  await applyChanges(diffWorkspace(before, after));
+
+  const restored = await loadWorkspace();
+  const turn = restored?.cards[0]?.turns.find(
+    (candidate) => candidate.id === "t-stream",
+  );
+  assert.deepEqual(recovered.recoveredTurnIds, ["t-stream"]);
+  assert.equal(turn?.status, "interrupted");
+  assert.equal(turn?.streaming, false);
+  assert.equal(turn?.content, "已生成");
 });
 
 test("incremental saves leave untouched rows in place", async () => {

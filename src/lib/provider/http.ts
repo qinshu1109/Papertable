@@ -1,5 +1,6 @@
 import type {
   AgentExecutionMode,
+  ProviderErrorCode,
   ProviderMessage,
   ProviderStreamEvent,
   ToolCall,
@@ -11,6 +12,69 @@ export interface ProviderHealth {
   model: string;
   baseUrl: string;
   message: string;
+}
+
+/**
+ * A typed, already-sanitised provider failure.  Provider transports are never
+ * allowed to put an upstream URL, EOF detail, or server body into the UI.
+ */
+export class ProviderError extends Error {
+  constructor(
+    message: string,
+    readonly code: ProviderErrorCode,
+  ) {
+    super(message);
+    this.name = "ProviderError";
+  }
+}
+
+export function providerErrorMessage(code: ProviderErrorCode): string {
+  switch (code) {
+    case "unauthorized":
+      return "模型服务未配置或密钥无效，请在设置页检查。";
+    case "rate-limited":
+      return "模型服务暂时限流，请稍后重试。";
+    case "timeout":
+      return "请求超时，请重试。";
+    case "disconnected":
+      return "连接意外中断，请重试。";
+    case "empty-response":
+      return "模型没有返回文本，请重试。";
+    case "invalid-response":
+      return "模型服务返回了无法处理的响应，请重试。";
+    case "service-unavailable":
+      return "模型服务暂时不可用，请稍后重试。";
+    case "upstream":
+      return "模型请求未能完成，请重试。";
+  }
+}
+
+export function providerErrorCodeForStatus(status: number): ProviderErrorCode {
+  if (status === 401 || status === 403) return "unauthorized";
+  if (status === 429) return "rate-limited";
+  if (status === 408 || status === 504) return "timeout";
+  if (status >= 500) return "service-unavailable";
+  return "invalid-response";
+}
+
+function providerErrorFromStatus(status: number): ProviderError {
+  const code = providerErrorCodeForStatus(status);
+  return new ProviderError(providerErrorMessage(code), code);
+}
+
+async function readJsonSafely(
+  response: Response,
+): Promise<Record<string, unknown> | null> {
+  const text = await response.text().catch(() => "");
+  if (!text.trim()) return null;
+  try {
+    const value = JSON.parse(text) as unknown;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 从本机服务读取的安全配置；永远不包含 API 密钥本身。 */
@@ -42,8 +106,8 @@ export interface ProviderCapabilityResult {
   error?: string;
 }
 
-/** 密钥实际存在哪。web 端只有本机服务的 .env.local 这一种。 */
-export type KeySource = "keychain" | "file" | "none";
+/** 密钥实际存在哪。Web 端为本机服务的 .env.local；桌面端为 0600 文件。 */
+export type KeySource = "file" | "none";
 
 export async function getKeySource(): Promise<KeySource> {
   const config = await getProviderConfig();
@@ -57,6 +121,8 @@ export interface BuildInfo {
   builtAt: string;
   exe: string;
   installed: boolean;
+  identifier: string;
+  isolated: boolean;
 }
 
 export function getBuildInfo(): Promise<BuildInfo> {
@@ -66,21 +132,62 @@ export function getBuildInfo(): Promise<BuildInfo> {
     builtAt: "-",
     exe: "浏览器",
     installed: true,
+    identifier: "web",
+    isolated: true,
   });
 }
 
 export async function getProviderHealth(): Promise<ProviderHealth> {
-  const response = await fetch("/api/health", { cache: "no-store" });
-  const body = (await response.json()) as ProviderHealth;
-  if (!response.ok) throw new Error(body.message || "无法检查模型服务。");
-  return body;
+  let response: Response;
+  try {
+    response = await fetch("/api/health", { cache: "no-store" });
+  } catch {
+    throw new ProviderError(
+      providerErrorMessage("disconnected"),
+      "disconnected",
+    );
+  }
+  const body = await readJsonSafely(response);
+  if (!response.ok) throw providerErrorFromStatus(response.status);
+  if (
+    !body ||
+    typeof body.configured !== "boolean" ||
+    typeof body.model !== "string" ||
+    typeof body.baseUrl !== "string" ||
+    typeof body.message !== "string"
+  ) {
+    throw new ProviderError(
+      providerErrorMessage("invalid-response"),
+      "invalid-response",
+    );
+  }
+  return body as unknown as ProviderHealth;
 }
 
 export async function getProviderConfig(): Promise<ProviderConfig> {
-  const response = await fetch("/api/config", { cache: "no-store" });
-  const body = (await response.json()) as ProviderConfig & { message?: string };
-  if (!response.ok) throw new Error(body.message || "无法读取模型设置。");
-  return body;
+  let response: Response;
+  try {
+    response = await fetch("/api/config", { cache: "no-store" });
+  } catch {
+    throw new ProviderError(
+      providerErrorMessage("disconnected"),
+      "disconnected",
+    );
+  }
+  const body = await readJsonSafely(response);
+  if (!response.ok) throw providerErrorFromStatus(response.status);
+  if (
+    !body ||
+    typeof body.baseUrl !== "string" ||
+    typeof body.model !== "string" ||
+    typeof body.hasApiKey !== "boolean"
+  ) {
+    throw new ProviderError(
+      providerErrorMessage("invalid-response"),
+      "invalid-response",
+    );
+  }
+  return body as unknown as ProviderConfig;
 }
 
 /**
@@ -93,19 +200,19 @@ export async function probeProviderCapabilities(): Promise<ProviderCapabilityRes
     headers: { "content-type": "application/json" },
     credentials: "same-origin",
   });
-  const body = (await response.json().catch(() => ({}))) as Partial<
+  const body = (await readJsonSafely(response)) as Partial<
     ProviderCapabilityResult & { message: string }
-  >;
-  if (!response.ok) throw new Error(body.message || "模型能力探测失败。");
+  > | null;
+  if (!response.ok) throw providerErrorFromStatus(response.status);
   return {
-    mode: body.mode === "native-tools" ? "native-tools" : "two-stage",
-    streamingToolCalls: Boolean(body.streamingToolCalls),
-    toolResultAccepted: Boolean(body.toolResultAccepted),
+    mode: body?.mode === "native-tools" ? "native-tools" : "two-stage",
+    streamingToolCalls: Boolean(body?.streamingToolCalls),
+    toolResultAccepted: Boolean(body?.toolResultAccepted),
     testedAt:
-      typeof body.testedAt === "string"
+      typeof body?.testedAt === "string"
         ? body.testedAt
         : new Date().toISOString(),
-    ...(typeof body.error === "string" ? { error: body.error } : {}),
+    ...(typeof body?.error === "string" ? { error: body.error } : {}),
   };
 }
 
@@ -121,13 +228,20 @@ export async function saveProviderConfig(input: {
     credentials: "same-origin",
     body: JSON.stringify(input),
   });
-  const body = (await response
-    .json()
-    .catch(() => ({ message: "模型设置服务返回异常。" }))) as ProviderConfig & {
-    message?: string;
-  };
-  if (!response.ok) throw new Error(body.message || "无法保存模型设置。");
-  return body;
+  const body = await readJsonSafely(response);
+  if (!response.ok) throw providerErrorFromStatus(response.status);
+  if (
+    !body ||
+    typeof body.baseUrl !== "string" ||
+    typeof body.model !== "string" ||
+    typeof body.hasApiKey !== "boolean"
+  ) {
+    throw new ProviderError(
+      providerErrorMessage("invalid-response"),
+      "invalid-response",
+    );
+  }
+  return body as unknown as ProviderConfig;
 }
 
 export async function* streamModel(input: {
@@ -145,29 +259,36 @@ export async function* streamModel(input: {
         function: { name: ProviderTool["function"]["name"] };
       };
 }): AsyncGenerator<ProviderStreamEvent> {
-  const response = await fetch("/api/llm/stream", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      task: input.task,
-      messages: input.messages,
-      temperature: input.temperature,
-      ...(input.tools?.length ? { tools: input.tools } : {}),
-      ...(input.toolChoice !== undefined
-        ? { toolChoice: input.toolChoice }
-        : {}),
-    }),
-    signal: input.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/llm/stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        task: input.task,
+        messages: input.messages,
+        temperature: input.temperature,
+        ...(input.tools?.length ? { tools: input.tools } : {}),
+        ...(input.toolChoice !== undefined
+          ? { toolChoice: input.toolChoice }
+          : {}),
+      }),
+      signal: input.signal,
+    });
+  } catch (error) {
+    if (input.signal.aborted) throw error;
+    throw new ProviderError(
+      providerErrorMessage("disconnected"),
+      "disconnected",
+    );
+  }
   if (!response.ok || !response.body) {
-    const body = await response
-      .json()
-      .catch(() => ({ message: "无法发起模型请求。" }));
-    throw new Error(body.message || "无法发起模型请求。");
+    throw providerErrorFromStatus(response.status || 502);
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let pending = "";
+  let completed = false;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -179,9 +300,10 @@ export async function* streamModel(input: {
         const type = event.match(/^event:\s*(.+)$/m)?.[1]?.trim();
         const raw = event.match(/^data:\s*(.+)$/m)?.[1];
         if (!type || !raw) continue;
-        const payload = JSON.parse(raw) as {
+        let payload: {
           text?: string;
           message?: string;
+          code?: ProviderErrorCode;
           channel?: OutputChannel;
           index?: number;
           id?: string;
@@ -189,6 +311,14 @@ export async function* streamModel(input: {
           arguments?: string;
           finishReason?: string;
         };
+        try {
+          payload = JSON.parse(raw) as typeof payload;
+        } catch {
+          throw new ProviderError(
+            providerErrorMessage("invalid-response"),
+            "invalid-response",
+          );
+        }
         if (type === "token" && payload.text)
           yield {
             type: "token" as const,
@@ -207,9 +337,12 @@ export async function* streamModel(input: {
               : {}),
           };
         }
-        if (type === "error")
-          throw new Error(payload.message || "模型生成失败。");
+        if (type === "error") {
+          const code = payload.code ?? "upstream";
+          throw new ProviderError(providerErrorMessage(code), code);
+        }
         if (type === "done") {
+          completed = true;
           yield {
             type: "done",
             ...(typeof payload.finishReason === "string"
@@ -219,6 +352,12 @@ export async function* streamModel(input: {
           return;
         }
       }
+    }
+    if (!completed && !input.signal.aborted) {
+      throw new ProviderError(
+        providerErrorMessage("disconnected"),
+        "disconnected",
+      );
     }
   } finally {
     reader.cancel().catch(() => undefined);
@@ -239,23 +378,34 @@ export async function completeModel(input: {
         function: { name: ProviderTool["function"]["name"] };
       };
 }): Promise<{ content: string; toolCalls: ToolCall[] }> {
-  const response = await fetch("/api/llm/generate", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  const body = (await response
-    .json()
-    .catch(() => ({ message: "模型服务返回异常。" }))) as {
+  let response: Response;
+  try {
+    response = await fetch("/api/llm/generate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  } catch {
+    throw new ProviderError(
+      providerErrorMessage("disconnected"),
+      "disconnected",
+    );
+  }
+  const body = (await readJsonSafely(response)) as {
     content?: string;
-    message?: string;
     toolCalls?: ToolCall[];
-  };
+  } | null;
   if (
     !response.ok ||
+    !body ||
     (typeof body.content !== "string" && !body.toolCalls?.length)
   )
-    throw new Error(body.message || "模型没有返回内容。");
+    throw !response.ok
+      ? providerErrorFromStatus(response.status)
+      : new ProviderError(
+          providerErrorMessage("empty-response"),
+          "empty-response",
+        );
   return {
     content: body.content ?? "",
     toolCalls: Array.isArray(body.toolCalls)

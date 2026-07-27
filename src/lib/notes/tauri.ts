@@ -4,10 +4,13 @@ import type {
   BoundNoteRead,
   BoundNoteSearch,
   IndexReport,
+  NoteCitationLookup,
+  NoteCitationResolution,
   NoteChunk,
   NoteHit,
   NoteImportInput,
   NoteLibrary,
+  ResolvedNoteScope,
 } from "./types";
 
 /**
@@ -58,4 +61,25 @@ export function readDesktopNotes(
   chunkIds: string[],
 ): Promise<NoteChunk[]> {
   return invoke<NoteChunk[]>("note_library_read", { projectId, chunkIds });
+}
+
+/** Safe public scope status: includes IDs and reasons, never a Vault root path. */
+export function desktopProjectNoteScope(
+  projectId: string,
+): Promise<ResolvedNoteScope> {
+  return invoke<ResolvedNoteScope>("note_library_project_scope", { projectId });
+}
+
+/**
+ * Historical citations resolve through documentId + relativePath, not only an
+ * old chunk id. That is what makes “source updated” distinct from “missing”.
+ */
+export function resolveDesktopNoteCitation(
+  projectId: string,
+  citation: NoteCitationLookup,
+): Promise<NoteCitationResolution> {
+  return invoke<NoteCitationResolution>("note_library_resolve_citation", {
+    projectId,
+    citation,
+  });
 }

@@ -59,6 +59,20 @@ const IMPORT_FORMATS = [
 
 type ImportSelection = ImportInput["format"] | "note-library";
 
+function noteLibraryAvailabilityLabel(
+  availability: "ready" | "indexing" | "missing" | "error" | undefined,
+) {
+  if (!availability || availability === "ready") return "当前可用";
+  if (availability === "indexing") return "正在索引";
+  return "当前不可用";
+}
+
+function noteLibraryIsUsable(
+  availability: "ready" | "indexing" | "missing" | "error" | undefined,
+) {
+  return !availability || availability === "ready";
+}
+
 const EXPORT_FORMATS = [
   {
     id: "md-dir",
@@ -94,18 +108,29 @@ function Shell({
   footer: React.ReactNode;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    dialogRef.current?.querySelector<HTMLElement>("button, input")?.focus();
+    const frame = window.requestAnimationFrame(() => {
+      dialogRef.current?.querySelector<HTMLElement>("button, input")?.focus();
+    });
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      onCloseRef.current();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      window.cancelAnimationFrame(frame);
       window.removeEventListener("keydown", onKeyDown);
-      previous?.focus();
+      if (previous?.isConnected) previous.focus();
     };
-  }, [onClose]);
+  }, []);
   return (
     <div className="overlay" onClick={onClose} role="presentation">
       <div
@@ -361,6 +386,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [apiKey, setApiKey] = useState("");
   const [keySource, setKeySource] = useState<KeySource>("none");
   const [build, setBuild] = useState<BuildInfo | null>(null);
+  const boundLibraries = noteLibraries.filter((library) =>
+    boundNoteLibraryIds.includes(library.id),
+  );
+  const usableBoundLibraries = boundLibraries.filter((library) =>
+    noteLibraryIsUsable(library.availability),
+  );
   useEffect(() => {
     void getBuildInfo()
       .then(setBuild)
@@ -489,17 +520,18 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             aria-label="API 密钥"
           />
         </label>
-        {/*
-          如实展示密钥到底存在哪。钥匙串取不到时会回落到 0600 文件——把回落显示成
-          「已进钥匙串」，会让人以为磁盘上没有明文密钥。
-        */}
+        {/* 密钥固定落在 owner-only 文件；桌面端不再碰钥匙串，避免每次启动索要密码。 */}
         {keySource !== "none" && (
           <p className="note-line" style={{ marginTop: 6 }}>
-            {keySource === "keychain"
-              ? "密钥保存在系统钥匙串。"
-              : vaultAvailable
-                ? "密钥保存在应用数据目录的 0600 文件里（系统钥匙串不可用时的回落）。"
-                : "密钥保存在本机服务的 .env.local（0600，已被 Git 忽略）。"}
+            {vaultAvailable
+              ? "密钥保存在应用数据目录的 0600 文件里；桌面版不会访问系统钥匙串。"
+              : "密钥保存在本机服务的 .env.local（0600，已被 Git 忽略）。"}
+          </p>
+        )}
+        {vaultAvailable && (
+          <p className="note-line" style={{ marginTop: 6 }}>
+            若你刚从旧版升级，请重新粘贴并保存一次 API
+            密钥；旧版留在钥匙串中的条目不会再被读取，因此以后打开应用不会弹系统密码框。
           </p>
         )}
         <button
@@ -534,8 +566,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           只读资料库
         </div>
         <p className="note-line" style={{ marginTop: 0 }}>
-          当前项目只能检索你在这里明确绑定的资料库。模型不能看到文件路径、资料库范围，也没有写入权限。
-          当前协议：{agentMode === "native-tools" ? "原生工具" : "双阶段检索"}。
+          当前项目只能检索你在这里明确绑定、且当前可用的资料库。不可用的资料库不会进入本轮检索范围；模型看不到真实
+          Vault 根目录，也没有写入权限。当前协议：
+          {agentMode === "native-tools" ? "原生工具" : "双阶段检索"}。
         </p>
         {noteLibraries.length === 0 ? (
           <p className="note-line">
@@ -544,6 +577,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         ) : (
           noteLibraries.map((library) => {
             const bound = boundNoteLibraryIds.includes(library.id);
+            const usable = noteLibraryIsUsable(library.availability);
+            const availabilityLabel = noteLibraryAvailabilityLabel(
+              library.availability,
+            );
             return (
               <div
                 className="fmt-option"
@@ -560,6 +597,19 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                       ? "桌面 Vault · 只读索引"
                       : "网页导入 · 只读副本"}
                   </span>
+                  <span className="note-library-states">
+                    <span className={bound ? "bound" : "unbound"}>
+                      {bound ? "当前项目已绑定" : "当前项目未绑定"}
+                    </span>
+                    <span className={usable ? "usable" : "unavailable"}>
+                      {availabilityLabel}
+                    </span>
+                  </span>
+                  {!usable && library.availabilityReason && (
+                    <span className="fmt-desc note-library-reason">
+                      {library.availabilityReason}
+                    </span>
+                  )}
                 </span>
                 <button
                   className={`btn${bound ? " primary" : ""}`}
@@ -575,6 +625,16 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 >
                   {bound ? "当前项目已绑定" : "绑定到当前项目"}
                 </button>
+                {library.kind === "vault" && !usable && (
+                  <button
+                    className="btn"
+                    style={{ padding: "5px 8px", fontSize: 11 }}
+                    onClick={() => void chooseVaultPath()}
+                    title="选择资料库的新位置并重新建立只读索引"
+                  >
+                    重新定位目录
+                  </button>
+                )}
                 <button
                   className="icon-btn"
                   onClick={() => void removeNoteLibrary(library.id)}
@@ -589,8 +649,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         )}
         {activeProjectId && noteLibraries.length > 0 && (
           <p className="note-line">
-            当前已绑定 {boundNoteLibraryIds.length} / {noteLibraries.length}{" "}
-            个资料库。
+            当前项目已绑定 {boundLibraries.length} / {noteLibraries.length}{" "}
+            个资料库；其中 {usableBoundLibraries.length} 个当前可用
+            {boundLibraries.length > usableBoundLibraries.length
+              ? `，${boundLibraries.length - usableBoundLibraries.length} 个暂不可检索`
+              : ""}
+            。
           </p>
         )}
         <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
@@ -699,10 +763,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           </>
         )}
 
-        {/*
-          构建标识。三份 bundle 共用 bundle id 和版本号、共用同一个数据库，
-          界面上曾经无从分辨打开的是哪一份——运行了三小时前的旧代码而毫无察觉。
-        */}
+        {/* 构建标识。常规构建与明确隔离的 QA 构建必须如实区分数据范围。 */}
         {build && (
           <>
             <div
@@ -711,14 +772,20 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             >
               这一份构建
             </div>
-            {!build.installed && (
+            {!build.installed && !build.isolated && (
               <p
                 className="note-line"
                 style={{ marginTop: 0, color: "var(--danger)" }}
               >
-                你运行的**不是** /Applications
+                你运行的<strong>不是</strong> /Applications
                 里正式安装的那一份，而是构建产物。
                 它与正式版共用同一个数据库，改动看起来会像没生效。
+              </p>
+            )}
+            {!build.installed && build.isolated && (
+              <p className="note-line" style={{ marginTop: 0 }}>
+                这是隔离构建（{build.identifier}），使用独立的本地数据目录；
+                不会读取或修改正式版的数据。
               </p>
             )}
             <p className="note-line" style={{ marginTop: 0 }}>

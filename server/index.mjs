@@ -7,6 +7,7 @@ import {
   extractMessage,
   extractToolCalls,
   friendlyProviderError,
+  providerErrorMessage,
   relayOpenAiStream,
   sseEvent,
 } from "./cozai.mjs";
@@ -599,15 +600,23 @@ const server = http.createServer(async (req, res) => {
         configured: false,
         model: providerConfig.model,
         baseUrl: providerConfig.baseUrl,
-        message: "未检测到 COZAI_API_KEY",
+        message: "尚未配置模型密钥，请在设置页填写。",
       });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8_000);
     try {
-      const response = await fetch(`${providerConfig.baseUrl}/models`, {
-        headers: { authorization: `Bearer ${providerConfig.apiKey}` },
-        signal: controller.signal,
-      });
+      // Some OpenAI-compatible gateways do not expose /models even though
+      // chat completions work.  Probe the exact configured model instead so
+      // the settings page never reports a false negative for a usable route.
+      const response = await providerFetch(
+        {
+          task: "chat",
+          messages: [{ role: "user", content: "请只回复 ok。" }],
+          temperature: 0,
+        },
+        false,
+        controller.signal,
+      );
       return json(res, response.ok ? 200 : 502, {
         configured: response.ok,
         model: providerConfig.model,
@@ -617,11 +626,14 @@ const server = http.createServer(async (req, res) => {
           : friendlyProviderError(response.status),
       });
     } catch {
+      const message = controller.signal.aborted
+        ? providerErrorMessage("timeout")
+        : providerErrorMessage("disconnected");
       return json(res, 502, {
         configured: false,
         model: providerConfig.model,
         baseUrl: providerConfig.baseUrl,
-        message: "无法连接模型服务",
+        message,
       });
     } finally {
       clearTimeout(timeout);
@@ -705,7 +717,11 @@ const server = http.createServer(async (req, res) => {
     res.on("close", () => {
       if (!res.writableEnded) controller.abort();
     });
-    const timeout = setTimeout(() => controller.abort(), 120_000);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 120_000);
     try {
       if (fakeModel) {
         await emitFakeStream({
@@ -716,9 +732,8 @@ const server = http.createServer(async (req, res) => {
       } else if (!providerConfig.apiKey) {
         res.write(
           sseEvent("error", {
-            message:
-              "未配置 COZAI_API_KEY，请在 .env.local 中填写轮换后的密钥。",
-            status: 401,
+            message: providerErrorMessage("unauthorized"),
+            code: "unauthorized",
           }),
         );
         res.write(sseEvent("done", { stopped: false }));
@@ -728,14 +743,16 @@ const server = http.createServer(async (req, res) => {
           upstream,
           write: (chunk) => res.write(chunk),
           signal: controller.signal,
+          timeoutCode: timedOut ? "timeout" : undefined,
         });
       }
-    } catch (error) {
-      const message =
-        error?.name === "AbortError"
-          ? "模型请求超时或已停止。"
-          : "无法连接模型服务，请检查网络和配置。";
-      res.write(sseEvent("error", { message }));
+    } catch {
+      const code = timedOut ? "timeout" : "disconnected";
+      if (!controller.signal.aborted || timedOut) {
+        res.write(
+          sseEvent("error", { message: providerErrorMessage(code), code }),
+        );
+      }
       res.write(sseEvent("done", { stopped: controller.signal.aborted }));
     } finally {
       clearTimeout(timeout);
@@ -762,7 +779,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (!providerConfig.apiKey)
       return json(res, 401, {
-        message: "未配置 COZAI_API_KEY，请在 .env.local 中填写轮换后的密钥。",
+        message: providerErrorMessage("unauthorized"),
+        code: "unauthorized",
       });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90_000);
@@ -781,11 +799,10 @@ const server = http.createServer(async (req, res) => {
         ...(toolCalls.length ? { toolCalls } : {}),
       });
     } catch (error) {
-      return json(res, error?.name === "AbortError" ? 504 : 502, {
-        message:
-          error?.name === "AbortError"
-            ? "模型请求超时。"
-            : "无法连接模型服务。",
+      const code = error?.name === "AbortError" ? "timeout" : "disconnected";
+      return json(res, code === "timeout" ? 504 : 502, {
+        message: providerErrorMessage(code),
+        code,
       });
     } finally {
       clearTimeout(timeout);

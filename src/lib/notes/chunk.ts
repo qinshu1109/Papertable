@@ -10,6 +10,8 @@ import type {
  */
 export const MAX_NOTE_CHUNK_CHARS = 800;
 export const NOTE_CHUNK_OVERLAP_CHARS = 80;
+/** Must stay aligned with `src-tauri/src/notes.rs`. */
+export const MAX_NOTE_DOCUMENT_BYTES = 20 * 1024 * 1024;
 
 interface SourceRange {
   start: number;

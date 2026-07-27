@@ -6,6 +6,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AgentExecutionMode,
+  ProviderErrorCode,
   ProviderMessage,
   ProviderStreamEvent,
   ToolCall,
@@ -20,6 +21,7 @@ import type {
   ProviderHealth,
   ProviderTool,
 } from "./http";
+import { ProviderError, providerErrorMessage } from "./http";
 
 export function getProviderHealth(): Promise<ProviderHealth> {
   return invoke<ProviderHealth>("provider_health");
@@ -81,7 +83,7 @@ type WireEvent =
       name?: string;
       arguments?: string;
     }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; code?: ProviderErrorCode }
   | { type: "done"; stopped: boolean; finishReason?: string };
 
 /** Tauri Channel 回调桥接成与 Web 完全一样的异步事件流。 */
@@ -136,7 +138,14 @@ export async function* streamModel(input: {
   }).catch((cause: unknown) =>
     push({
       type: "error",
-      message: cause instanceof Error ? cause.message : String(cause),
+      // Tauri invoke errors may contain internal IPC diagnostics. The message
+      // is intentionally not surfaced; all normal provider failures arrive as
+      // typed StreamEvent::Error from Rust.
+      message:
+        cause instanceof Error && input.signal.aborted
+          ? cause.message
+          : providerErrorMessage("service-unavailable"),
+      code: "service-unavailable",
     }),
   );
 
@@ -147,7 +156,10 @@ export async function* streamModel(input: {
   try {
     while (!finished) {
       const event = await next();
-      if (event.type === "error") throw new Error(event.message);
+      if (event.type === "error") {
+        const code = event.code ?? "upstream";
+        throw new ProviderError(providerErrorMessage(code), code);
+      }
       if (event.type === "done") {
         finished = true;
         yield {

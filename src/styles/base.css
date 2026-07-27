@@ -434,6 +434,43 @@ textarea {
 .stage.has-temp-dock {
   padding-bottom: 48px;
 }
+.stage-empty {
+  align-items: center;
+  padding-bottom: 24px;
+}
+.empty-card-state {
+  width: min(460px, 100%);
+  padding: 30px 32px;
+  border: 1px dashed #cfc5b9;
+  border-radius: var(--r-card);
+  background: color-mix(in srgb, var(--card) 82%, var(--raised));
+  box-shadow: 0 8px 24px -20px rgba(52, 43, 38, 0.28);
+  text-align: center;
+}
+.empty-card-state-kicker {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 9px;
+  border-radius: var(--r-chip);
+  background: var(--sunken);
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+.empty-card-state h2 {
+  margin: 12px 0 7px;
+  color: var(--ink);
+  font-size: 19px;
+  line-height: 1.35;
+}
+.empty-card-state p {
+  max-width: 350px;
+  margin: 0 auto 18px;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.75;
+}
 
 .stack {
   position: relative;
@@ -505,15 +542,22 @@ textarea {
     rgba(255, 255, 255, 0)
   );
 }
+.card-head > div:first-child {
+  min-width: 0;
+}
 .card-title {
   font-size: 19px;
   font-weight: 640;
   letter-spacing: -0.005em;
   line-height: 1.35;
   margin: 0 0 7px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .card-title-input {
-  width: min(100%, 520px);
+  width: 100%;
+  max-width: 520px;
+  min-width: 0;
   margin: -3px 0 4px;
   padding: 3px 7px;
   border: 1px solid var(--accent);
@@ -524,6 +568,15 @@ textarea {
   font-weight: 640;
   line-height: 1.35;
   color: var(--ink);
+}
+.card-title-count {
+  margin: -1px 0 5px 2px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.card-title-count.invalid {
+  color: var(--danger);
 }
 .card-meta {
   display: flex;
@@ -633,6 +686,23 @@ textarea {
   padding: 18px 30px 8px;
   max-width: 720px;
   margin: 0 auto;
+}
+.long-turn-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0 4px;
+  padding: 9px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 11px;
+  background: var(--raised);
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.long-turn-preview .chip-btn {
+  flex-shrink: 0;
 }
 
 .turn {
@@ -1133,6 +1203,26 @@ textarea {
   font-size: 13px;
   line-height: 1.7;
 }
+.note-source-section + .note-source-section {
+  margin-top: 14px;
+}
+.note-source-section h4 {
+  margin: 8px 0 7px;
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 650;
+}
+.note-source-section.frozen {
+  padding: 0 10px 8px;
+  border-left: 2px solid #d7cabc;
+  background: color-mix(in srgb, var(--raised) 62%, transparent);
+}
+.note-source-status {
+  margin: 9px 0 8px;
+  color: #9a6340;
+  font-size: 11px;
+  line-height: 1.55;
+}
 .dot-pulse {
   width: 6px;
   height: 6px;
@@ -1498,6 +1588,7 @@ textarea {
   width: 100%;
   max-width: 880px;
   position: relative;
+  container-type: inline-size;
 }
 
 .ref-strip {
@@ -1596,6 +1687,21 @@ textarea {
 .composer textarea::placeholder {
   color: var(--ink-3);
 }
+.composer textarea:disabled {
+  cursor: not-allowed;
+  color: var(--ink-3);
+}
+.composer .chip-btn:disabled,
+.composer .icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+.composer-empty-notice {
+  margin: 7px 6px 0;
+  color: var(--ink-3);
+  font-size: 11px;
+  line-height: 1.5;
+}
 .composer-control-row {
   min-height: 40px;
   padding-top: 7px;
@@ -1614,6 +1720,7 @@ textarea {
 }
 .composer-controls-left {
   flex: 1;
+  overflow: visible;
 }
 .composer-controls-right {
   flex-shrink: 0;
@@ -1627,6 +1734,70 @@ textarea {
 }
 .composer-menu {
   right: auto;
+  bottom: calc(100% + 8px) !important;
+  min-width: min(250px, calc(100vw - 24px));
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: min(
+    52dvh,
+    calc(100dvh - var(--composer-live-height, 96px) - 20px)
+  );
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+.composer-more-menu {
+  right: 0;
+  left: auto;
+}
+
+/* The desktop shell can leave only ~400px between the project rail and graph.
+   Adapt to the actual composer width, not the window width, so controls never
+   overlap at compact desktop sizes such as 900×600. */
+@container (max-width: 600px) {
+  .desktop-model,
+  .desktop-context-label,
+  .desktop-answer-label,
+  .answer-mode-direct,
+  .model-chevron,
+  .mobile-model {
+    display: none;
+  }
+  .mobile-context-label {
+    display: inline;
+  }
+  .composer-more {
+    display: block;
+  }
+  .composer-box .model-chip {
+    width: 32px;
+    justify-content: center;
+    padding: 0;
+  }
+  .background-generation-chip {
+    width: 32px;
+    justify-content: center;
+    padding: 0;
+  }
+  .desktop-background-label {
+    display: none;
+  }
+  .mobile-background-label {
+    display: inline;
+  }
+  .composer-control-row,
+  .composer-controls-left,
+  .composer-controls-right {
+    gap: 4px;
+  }
+}
+@container (max-width: 460px) {
+  .mobile-context-label {
+    display: none;
+  }
+  .composer-control-row,
+  .composer-controls-left,
+  .composer-controls-right {
+    gap: 3px;
+  }
 }
 
 .chip-btn {
@@ -1723,8 +1894,14 @@ textarea {
   position: absolute;
   bottom: calc(100% + 10px);
   left: 0;
-  width: 400px;
-  max-width: 100%;
+  width: min(400px, 100cqi);
+  max-width: calc(100vw - 24px);
+  max-height: min(
+    62dvh,
+    calc(100dvh - var(--composer-live-height, 96px) - 24px)
+  );
+  overflow-y: auto;
+  box-sizing: border-box;
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: var(--r-pop);
@@ -2192,6 +2369,75 @@ textarea {
   border-top: 1px solid var(--line-soft);
   background: var(--raised);
 }
+
+/* Full-length model output is paged in a reader layer instead of mounting a
+   huge Markdown tree inside the card's normal scroll container. */
+.long-turn-overlay {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(52, 43, 38, 0.24);
+  backdrop-filter: blur(2px);
+}
+.long-turn-dialog {
+  width: min(780px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: var(--sh-pop);
+}
+.long-turn-head,
+.long-turn-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.long-turn-head {
+  padding: 13px 14px 11px 18px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.long-turn-head > div {
+  min-width: 0;
+}
+.long-turn-head b,
+.long-turn-head span {
+  display: block;
+}
+.long-turn-head b {
+  font-size: 14px;
+}
+.long-turn-head span,
+.long-turn-foot > span {
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.long-turn-body {
+  min-height: 0;
+  padding: 16px 22px;
+  overflow-y: auto;
+}
+.long-turn-foot {
+  padding: 10px 14px 10px 18px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--raised);
+}
+.long-turn-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
 .fmt-option {
   display: flex;
   gap: 11px;
@@ -2237,6 +2483,42 @@ textarea {
   font-size: 11.5px;
   color: var(--ink-2);
   line-height: 1.6;
+}
+.note-library-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
+}
+.note-library-states > span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 19px;
+  padding: 0 6px;
+  border-radius: var(--r-chip);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+.note-library-states .bound {
+  color: #3f5c47;
+  background: var(--ctx-soft);
+}
+.note-library-states .unbound {
+  color: var(--ink-3);
+  background: var(--sunken);
+}
+.note-library-states .usable {
+  color: #4a6b53;
+  background: color-mix(in srgb, var(--ctx-soft) 72%, var(--card));
+}
+.note-library-states .unavailable {
+  color: #9a6340;
+  background: #f7ecdf;
+}
+.note-library-reason {
+  margin-top: 4px;
+  color: #9a6340;
 }
 .note-line {
   font-size: 11.5px;
@@ -2789,6 +3071,10 @@ textarea {
   }
   .ctx-panel {
     width: calc(100vw - 24px);
+    max-height: calc(
+      100dvh - var(--composer-live-height, 104px) -
+        env(safe-area-inset-bottom) - 20px
+    );
     left: 0;
   }
   .note-source-preview {
@@ -2805,6 +3091,38 @@ textarea {
   .composer-menu {
     right: 0 !important;
     left: auto !important;
+    max-width: calc(100vw - 24px);
+    max-height: calc(
+      100dvh - var(--composer-live-height, 104px) -
+        env(safe-area-inset-bottom) - 20px
+    );
+  }
+  .long-turn-overlay {
+    padding: 10px;
+  }
+  .long-turn-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100dvh - 20px);
+    border-radius: 16px;
+  }
+  .long-turn-head {
+    padding: 11px 10px 9px 14px;
+  }
+  .long-turn-body {
+    padding: 13px 15px;
+  }
+  .long-turn-foot {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 9px 10px 10px 14px;
+  }
+  .long-turn-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .long-turn-preview {
+    align-items: flex-start;
+    flex-direction: column;
   }
   .turn-toolbar {
     opacity: 1;
