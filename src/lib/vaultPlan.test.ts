@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { planProjectSync, syncableCards, vaultRelativeDir } from "./vaultPlan";
+import {
+  DEFAULT_VAULT_SUBTREE,
+  planProjectSync,
+  syncableCards,
+  vaultRelativeDir,
+} from "./vaultPlan";
 import type { Card, CardEdge, Project, TurnStatus } from "../types";
 
 const project: Project = {
@@ -161,7 +166,10 @@ test("the canvas references vault-relative paths that match the notes written", 
   const written = new Set(
     notes
       .filter((n) => n.relative[1].endsWith(".md"))
-      .map((n) => `${vaultRelativeDir(project)}/${n.relative[1]}`),
+      .map(
+        (n) =>
+          `${vaultRelativeDir(project, DEFAULT_VAULT_SUBTREE)}/${n.relative[1]}`,
+      ),
   );
   for (const node of canvas.nodes)
     assert.ok(
@@ -227,4 +235,20 @@ test("frontmatter keys stay contiguous under alphabetical sorting", () => {
     keys.every((key) => key.startsWith("papertable_")),
     "统一前缀，Linter 的 yaml-key-sort 重排后才会稳定且连续",
   );
+});
+
+test("a custom subtree flows into the canvas paths", () => {
+  const notes = planProjectSync({
+    project,
+    cards: [card({ id: "c1", title: "卡片" })],
+    edges: [],
+    syncedAt: 1,
+    subtree: "探索/Papertable",
+  });
+  const canvas = JSON.parse(
+    notes.find((n) => n.relative[1] === "_关系.canvas")!.content,
+  ) as { nodes: { file: string }[] };
+  assert.ok(canvas.nodes[0].file.startsWith("探索/Papertable/"));
+  // relative 是**相对容纳根**的，不含子树前缀——前缀只属于 canvas 的 vault 相对路径。
+  assert.deepEqual(notes[0].relative, ["量子计算机与极低温", "卡片.md"]);
 });

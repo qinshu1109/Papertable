@@ -14,15 +14,21 @@ import {
   safeName,
 } from "./vaultNote";
 
-/** Papertable 在 vault 里拥有的唯一子树，必须与 Rust 侧的 `VAULT_SUBTREE` 一致。 */
-export const VAULT_SUBTREE = "80_AI暂存/Papertable";
+/**
+ * 默认子树。**必须与 Rust 侧的 `DEFAULT_SUBTREE` 一致**。
+ *
+ * 两处各写一遍是隐患：改一处不改另一处，canvas 里的 `file` 路径就会指向 Rust 实际
+ * 没写的位置。所以这个值只在**生成 canvas 的相对路径**时使用，而真正决定写到哪里的
+ * 始终是 Rust 侧那一个断言——前端算错了，那边会直接拒绝。
+ */
+export const DEFAULT_VAULT_SUBTREE = "80_AI暂存/Papertable";
 
 export function projectDir(project: Project): string {
   return safeName(project.name);
 }
 
-export function vaultRelativeDir(project: Project): string {
-  return `${VAULT_SUBTREE}/${projectDir(project)}`;
+export function vaultRelativeDir(project: Project, subtree: string): string {
+  return `${subtree}/${projectDir(project)}`;
 }
 
 /**
@@ -59,8 +65,11 @@ export function planProjectSync(input: {
   cards: Card[];
   edges: CardEdge[];
   syncedAt: number;
+  /** 容纳子树，只用于 canvas 里的 vault 相对路径。 */
+  subtree?: string;
 }): NoteWrite[] {
   const { project, edges, syncedAt } = input;
+  const subtree = input.subtree ?? DEFAULT_VAULT_SUBTREE;
   const cards = syncableCards(input.cards, project.id);
   if (!cards.length) return [];
 
@@ -102,7 +111,7 @@ export function planProjectSync(input: {
     content: projectCanvas({
       cards,
       edges: scoped,
-      vaultRelativeDir: vaultRelativeDir(project),
+      vaultRelativeDir: vaultRelativeDir(project, subtree),
       noteName,
     }),
   });

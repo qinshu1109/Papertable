@@ -197,6 +197,13 @@ export interface AppSettings {
    * 发现整个工作区被镜像进了知识库。
    */
   vaultSyncedProjects?: string[];
+  /**
+   * Papertable 在知识库里拥有的子树，相对于 `vaultPath`。未设置时用默认值。
+   *
+   * 可配置的是**落点**，不是要不要检查：Rust 侧仍然只有一个容纳根、仍然逐次断言，
+   * 并且拒绝绝对路径、`..` 和以 `.` 开头的分量。
+   */
+  vaultSubtree?: string;
 }
 
 /**

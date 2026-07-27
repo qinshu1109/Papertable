@@ -13,8 +13,65 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
-pub const VAULT_SUBTREE: &str = "80_AI暂存/Papertable";
+/// Papertable 在知识库里拥有的子树，**默认值**。
+///
+/// 可以由设置改成别的相对路径（见 `AppSettings.vaultSubtree`），但**永远只有一个根**，
+/// 而且容纳断言一个字不改。可配置的是落点，不是要不要检查。
+///
+/// 不提供「关掉检查」或「允许多个根」：这条断言是路径构造出 bug 与用户知识库之间
+/// 唯一的东西，它的价值来自不可协商。一旦出现 `if consented { skip }`，它就退化成注释。
+/// 另外，写进 `10_活跃知识` / `20_项目` 会绕过用户自己 AGENTS.md 规定的
+/// knowledge-coach preview→publish→verify 流程——那是流程问题，不是权限问题。
+pub const DEFAULT_SUBTREE: &str = "80_AI暂存/Papertable";
+
+/// 校验一个子树相对路径能否作为容纳根。
+///
+/// 拒绝绝对路径、`..`、空分量，以及以 `.` 开头的分量（`.obsidian` 之类是应用元数据，
+/// 绝不能作为写入根）。
+/// 归一化并校验来自前端的子树。
+///
+/// 空值回落到 `DEFAULT_SUBTREE`：**Rust 是默认值的权威**。前端漏传时应当落到正确的
+/// 子树，而不是落到知识库根目录——那会把笔记直接铺在 `10_活跃知识` 的旁边。
+pub fn subtree_or_default(subtree: &str) -> Result<String> {
+    let trimmed = subtree.trim();
+    let chosen = if trimmed.is_empty() {
+        DEFAULT_SUBTREE
+    } else {
+        trimmed
+    };
+    validate_subtree(chosen)?;
+    Ok(chosen.to_string())
+}
+
+pub fn validate_subtree(subtree: &str) -> Result<Vec<String>> {
+    // 绝对路径必须**报错**，不能靠「过滤掉前导空分量」把它悄悄变成相对路径——
+    // 粘贴 `/Users/…/别处` 的人会得到一个被默默改过的落点，而不是一个错误。
+    if subtree.starts_with('/') || subtree.starts_with('\\') {
+        return Err(format!("子树必须是相对路径：{subtree}").into());
+    }
+    if Path::new(subtree).is_absolute() {
+        return Err(format!("子树必须是相对路径：{subtree}").into());
+    }
+    let parts: Vec<&str> = subtree
+        .split('/')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return Err("子树路径不能为空".into());
+    }
+    for part in &parts {
+        if *part == ".." || part.starts_with('.') || part.contains(':') {
+            return Err(format!("子树路径分量不被允许：{part}").into());
+        }
+        if Path::new(part).components().count() != 1 {
+            return Err(format!("子树路径分量不被允许：{part}").into());
+        }
+    }
+    Ok(parts.iter().map(|s| s.to_string()).collect())
+}
 
 #[derive(Debug)]
 pub struct Error(String);
@@ -49,12 +106,18 @@ impl serde::Serialize for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Papertable 拥有的根目录。
-pub fn root(vault: &Path) -> PathBuf {
+pub fn root_of(vault: &Path, subtree: &str) -> PathBuf {
     let mut path = vault.to_path_buf();
-    for part in VAULT_SUBTREE.split('/') {
+    for part in subtree.split('/').filter(|s| !s.is_empty()) {
         path.push(part);
     }
     path
+}
+
+/// 默认子树下的根目录。只有测试用；生产路径一律显式传 subtree。
+#[cfg(test)]
+pub fn root(vault: &Path) -> PathBuf {
+    root_of(vault, DEFAULT_SUBTREE)
 }
 
 /// **唯一的写路径解析入口。**
@@ -62,8 +125,15 @@ pub fn root(vault: &Path) -> PathBuf {
 /// 拒绝 `..`、绝对路径分量、以及任何 canonicalize 之后落在根之外的目标（符号链接
 /// 逃逸就靠这一步）。目标尚不存在时逐级向上找已存在的祖先来 canonicalize，
 /// 因为 `canonicalize` 要求路径真实存在。
+#[cfg(test)]
 pub fn resolve(vault: &Path, relative: &[&str]) -> Result<PathBuf> {
-    let root = root(vault);
+    resolve_in(vault, DEFAULT_SUBTREE, relative)
+}
+
+/// **唯一的写路径解析入口**（带显式子树）。
+pub fn resolve_in(vault: &Path, subtree: &str, relative: &[&str]) -> Result<PathBuf> {
+    validate_subtree(subtree)?;
+    let root = root_of(vault, subtree);
     let mut target = root.clone();
     for part in relative {
         if part.is_empty() {
@@ -86,7 +156,7 @@ pub fn resolve(vault: &Path, relative: &[&str]) -> Result<PathBuf> {
         // 根还不存在：它一定在 vault 之内，用 vault 的真实路径重建。
         Err(_) => {
             let mut path = vault.canonicalize()?;
-            for part in VAULT_SUBTREE.split('/') {
+            for part in subtree.split('/').filter(|s| !s.is_empty()) {
                 path.push(part);
             }
             path
@@ -225,12 +295,13 @@ pub enum Overwrite {
 /// `last_written_hash` 来自 sync_state：`None` 表示我们从没写过这个文件。
 pub fn write_note(
     vault: &Path,
+    subtree: &str,
     relative: &[&str],
     content: &str,
     last_written_hash: Option<&str>,
     overwrite: Overwrite,
 ) -> Result<WriteReport> {
-    let path = resolve(vault, relative)?;
+    let path = resolve_in(vault, subtree, relative)?;
     let display = relative.join("/");
     let next_hash = normalized_hash(content);
 
@@ -309,6 +380,30 @@ fn quarantine(
     })
 }
 
+/// **每一次真实的磁盘写入都记一笔。**
+///
+/// 验收时把 `.obsidian/workspace.json` 被 Obsidian 自己改写算成了 Papertable 的红线
+/// 事故——那是判据的问题：真实库是个活的 Obsidian vault，有自己的记账行为，靠比对
+/// 整库 mtime 无法归因。这份日志让「Papertable 写了哪些路径」可以被直接读出来，
+/// 不需要推断。写在应用数据目录，不在知识库里。
+static WRITE_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn record_write(path: &Path) {
+    if let Ok(mut log) = WRITE_LOG.lock() {
+        log.push(path.display().to_string());
+        // 只保留最近的窗口；这是审计线索，不是持久档案。
+        let len = log.len();
+        if len > 500 {
+            log.drain(..len - 500);
+        }
+    }
+}
+
+/// Papertable 到目前为止真正写过的路径。
+pub fn written_paths() -> Vec<String> {
+    WRITE_LOG.lock().map(|log| log.clone()).unwrap_or_default()
+}
+
 fn write_atomically(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -316,20 +411,22 @@ fn write_atomically(path: &Path, content: &str) -> Result<()> {
     let temp = path.with_extension("papertable-tmp");
     std::fs::write(&temp, content)?;
     std::fs::rename(&temp, path)?;
+    record_write(path);
     Ok(())
 }
 
 /// 标题变更走 rename 而不是删+建，这样 Obsidian 会自动更新指向它的 `[[双链]]`。
-pub fn rename_note(vault: &Path, from: &[&str], to: &[&str]) -> Result<()> {
-    let source = resolve(vault, from)?;
-    let target = resolve(vault, to)?;
+pub fn rename_note(vault: &Path, subtree: &str, from: &[&str], to: &[&str]) -> Result<()> {
+    let source = resolve_in(vault, subtree, from)?;
+    let target = resolve_in(vault, subtree, to)?;
     if !source.exists() {
         return Ok(());
     }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::rename(source, target)?;
+    std::fs::rename(&source, &target)?;
+    record_write(&target);
     Ok(())
 }
 
@@ -337,8 +434,8 @@ pub fn rename_note(vault: &Path, from: &[&str], to: &[&str]) -> Result<()> {
 ///
 /// 三个时机都要清：强制覆盖后（决定已做出）、「保留笔记」后（用户拒绝了这份内容）、
 /// 重命名时（副本挂在旧文件名上，否则永远躺在知识库里像一个没解决的冲突）。
-pub fn remove_conflict_copy(vault: &Path, relative: &[&str]) -> Result<()> {
-    let path = resolve(vault, relative)?;
+pub fn remove_conflict_copy(vault: &Path, subtree: &str, relative: &[&str]) -> Result<()> {
+    let path = resolve_in(vault, subtree, relative)?;
     let conflict = path.with_extension("papertable-conflict.md");
     if conflict.exists() {
         std::fs::remove_file(conflict)?;
@@ -346,10 +443,11 @@ pub fn remove_conflict_copy(vault: &Path, relative: &[&str]) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_note(vault: &Path, relative: &[&str]) -> Result<()> {
-    let path = resolve(vault, relative)?;
+pub fn delete_note(vault: &Path, subtree: &str, relative: &[&str]) -> Result<()> {
+    let path = resolve_in(vault, subtree, relative)?;
     if path.exists() {
-        std::fs::remove_file(path)?;
+        std::fs::remove_file(&path)?;
+        record_write(&path);
     }
     Ok(())
 }
@@ -366,7 +464,14 @@ mod tests {
         content: &str,
         last: Option<&str>,
     ) -> Result<WriteReport> {
-        write_note(vault, relative, content, last, Overwrite::IfUnchanged)
+        write_note(
+            vault,
+            DEFAULT_SUBTREE,
+            relative,
+            content,
+            last,
+            Overwrite::IfUnchanged,
+        )
     }
 
     fn vault() -> tempfile::TempDir {
@@ -561,6 +666,7 @@ mod tests {
         // 用户选择以 Papertable 为准。
         let forced = write_note(
             dir.path(),
+            DEFAULT_SUBTREE,
             &path,
             "Papertable 的新内容。\n",
             None, // 基线为空也不该阻止强制覆盖
@@ -582,11 +688,79 @@ mod tests {
         );
     }
 
+    /// 落点可配置，但校验不可协商。
+    #[test]
+    /// 前端漏传 subtree 时，落点必须回落到默认子树，**不能**变成知识库根目录——
+    /// 那会把笔记直接铺在 `10_活跃知识` 旁边。
+    fn a_missing_subtree_falls_back_to_the_default_not_the_vault_root() {
+        for blank in ["", "   ", "\n"] {
+            assert_eq!(subtree_or_default(blank).unwrap(), DEFAULT_SUBTREE);
+        }
+        assert_eq!(subtree_or_default("  探索/PT  ").unwrap(), "探索/PT");
+        // 回落不会顺带放过非法值。
+        assert!(subtree_or_default("../外面").is_err());
+        assert!(subtree_or_default("/Users/qinshu/别处").is_err());
+        assert!(subtree_or_default(".obsidian").is_err());
+    }
+
+    #[test]
+    fn a_configurable_subtree_is_still_validated() {
+        assert!(validate_subtree("80_AI暂存/Papertable").is_ok());
+        assert!(validate_subtree("探索/Papertable").is_ok());
+        for bad in [
+            "",
+            "/",
+            "..",
+            "a/../b",
+            ".obsidian", // 应用元数据目录绝不能当写入根
+            ".obsidian/plugins",
+            "/Users/qinshu/别处", // 绝对路径
+        ] {
+            assert!(validate_subtree(bad).is_err(), "应当拒绝：{bad:?}");
+        }
+    }
+
+    /// 换了子树，容纳断言照样生效——逃逸仍然被拒。
+    #[test]
+    fn escapes_are_refused_under_a_custom_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("探索/Papertable")).unwrap();
+        assert!(resolve_in(dir.path(), "探索/Papertable", &["笔记.md"]).is_ok());
+        assert!(resolve_in(dir.path(), "探索/Papertable", &["..", "逃逸.md"]).is_err());
+        assert!(resolve_in(dir.path(), "..", &["逃逸.md"]).is_err());
+    }
+
+    /// 容纳规则的自证：写入记账里出现的每一条路径都必须在根之内。
+    /// 容纳规则的自证：这次写的两个文件都要出现在记账里，且都在根之内。
+    ///
+    /// 按**本测试自己的根**过滤，不按下标切片——`WRITE_LOG` 是进程级全局（对单个应用
+    /// 进程的审计用途是对的），而测试并行跑在同一进程里，切片会混进别的测试的写入。
+    #[test]
+    fn every_recorded_write_lands_inside_the_root() {
+        let dir = vault();
+        write_note_default(dir.path(), &["项目", "甲.md"], "# 甲\n", None).unwrap();
+        write_note_default(dir.path(), &["项目", "乙.md"], "# 乙\n", None).unwrap();
+        let real_root = root(dir.path()).canonicalize().unwrap();
+        let mine: Vec<String> = written_paths()
+            .into_iter()
+            .filter(|p| Path::new(p).starts_with(&real_root))
+            .collect();
+        assert_eq!(mine.len(), 2, "每次真实写盘都要记一笔");
+        assert!(mine.iter().any(|p| p.ends_with("甲.md")));
+        assert!(mine.iter().any(|p| p.ends_with("乙.md")));
+    }
+
     #[test]
     fn renaming_moves_the_file_so_obsidian_can_fix_backlinks() {
         let dir = vault();
         write_note_default(dir.path(), &["项目", "旧标题.md"], "# 旧\n", None).unwrap();
-        rename_note(dir.path(), &["项目", "旧标题.md"], &["项目", "新标题.md"]).unwrap();
+        rename_note(
+            dir.path(),
+            DEFAULT_SUBTREE,
+            &["项目", "旧标题.md"],
+            &["项目", "新标题.md"],
+        )
+        .unwrap();
         assert!(!root(dir.path()).join("项目/旧标题.md").exists());
         assert!(root(dir.path()).join("项目/新标题.md").exists());
     }

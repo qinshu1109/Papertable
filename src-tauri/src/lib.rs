@@ -245,10 +245,14 @@ fn vault_sync(
     db: State<Db>,
     watch: State<watcher::VaultWatcher>,
     vault: String,
+    subtree: String,
     notes: Vec<NoteWrite>,
     now: i64,
 ) -> Result<Vec<vault::WriteReport>, vault::Error> {
     let root = std::path::PathBuf::from(&vault);
+    // 落点可配置，但**必须先归一化并校验**：空值回落到默认子树，拒绝绝对路径、
+    // `..`、以 `.` 开头的分量。
+    let subtree = vault::subtree_or_default(&subtree)?;
     let mut guard = db.0.lock().map_err(|_| "数据库锁被毒化".to_string())?;
     let conn = &mut *guard;
     let mut reports = Vec::with_capacity(notes.len());
@@ -276,10 +280,10 @@ fn vault_sync(
                     let old_parts: Vec<&str> = old.split('/').collect();
                     watch.mark(std::path::Path::new(&old));
                     watch.mark(std::path::Path::new(&target));
-                    vault::rename_note(&root, &old_parts, &parts)?;
+                    vault::rename_note(&root, &subtree, &old_parts, &parts)?;
                     // 冲突副本挂在旧文件名上；不清掉就永远是孤儿。
                     // 若冲突仍然成立，下一次写入会在新路径重新生成它。
-                    vault::remove_conflict_copy(&root, &old_parts)?;
+                    vault::remove_conflict_copy(&root, &subtree, &old_parts)?;
                 }
                 _ => {}
             }
@@ -293,7 +297,7 @@ fn vault_sync(
         // 用「内容不同就覆盖」即可，所以这里把当前磁盘内容当作基线传进去。
         let previous = match (&note.card_id, previous) {
             (None, _) => {
-                let path = vault::resolve(&root, &parts)?;
+                let path = vault::resolve_in(&root, &subtree, &parts)?;
                 std::fs::read_to_string(&path)
                     .ok()
                     .map(|text| vault::normalized_hash(&text))
@@ -303,8 +307,14 @@ fn vault_sync(
 
         // 写盘前登记：让常见路径省掉一次读盘。**只是优化**，真正的判定靠哈希。
         watch.mark(std::path::Path::new(&note.relative.join("/")));
-        let report =
-            vault::write_note(&root, &parts, &note.content, previous.as_deref(), overwrite)?;
+        let report = vault::write_note(
+            &root,
+            &subtree,
+            &parts,
+            &note.content,
+            previous.as_deref(),
+            overwrite,
+        )?;
         if let Some(id) = &note.card_id {
             let status = if report.outcome == vault::WriteOutcome::Conflict {
                 "conflict"
@@ -321,10 +331,17 @@ fn vault_sync(
 
 /// 标题变更走 rename 而不是删+建，Obsidian 会自动更新指向它的 `[[双链]]`。
 #[tauri::command]
-fn vault_rename(vault: String, from: Vec<String>, to: Vec<String>) -> Result<(), vault::Error> {
+fn vault_rename(
+    vault: String,
+    subtree: String,
+    from: Vec<String>,
+    to: Vec<String>,
+) -> Result<(), vault::Error> {
+    let subtree = vault::subtree_or_default(&subtree)?;
     let root = std::path::PathBuf::from(&vault);
     vault::rename_note(
         &root,
+        &subtree,
         &from.iter().map(String::as_str).collect::<Vec<_>>(),
         &to.iter().map(String::as_str).collect::<Vec<_>>(),
     )
@@ -332,9 +349,11 @@ fn vault_rename(vault: String, from: Vec<String>, to: Vec<String>) -> Result<(),
 
 /// 卡片进回收站时删掉笔记，不留孤儿。
 #[tauri::command]
-fn vault_delete(vault: String, relative: Vec<String>) -> Result<(), vault::Error> {
+fn vault_delete(vault: String, subtree: String, relative: Vec<String>) -> Result<(), vault::Error> {
+    let subtree = vault::subtree_or_default(&subtree)?;
     vault::delete_note(
         &std::path::PathBuf::from(&vault),
+        &subtree,
         &relative.iter().map(String::as_str).collect::<Vec<_>>(),
     )
 }
@@ -348,8 +367,10 @@ fn vault_forget(
     db: State<Db>,
     watch: State<watcher::VaultWatcher>,
     vault: String,
+    subtree: String,
     card_ids: Vec<String>,
 ) -> Result<usize, vault::Error> {
+    let subtree = vault::subtree_or_default(&subtree)?;
     let root = std::path::PathBuf::from(&vault);
     let mut guard = db.0.lock().map_err(|_| "数据库锁被毒化".to_string())?;
     let conn = &mut *guard;
@@ -362,12 +383,22 @@ fn vault_forget(
         };
         watch.mark(std::path::Path::new(&path));
         let parts: Vec<&str> = path.split('/').collect();
-        vault::delete_note(&root, &parts)?;
-        vault::remove_conflict_copy(&root, &parts)?;
+        vault::delete_note(&root, &subtree, &parts)?;
+        vault::remove_conflict_copy(&root, &subtree, &parts)?;
         db::forget_sync(conn, id).map_err(|e| vault::Error::from(e.to_string()))?;
         removed += 1;
     }
     Ok(removed)
+}
+
+/// Papertable 到目前为止真正写过的磁盘路径。
+///
+/// 容纳规则的**自证**手段。验收时把 Obsidian 自己改写 `.obsidian/workspace.json`
+/// 算成了 Papertable 的红线事故；真实库是个活的 vault，靠比对整库 mtime 无法归因。
+/// 有了这份清单，「Papertable 写了哪些路径」可以直接读出来。
+#[tauri::command]
+fn vault_written_paths() -> Vec<String> {
+    vault::written_paths()
 }
 
 #[tauri::command]
@@ -382,9 +413,11 @@ fn vault_conflicts(db: State<Db>) -> Result<Vec<(String, String)>, db::Error> {
 fn vault_resolve_conflict(
     db: State<Db>,
     vault: String,
+    subtree: String,
     card_id: String,
     keep: String,
 ) -> Result<String, vault::Error> {
+    let subtree = vault::subtree_or_default(&subtree)?;
     let root = std::path::PathBuf::from(&vault);
     let mut guard = db.0.lock().map_err(|_| "数据库锁被毒化".to_string())?;
     let conn = &mut *guard;
@@ -396,7 +429,7 @@ fn vault_resolve_conflict(
     if status == "detached" {
         if let Some((path, _)) = record {
             let parts: Vec<&str> = path.split('/').collect();
-            vault::remove_conflict_copy(&root, &parts)?;
+            vault::remove_conflict_copy(&root, &subtree, &parts)?;
         }
     }
     Ok(status.to_string())
@@ -521,6 +554,7 @@ pub fn run() {
             vault_watch,
             vault_resolve_link,
             vault_indexed_count,
+            vault_written_paths,
             vault_conflicts,
             vault_resolve_conflict,
         ])

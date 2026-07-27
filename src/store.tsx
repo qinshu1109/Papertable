@@ -47,7 +47,11 @@ import {
   visibleModelOutput,
 } from "./lib/modelOutput";
 import { vault } from "./lib/vault";
-import { VAULT_SUBTREE, planProjectSync, syncableCards } from "./lib/vaultPlan";
+import {
+  DEFAULT_VAULT_SUBTREE,
+  planProjectSync,
+  syncableCards,
+} from "./lib/vaultPlan";
 import { parseWikilinks, stripWikilinks } from "./lib/wikilink";
 import { preferredProjectCard } from "./lib/projectScope";
 import {
@@ -1584,9 +1588,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
    * 渲染上——换过知识库目录之后就会拿着旧路径去删。
    */
   const forgetInVault = useCallback((cardIds: string[]) => {
-    const vaultPath = latestRef.current.settings.vaultPath;
+    const { vaultPath, vaultSubtree } = latestRef.current.settings;
     if (!vault.available || !vaultPath || !cardIds.length) return;
-    void vault.forget({ vault: vaultPath, cardIds }).catch(() => undefined);
+    void vault
+      .forget({
+        vault: vaultPath,
+        subtree: vaultSubtree ?? DEFAULT_VAULT_SUBTREE,
+        cardIds,
+      })
+      .catch(() => undefined);
   }, []);
 
   const deleteCard = useCallback(
@@ -2214,11 +2224,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             (item) => item.id === projectId,
           );
           if (!project) continue;
+          const subtree =
+            latestRef.current.settings.vaultSubtree ?? DEFAULT_VAULT_SUBTREE;
           const notes = planProjectSync({
             project,
             cards: latestRef.current.cards,
             edges: latestRef.current.edges,
             syncedAt: now,
+            subtree,
           });
           if (!notes.length) continue;
           // 顺手清掉已经进回收站、但笔记还留在知识库里的卡片。
@@ -2231,7 +2244,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               .map((card) => card.id),
           );
           try {
-            await vault.sync({ vault: vaultPath, notes, now });
+            await vault.sync({ vault: vaultPath, subtree, notes, now });
           } catch (cause) {
             // 同步失败绝不能影响本地数据；只提示，不回滚任何东西。
             showToast({
@@ -2281,7 +2294,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const indexed = await vault.watch(picked);
     setVaultIndexed(indexed);
     showToast({
-      text: `已选择知识库：${picked}，索引到 ${indexed} 篇笔记。Papertable 只会写入其中的 ${VAULT_SUBTREE}/。`,
+      text: `已选择知识库：${picked}，索引到 ${indexed} 篇笔记。Papertable 只会写入其中的 ${settings.vaultSubtree ?? DEFAULT_VAULT_SUBTREE}/。`,
     });
   }, [showToast]);
 
@@ -2335,11 +2348,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const project = projects.find((item) => item.id === projectId);
       if (!project) return;
+      const subtree = settings.vaultSubtree ?? DEFAULT_VAULT_SUBTREE;
       const notes = planProjectSync({
         project,
         cards: latestRef.current.cards,
         edges: latestRef.current.edges,
         syncedAt: Date.now(),
+        subtree,
       });
       if (!notes.length) {
         showToast({ text: "这个项目还没有已完成的卡片，暂时没有内容可同步。" });
@@ -2347,6 +2362,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
       const reports = await vault.sync({
         vault: settings.vaultPath,
+        subtree,
         notes,
         now: Date.now(),
       });
@@ -2368,6 +2384,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // 意图字符串原样透传，这里不做任何分支映射——映射只存在 Rust 侧一处。
       const status = await vault.resolveConflict({
         vault: vaultPath,
+        subtree:
+          latestRef.current.settings.vaultSubtree ?? DEFAULT_VAULT_SUBTREE,
         cardId,
         keep,
       });

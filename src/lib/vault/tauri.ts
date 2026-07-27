@@ -12,12 +12,7 @@ export const tauriVault: VaultBridge = {
     });
     return typeof picked === "string" ? picked : null;
   },
-  sync: (input) =>
-    invoke<WriteReport[]>("vault_sync", {
-      vault: input.vault,
-      notes: input.notes,
-      now: input.now,
-    }),
+  sync: (input) => invoke<WriteReport[]>("vault_sync", input),
   rename: (input) => invoke<void>("vault_rename", input),
   remove: (input) => invoke<void>("vault_delete", input),
   forget: (input) => invoke<number>("vault_forget", input),
@@ -25,6 +20,7 @@ export const tauriVault: VaultBridge = {
   resolveLink: (name) =>
     invoke<[string, string | null][]>("vault_resolve_link", { name }),
   indexedCount: () => invoke<number>("vault_indexed_count"),
+  writtenPaths: () => invoke<string[]>("vault_written_paths"),
   conflicts: () => invoke<Conflict[]>("vault_conflicts"),
   resolveConflict: (input) => invoke<string>("vault_resolve_conflict", input),
 };

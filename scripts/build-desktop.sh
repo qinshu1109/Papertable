@@ -12,6 +12,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# rustup 的默认安装位置。非登录 shell、CI、以及从别的工具里调用时，`~/.cargo/env`
+# 不会被 source，`cargo` 不在 PATH 里；tauri 的第一步就是 `cargo metadata`，
+# 报的错是 "No such file or directory (os error 2)"，看不出缺的是 cargo。
+[ -d "$HOME/.cargo/bin" ] && PATH="$PATH:$HOME/.cargo/bin"
+command -v cargo >/dev/null || {
+  echo "找不到 cargo。装 Rust：https://rustup.rs" >&2
+  exit 127
+}
+
 MODE="${1:-release}"
 [[ "$MODE" == "--no-install" ]] && MODE="release"
 case "$MODE" in

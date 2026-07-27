@@ -4,13 +4,40 @@ S0 阶段在真实 vault（`~/主知识库_AI`）里跑过一次 dry-run 之后�
 序列化在 `src/lib/vaultNote.ts`（纯内容）、编排在 `src/lib/vaultPlan.ts`（纯函数）、
 容纳与冲突在 `src-tauri/src/vault.rs`。产出这些结论的一次性脚本已删除。
 
+## 怎么验证容纳规则（以及怎么不误判）
+
+`vault_written_paths` 返回 Papertable 到目前为止**真正写过的每一条磁盘路径**。
+
+这条命令存在的原因是一次判据错误：验收时把 Obsidian 自己改写
+`.obsidian/workspace.json` 和插件 `data.json` 算成了 Papertable 的红线事故。真实知识库
+是一个**活的 Obsidian vault**，打开它就会写自己的元数据；靠比对整库 mtime 无法归因。
+
+正确的判据是「**Papertable 的写入**是否都在容纳根内」，而这可以直接读出来，不必推断：
+
+```
+写入清单 = vault_written_paths()
+断言：每一条都以 <vault>/<subtree>/ 开头
+```
+
+有一条单测就是这么写的（`every_recorded_write_lands_inside_the_root`）。
+`.obsidian/`、`10_活跃知识/` 只要不在这份清单里，就与 Papertable 无关。
+
 ## 容纳规则
 
-Papertable 只拥有一个子树：
+Papertable 只拥有**一个**子树，默认：
 
 ```
 ~/主知识库_AI/80_AI暂存/Papertable/<项目名>/
 ```
+
+落点可以由设置改成别的相对路径（`AppSettings.vaultSubtree`）。**可配置的是落点，不是
+要不要检查**：仍然只有一个容纳根、仍然逐次断言，并且 `validate_subtree()` 拒绝绝对
+路径、`..`、以 `.` 开头的分量（`.obsidian` 之类是应用元数据，绝不能作为写入根）。
+
+不提供「关掉检查」或「允许多个根」，即使用户主动同意：这条断言是路径构造出 bug 与
+知识库之间唯一的东西，价值来自不可协商——一旦出现 `if consented { skip }`，它就退化成
+一句注释。另外，直接写进 `10_活跃知识` / `20_项目` 会绕过 `AGENTS.md` 规定的
+knowledge-coach preview→publish→verify 流程，那是流程问题，不是权限问题。
 
 所有写路径经过唯一一个 `resolve()`，canonicalize 后断言 `starts_with(papertable_root)`，
 拒绝 `..`、符号链接和绝对路径分量。**没有第二条写路径。**

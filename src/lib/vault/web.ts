@@ -15,6 +15,7 @@ export const webVault: VaultBridge = {
   rename: unavailable,
   remove: unavailable,
   forget: () => Promise.resolve(0),
+  writtenPaths: () => Promise.resolve([]),
   watch: unavailable,
   resolveLink: () => Promise.resolve([]),
   indexedCount: () => Promise.resolve(0),

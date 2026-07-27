@@ -456,7 +456,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <p className="note-line" style={{ marginTop: 6 }}>
             {keySource === "keychain"
               ? "密钥保存在系统钥匙串。"
-              : "密钥保存在应用数据目录的 0600 文件里（系统钥匙串不可用时的回落）。"}
+              : vaultAvailable
+                ? "密钥保存在应用数据目录的 0600 文件里（系统钥匙串不可用时的回落）。"
+                : "密钥保存在本机服务的 .env.local（0600，已被 Git 忽略）。"}
           </p>
         )}
         <button
@@ -477,10 +479,15 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <RefreshCw size={14} />
           {testing ? "测试中…" : "测试连接"}
         </button>
+        {/*
+          密钥的落点**只在一处描述**，就是上面那行由 keySource 驱动的话。
+          这里曾经写死「保存到未提交的 .env.local」——那是 web 端本机服务的路径，
+          桌面版根本不用它，于是同一个页面上出现了两种互相矛盾的说明。
+          描述真实状态的字段已经有了，这里就不该再有第二个说法。
+        */}
         <p className="note-line">
-          密钥只提交给 127.0.0.1 的本机服务，页面不会回显、保存到 IndexedDB
-          或打包进导出文件。保存后会写入未提交的 .env.local；接口地址仅接受
-          HTTPS 或本机 HTTP。
+          密钥不会回显、不进 IndexedDB、不打包进导出文件。接口地址仅接受 HTTPS
+          或本机 HTTP。
         </p>
         <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
           注意力观察
