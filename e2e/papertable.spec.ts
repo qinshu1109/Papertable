@@ -148,7 +148,9 @@ test("concepts open as four independent temporary cards without replacing each o
   };
 
   await openConcept("希尔伯特空间");
+  await expect(page.locator(".concept-pop")).toHaveCount(1);
   await openConcept("玻恩规则");
+  await expect(page.locator(".concept-pop")).toHaveCount(2);
   await openConcept("量子退相干");
   await expect(page.locator(".concept-pop")).toHaveCount(3);
 
@@ -369,6 +371,44 @@ test("stopping a stream keeps partial content after reload", async ({
   await page.reload();
   await expect(page.getByText("已停止，已保留生成内容。")).toBeVisible();
   await expect(page.getByText("第一句已经完成")).toBeVisible();
+});
+
+test("switching projects keeps the first answer running and allows a second generation", async ({
+  page,
+}) => {
+  const chatRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/llm/stream"))
+      chatRequests.push(request.postData() ?? "");
+  });
+  await page.goto("/");
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("停止测试：请在后台继续生成");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText("第一句已经完成")).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "AI Agent 的上下文管理", exact: true })
+    .click();
+  await expect(page.getByLabel("量子计算机与极低温正在后台生成")).toBeVisible();
+  await expect(page.getByLabel(/另有 1 张卡片正在后台生成/)).toBeVisible();
+
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("第二个项目可以同时继续提问吗？");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect.poll(() => chatRequests.length).toBe(2);
+  await expect(page.getByText("这是本地验收用的流式回答")).toBeVisible();
+
+  await expect(page.getByLabel("量子计算机与极低温正在后台生成")).toHaveCount(
+    0,
+  );
+  await page
+    .getByRole("button", { name: "量子计算机与极低温", exact: true })
+    .click();
+  await expect(page.getByText(/后面还有很长的内容/).first()).toBeVisible();
+  await expect(page.getByText(/^已停止/)).toHaveCount(0);
 });
 
 test("a ghost branch only opens a preview, then materializes once with an edited question", async ({

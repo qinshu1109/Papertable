@@ -31,6 +31,7 @@ export function GraphNavigator() {
     edges,
     activeProjectId,
     currentCardId,
+    streamingCardIds,
     setCurrentCard,
     collapsed,
     toggleCollapse,
@@ -283,6 +284,7 @@ export function GraphNavigator() {
                 )!;
                 if (!card || card.trashed) return null;
                 const isCur = n.id === currentCardId;
+                const generating = streamingCardIds.has(n.id);
                 const onPath = pathSet.has(n.id);
                 const inEdge = incomingEdge(projectEdges, n.id);
                 const color = inEdge ? COLORS[inEdge.type] : "#342b26";
@@ -330,6 +332,19 @@ export function GraphNavigator() {
                           stroke={color}
                           strokeOpacity={0.3}
                           strokeWidth={1.2}
+                        />
+                      )}
+                      {generating && (
+                        <circle
+                          className="graph-generation-ring"
+                          cx={n.x}
+                          cy={n.y}
+                          r={isCur ? 10.2 : 8.5}
+                          fill="none"
+                          stroke={color}
+                          strokeWidth={1.5}
+                          strokeDasharray="4 3"
+                          pointerEvents="none"
                         />
                       )}
                       <circle

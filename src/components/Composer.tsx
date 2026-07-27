@@ -5,6 +5,7 @@ import {
   Compass,
   Cpu,
   Layers,
+  LoaderCircle,
   MoreHorizontal,
   Paperclip,
   Quote,
@@ -31,6 +32,7 @@ export function Composer({
     stopStream,
     retryLast,
     streamingTurnId,
+    backgroundGenerationCount,
     contextForCurrent,
     currentCardId,
     setCardAnswerMode,
@@ -324,6 +326,23 @@ export function Composer({
                 <span>{answerModeLabel}</span>
               </button>
 
+              {backgroundGenerationCount > 0 && (
+                <span
+                  className="background-generation-chip"
+                  role="status"
+                  aria-label={`另有 ${backgroundGenerationCount} 张卡片正在后台生成`}
+                  title="切换卡片或项目不会停止这些回答"
+                >
+                  <LoaderCircle size={13} />
+                  <span className="desktop-background-label">
+                    后台生成 {backgroundGenerationCount}
+                  </span>
+                  <span className="mobile-background-label">
+                    {backgroundGenerationCount}
+                  </span>
+                </span>
+              )}
+
               <div className="composer-pop-anchor composer-more">
                 <button
                   className="icon-btn"
@@ -382,7 +401,7 @@ export function Composer({
               {streamingTurnId ? (
                 <button
                   className="send-btn stop"
-                  onClick={stopStream}
+                  onClick={() => stopStream()}
                   title="停止生成"
                   aria-label="停止生成"
                 >

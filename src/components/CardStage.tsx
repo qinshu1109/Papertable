@@ -83,6 +83,8 @@ export function CardStage() {
   const ancestors = path.slice(0, -1).slice(-3).reverse();
 
   const bodyRef = useRef<HTMLDivElement>(null);
+  const followStreamingTail = useRef(true);
+  const previousStreamingTurn = useRef<string | null>(null);
   const [sel, setSel] = useState<SelState | null>(null);
   const [tempCards, setTempCards] = useState<TempCard[]>([]);
   const tempCardsRef = useRef<TempCard[]>([]);
@@ -206,11 +208,16 @@ export function CardStage() {
     if (!el) return;
     if (prevCard.current !== currentCardId) prevCard.current = currentCardId;
     el.scrollTop = cardScroll(currentCardId);
+    followStreamingTail.current =
+      el.scrollHeight - el.clientHeight - el.scrollTop < 96;
   }, [cardScroll, currentCardId]);
 
   const rememberScroll = () => {
-    if (bodyRef.current)
-      rememberCardScroll(currentCardId, bodyRef.current.scrollTop);
+    if (!bodyRef.current) return;
+    const el = bodyRef.current;
+    followStreamingTail.current =
+      el.scrollHeight - el.clientHeight - el.scrollTop < 96;
+    rememberCardScroll(currentCardId, el.scrollTop);
   };
 
   const goCard = useCallback(
@@ -222,11 +229,28 @@ export function CardStage() {
     [currentCardId, setCurrentCard],
   );
 
-  /* ---------- 流式时自动滚到底 ---------- */
+  const streamingContentLength =
+    card?.turns.find((turn) => turn.id === streamingTurnId)?.content.length ??
+    0;
+
+  /* ---------- 流式时只在用户仍跟随末尾时自动滚动 ---------- */
   useEffect(() => {
     if (!streamingTurnId || !bodyRef.current) return;
-    bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-  }, [streamingTurnId, cards]);
+    if (previousStreamingTurn.current !== streamingTurnId) {
+      previousStreamingTurn.current = streamingTurnId;
+      followStreamingTail.current = true;
+    }
+    if (!followStreamingTail.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const el = bodyRef.current;
+      if (el && followStreamingTail.current) el.scrollTop = el.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [streamingContentLength, streamingTurnId]);
+
+  useEffect(() => {
+    if (!streamingTurnId) previousStreamingTurn.current = null;
+  }, [streamingTurnId]);
 
   /* ---------- 真实浏览器文本选择 ---------- */
   useEffect(() => {

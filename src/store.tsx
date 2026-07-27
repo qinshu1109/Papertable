@@ -46,6 +46,7 @@ import {
   createAnswerGate,
   visibleModelOutput,
 } from "./lib/modelOutput";
+import { createStreamThrottle } from "./lib/streamThrottle";
 import { vault } from "./lib/vault";
 import {
   DEFAULT_VAULT_SUBTREE,
@@ -286,6 +287,8 @@ interface Ctx {
   draft: string;
   collapsed: Set<string>;
   toast: Toast | null;
+  streamingCardIds: ReadonlySet<string>;
+  backgroundGenerationCount: number;
   streamingTurnId: string | null;
   lastCreated: { cardId: string; type: EdgeType } | null;
   hydrated: boolean;
@@ -328,7 +331,7 @@ interface Ctx {
   rememberCardScroll: (cardId: string, scrollTop: number) => void;
   cardScroll: (cardId: string) => number;
   send: (text: string) => void;
-  stopStream: () => void;
+  stopStream: (cardId?: string) => void;
   retryLast: () => void;
   contextForCurrent: () => BuiltContext;
   refreshProvider: () => Promise<ProviderHealth | null>;
@@ -433,13 +436,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [vaultConflicts, setVaultConflicts] = useState<VaultConflict[]>([]);
   const [vaultIndexed, setVaultIndexed] = useState(0);
   const vaultTimer = useRef<number | null>(null);
-  const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
+  const [streamingTurnsByCard, setStreamingTurnsByCard] = useState<
+    Record<string, string>
+  >({});
   const [lastCreated, setLastCreated] = useState<{
     cardId: string;
     type: EdgeType;
   } | null>(null);
   const [hydrated, setHydrated] = useState(false);
-  const controllerRef = useRef<AbortController | null>(null);
+  const streamingTurnsRef = useRef<Record<string, string>>({});
+  const generationTasksRef = useRef(
+    new Map<
+      string,
+      {
+        cardId: string;
+        controller: AbortController;
+        flush: () => void;
+      }
+    >(),
+  );
   const toastTimer = useRef<number | null>(null);
   const persistTimer = useRef<number | null>(null);
   const attentionPersistTimer = useRef<number | null>(null);
@@ -459,6 +474,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const activeProjectId = view.activeProjectId;
   const currentCardId = view.currentCardId;
+  const streamingCardIds = useMemo(
+    () => new Set(Object.keys(streamingTurnsByCard)),
+    [streamingTurnsByCard],
+  );
+  const streamingTurnId = streamingTurnsByCard[currentCardId] ?? null;
+  const backgroundGenerationCount = Math.max(
+    0,
+    streamingCardIds.size - (streamingTurnId ? 1 : 0),
+  );
+  const hasActiveGenerations = streamingCardIds.size > 0;
   const references = useMemo(
     () =>
       referenceStore.filter(
@@ -627,7 +652,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     };
     if (!hydrated) return;
     if (persistTimer.current) return;
-    const delay = streamingTurnId
+    const delay = hasActiveGenerations
       ? Math.max(0, 500 - (Date.now() - lastPersistedAt.current))
       : 120;
     persistTimer.current = window.setTimeout(() => {
@@ -653,12 +678,20 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     view,
     settings,
     hydrated,
-    streamingTurnId,
+    hasActiveGenerations,
   ]);
 
   useEffect(
     () => () => {
       if (persistTimer.current) window.clearTimeout(persistTimer.current);
+    },
+    [],
+  );
+
+  useEffect(
+    () => () => {
+      generationTasksRef.current.forEach((task) => task.controller.abort());
+      generationTasksRef.current.clear();
     },
     [],
   );
@@ -925,18 +958,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     settings.attentionPaused,
   ]);
 
-  const stopStream = useCallback(() => {
-    controllerRef.current?.abort();
-    controllerRef.current = null;
-    const id = streamingTurnId;
-    setStreamingTurnId(null);
-    if (id)
+  const unregisterGeneration = useCallback((cardId: string, turnId: string) => {
+    if (streamingTurnsRef.current[cardId] !== turnId) return;
+    const next = { ...streamingTurnsRef.current };
+    delete next[cardId];
+    streamingTurnsRef.current = next;
+    setStreamingTurnsByCard(next);
+  }, []);
+
+  const stopStream = useCallback(
+    (cardId = currentCardId) => {
+      const id = streamingTurnsRef.current[cardId];
+      if (!id) return;
+      const task = generationTasksRef.current.get(id);
+      // 缓冲区里可能还有已经通过输出闸门、但尚未到下一次 UI 提交节拍的正文。
+      // 先 flush 再标 stopped，停止不会丢掉最后几十毫秒的可见内容。
+      task?.flush();
+      task?.controller.abort();
+      generationTasksRef.current.delete(id);
+      unregisterGeneration(cardId, id);
       // 只重建拥有这条轮次的卡片、以及那一条轮次。之前这里无条件重建了每张卡片
       // 和每条轮次的对象，而增量保存按引用比较——一次停止会把整个工作区的轮次
       // 全部重写一遍。
       setCards((current) =>
         current.map((card) =>
-          card.turns.some((turn) => turn.id === id)
+          card.id === cardId && card.turns.some((turn) => turn.id === id)
             ? {
                 ...card,
                 turns: card.turns.map((turn) =>
@@ -948,7 +994,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             : card,
         ),
       );
-  }, [streamingTurnId]);
+    },
+    [currentCardId, unregisterGeneration],
+  );
 
   const runBackgroundTasks = useCallback(
     async (cardId: string, title: string, answer: string) => {
@@ -1024,7 +1072,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const target = input.cardsSnapshot.find(
         (card) => card.id === input.cardId,
       );
-      if (!target) return;
+      if (!target || streamingTurnsRef.current[input.cardId]) return;
       const aiId = uid("turn");
       const aiTurn: Turn = {
         id: aiId,
@@ -1039,13 +1087,44 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         ...card,
         turns: [...card.turns, aiTurn],
       }));
-      setStreamingTurnId(aiId);
+      const nextStreaming = {
+        ...streamingTurnsRef.current,
+        [input.cardId]: aiId,
+      };
+      streamingTurnsRef.current = nextStreaming;
+      setStreamingTurnsByCard(nextStreaming);
       const controller = new AbortController();
-      controllerRef.current = controller;
       // 闸门的缓冲区只存在于这个闭包里，从不进入 state，所以被停止时结构上
       // 不可能把未释放的草稿刷到盘上。
       const gate = createAnswerGate();
       let answer = "";
+      const throttle = createStreamThrottle<string>({
+        commit: (content) =>
+          updateCard(input.cardId, (card) => ({
+            ...card,
+            turns: card.turns.map((turn) =>
+              turn.id === aiId &&
+              turn.status === "streaming" &&
+              content.length >= turn.content.length
+                ? { ...turn, content }
+                : turn,
+            ),
+          })),
+        schedule: (callback, delay) => window.setTimeout(callback, delay),
+        cancel: (id) => window.clearTimeout(id),
+        // 当前可见卡片保持平滑；切到别的卡片、别的项目或把应用放到后台后，
+        // 只降低 React/Markdown 刷新频率，不停止模型流。
+        delayForNextCommit: () =>
+          document.visibilityState === "visible" &&
+          latestRef.current.view.currentCardId === input.cardId
+            ? 80
+            : 360,
+      });
+      generationTasksRef.current.set(aiId, {
+        cardId: input.cardId,
+        controller,
+        flush: throttle.flush,
+      });
       try {
         const built = buildContext({
           cards: input.cardsSnapshot,
@@ -1064,21 +1143,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           const nextAnswer = gate.visible();
           if (nextAnswer === answer) continue;
           answer = nextAnswer;
-          updateCard(input.cardId, (card) => ({
-            ...card,
-            turns: card.turns.map((turn) =>
-              turn.id === aiId
-                ? {
-                    ...turn,
-                    content: answer,
-                  }
-                : turn,
-            ),
-          }));
+          throttle.push(answer);
         }
         if (!controller.signal.aborted) {
           // 收尾 flush 只在正常结束时发生；中断路径永远不会走到这里。
           answer = gate.finish();
+          throttle.dispose();
           if (!answer.trim())
             throw new Error("模型没有返回可显示的最终文本，请重试。");
           updateCard(input.cardId, (card) => ({
@@ -1099,6 +1169,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
       } catch (error) {
         if (!controller.signal.aborted) {
+          throttle.dispose();
           const message =
             error instanceof Error ? error.message : "模型生成失败。";
           updateCard(input.cardId, (card) => ({
@@ -1118,8 +1189,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           showToast({ text: message });
         }
       } finally {
-        if (controllerRef.current === controller) controllerRef.current = null;
-        setStreamingTurnId((current) => (current === aiId ? null : current));
+        throttle.dispose();
+        generationTasksRef.current.delete(aiId);
+        unregisterGeneration(input.cardId, aiId);
       }
     },
     [
@@ -1128,6 +1200,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       settings.model,
       showToast,
       snapshots,
+      unregisterGeneration,
       updateCard,
     ],
   );
@@ -1597,6 +1670,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const card = cards.find((candidate) => candidate.id === id);
       if (!card || card.projectId !== activeProjectId) return;
       const ids = subtreeIds(edges, id);
+      ids.forEach((cardId) => stopStream(cardId));
       const fallback =
         incomingEdge(edges, id)?.sourceCardId ??
         cards.find(
@@ -1632,7 +1706,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         },
       });
     },
-    [activeProjectId, cards, currentCardId, dismissToast, edges, showToast],
+    [
+      activeProjectId,
+      cards,
+      currentCardId,
+      dismissToast,
+      edges,
+      showToast,
+      stopStream,
+    ],
   );
 
   const setActiveProject = useCallback(
@@ -1642,7 +1724,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         !projects.some((project) => project.id === id)
       )
         return;
-      stopStream();
       closeAttentionSession(activeProjectId, "project-switch");
       setProposalTrayOpenState(false);
       setSelectedProposalId(null);
@@ -1666,7 +1747,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       closeAttentionSession,
       processAttention,
       projects,
-      stopStream,
       view.lastCardByProject,
     ],
   );
@@ -1961,6 +2041,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const removedCardIds = new Set(
         cards.filter((card) => card.projectId === id).map((card) => card.id),
       );
+      removedCardIds.forEach((cardId) => stopStream(cardId));
       const removedEdgeIds = new Set(
         edges
           .filter(
@@ -2077,6 +2158,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       edges,
       projects,
       showToast,
+      stopStream,
     ],
   );
 
@@ -2187,7 +2269,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
    * 触发时机：卡片完成之后防抖 2 秒，**绝不跟随 500 ms 的流式自动保存**——按那个
    * 节奏写盘会把 vault 打烂，并让 Obsidian 的索引器永不停歇。
    *
-   * 依赖里只放 `streamingTurnId` 和已完成卡片的指纹，所以打字、滚动、折叠这些
+   * 依赖里只放“是否仍有生成任务”和已完成卡片的指纹，所以打字、滚动、折叠这些
    * 纯视图变化不会触发同步。
    */
   const syncFingerprint =
@@ -2203,7 +2285,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!hydrated || !vault.available || !settings.vaultPath) return;
-    if (streamingTurnId) return; // 生成中不写：等它落定
+    if (hasActiveGenerations) return; // 任一后台任务生成中都不写：等它落定
     if (!syncFingerprint) return;
     if (vaultTimer.current) window.clearTimeout(vaultTimer.current);
     vaultTimer.current = window.setTimeout(() => {
@@ -2258,7 +2340,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     };
     // 依赖刻意只有这四项：syncFingerprint 已经概括了「哪些已完成卡片会被写出去」，
     // 而 showToast / refreshVaultConflicts 的身份变化不该重启防抖。
-  }, [hydrated, streamingTurnId, syncFingerprint, settings.vaultPath]);
+  }, [hasActiveGenerations, hydrated, syncFingerprint, settings.vaultPath]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -2513,6 +2595,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [anchors, cards, edges, projects, showToast, snapshots],
   );
   const clearLocalData = useCallback(async () => {
+    generationTasksRef.current.forEach((task) => task.controller.abort());
+    generationTasksRef.current.clear();
+    streamingTurnsRef.current = {};
+    setStreamingTurnsByCard({});
     await clearWorkspace();
     const next = seedSnapshot();
     await saveWorkspace(next);
@@ -2559,6 +2645,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       draft,
       collapsed,
       toast,
+      streamingCardIds,
+      backgroundGenerationCount,
       streamingTurnId,
       lastCreated,
       hydrated,
@@ -2638,6 +2726,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       draft,
       collapsed,
       toast,
+      streamingCardIds,
+      backgroundGenerationCount,
       streamingTurnId,
       lastCreated,
       hydrated,

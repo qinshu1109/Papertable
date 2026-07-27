@@ -7,7 +7,9 @@ use db::{AttentionSnapshot, AttentionUpsert, RemovedProject, WorkspaceSnapshot, 
 use llm::{ChatRequest, KeySource, ProviderConfig, ProviderHealth, PublicConfig, StreamEvent};
 use rusqlite::Connection;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::{Manager, State};
@@ -24,6 +26,11 @@ pub struct Provider {
     /// 密钥实际是从钥匙串读到的，还是回落到了文件。设置页要如实展示。
     from_keychain: Mutex<bool>,
 }
+
+/// 与 WebView 生命周期解耦的模型任务表。切卡片、切项目或窗口失焦都不会碰它；
+/// 只有用户明确停止、删除来源卡片或应用退出时才设置取消标记。
+#[derive(Default)]
+pub struct Generations(Mutex<HashMap<String, Arc<AtomicBool>>>);
 
 /// 单写者。SQLite 自己是单写者 + WAL，这把锁额外保证的是调用方观察到的完成顺序，
 /// 从而让前端「写成功后才推进基线」是安全的——语义等价于 dexie.ts 里的 `enqueue`。
@@ -233,14 +240,56 @@ fn llm_generate(state: State<Provider>, request: ChatRequest) -> Result<String, 
 #[tauri::command]
 async fn llm_stream(
     state: State<'_, Provider>,
+    generations: State<'_, Generations>,
+    request_id: String,
     request: ChatRequest,
     channel: Channel<StreamEvent>,
 ) -> Result<(), llm::Error> {
     let config = provider_snapshot(&state)?;
     let tap = llm::SseTap::open(Some(&state.data_dir));
-    tauri::async_runtime::spawn_blocking(move || llm::stream(&config, &request, &channel, &tap))
-        .await
-        .map_err(|e| llm::Error::from(e.to_string()))?
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let mut active = generations
+            .0
+            .lock()
+            .map_err(|_| llm::Error::from("生成任务表被毒化"))?;
+        if let Some(previous) = active.insert(request_id.clone(), Arc::clone(&cancelled)) {
+            previous.store(true, Ordering::Relaxed);
+        }
+    }
+    let task_flag = Arc::clone(&cancelled);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        llm::stream(&config, &request, &channel, &tap, &task_flag)
+    })
+    .await;
+    {
+        let mut active = generations
+            .0
+            .lock()
+            .map_err(|_| llm::Error::from("生成任务表被毒化"))?;
+        if active
+            .get(&request_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &cancelled))
+        {
+            active.remove(&request_id);
+        }
+    }
+    joined.map_err(|error| llm::Error::from(error.to_string()))?
+}
+
+#[tauri::command]
+fn llm_cancel_stream(
+    generations: State<Generations>,
+    request_id: String,
+) -> Result<(), llm::Error> {
+    let active = generations
+        .0
+        .lock()
+        .map_err(|_| llm::Error::from("生成任务表被毒化"))?;
+    if let Some(cancelled) = active.get(&request_id) {
+        cancelled.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +588,7 @@ pub fn run() {
             app.manage(Db(Arc::clone(&shared)));
             app.manage(SharedDb(shared));
             app.manage(watcher::VaultWatcher::default());
+            app.manage(Generations::default());
 
             let path = llm::config_path(&dir);
             let (config, from_keychain) = llm::load_config_with_source(&path);
@@ -571,6 +621,7 @@ pub fn run() {
             build_info,
             llm_generate,
             llm_stream,
+            llm_cancel_stream,
             vault_sync,
             vault_rename,
             vault_delete,

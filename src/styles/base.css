@@ -369,6 +369,11 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.generation-spinner {
+  flex-shrink: 0;
+  color: var(--accent);
+  animation: generation-spin 1.1s linear infinite;
+}
 .proj-row .icon-btn {
   width: 22px;
   height: 22px;
@@ -1011,6 +1016,11 @@ textarea {
   background: var(--accent);
   animation: pulse 1.1s var(--e-soft) infinite;
 }
+@keyframes generation-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 @keyframes pulse {
   0%,
   100% {
@@ -1038,6 +1048,11 @@ textarea {
     rgba(255, 255, 255, 0.28),
     rgba(255, 255, 255, 0.05)
   );
+}
+.graph-generation-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: generation-spin 1.5s linear infinite;
 }
 .graph-head {
   display: flex;
@@ -1558,6 +1573,25 @@ textarea {
 }
 .send-btn.stop {
   background: var(--ink);
+}
+.background-generation-chip {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px dashed #d7bcae;
+  border-radius: 99px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--card));
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.background-generation-chip svg {
+  animation: generation-spin 1.1s linear infinite;
+}
+.mobile-background-label {
+  display: none;
 }
 
 /* 上下文检查器 */
@@ -2557,6 +2591,17 @@ textarea {
   .answer-mode-direct,
   .model-chevron {
     display: none;
+  }
+  .desktop-background-label {
+    display: none;
+  }
+  .mobile-background-label {
+    display: inline;
+  }
+  .background-generation-chip {
+    width: 32px;
+    justify-content: center;
+    padding: 0;
   }
   .composer-more {
     display: block;

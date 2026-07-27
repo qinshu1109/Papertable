@@ -4,6 +4,7 @@ import {
   ChevronsRight,
   Download,
   FolderPlus,
+  LoaderCircle,
   MoreHorizontal,
   Pin,
   Search,
@@ -37,7 +38,9 @@ export function ProjectSidebar({
 }: Props) {
   const {
     projects,
+    cards,
     activeProjectId,
+    streamingCardIds,
     setActiveProject,
     togglePinProject,
     createProject,
@@ -66,6 +69,15 @@ export function ProjectSidebar({
   }, [projects, query]);
 
   const rail = collapsed && !drawerOpen;
+  const generatingProjectIds = useMemo(
+    () =>
+      new Set(
+        cards
+          .filter((card) => streamingCardIds.has(card.id))
+          .map((card) => card.projectId),
+      ),
+    [cards, streamingCardIds],
+  );
 
   return (
     <aside
@@ -157,6 +169,13 @@ export function ProjectSidebar({
                   style={{ opacity: p.pinned ? 1 : 0.25, flexShrink: 0 }}
                 />
                 <span className="proj-name">{p.name}</span>
+                {generatingProjectIds.has(p.id) && (
+                  <LoaderCircle
+                    size={12}
+                    className="generation-spinner"
+                    aria-label={`${p.name}正在后台生成`}
+                  />
+                )}
               </button>
               <button
                 className="icon-btn"

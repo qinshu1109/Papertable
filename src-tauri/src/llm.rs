@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 
 #[derive(Debug)]
@@ -562,6 +563,7 @@ pub fn stream(
     request: &ChatRequest,
     channel: &Channel<StreamEvent>,
     tap: &SseTap,
+    cancelled: &AtomicBool,
 ) -> Result<()> {
     if let Err(e) = validate(request) {
         let _ = channel.send(StreamEvent::Error {
@@ -575,6 +577,10 @@ pub fn stream(
             message: "模型服务未配置或密钥无效，请在设置页填写。".into(),
         });
         let _ = channel.send(StreamEvent::Done { stopped: false });
+        return Ok(());
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        let _ = channel.send(StreamEvent::Done { stopped: true });
         return Ok(());
     }
 
@@ -604,7 +610,12 @@ pub fn stream(
     };
 
     let mut emitted = false;
+    let mut stopped = cancelled.load(Ordering::Relaxed);
     for line in BufReader::new(reader).lines() {
+        if cancelled.load(Ordering::Relaxed) {
+            stopped = true;
+            break;
+        }
         let Ok(line) = line else { break };
         let Some(data) = line.strip_prefix("data:") else {
             continue;
@@ -629,12 +640,12 @@ pub fn stream(
         }
     }
 
-    if !emitted {
+    if !emitted && !stopped {
         let _ = channel.send(StreamEvent::Error {
             message: "模型没有返回可显示的文本，请重试。".into(),
         });
     }
-    let _ = channel.send(StreamEvent::Done { stopped: false });
+    let _ = channel.send(StreamEvent::Done { stopped });
     Ok(())
 }
 

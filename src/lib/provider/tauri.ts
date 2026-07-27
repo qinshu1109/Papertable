@@ -57,6 +57,7 @@ export async function* streamModel(input: {
   signal: AbortSignal;
   temperature?: number;
 }) {
+  const requestId = crypto.randomUUID();
   const queue: WireEvent[] = [];
   const waiters: ((event: WireEvent) => void)[] = [];
   let finished = false;
@@ -70,10 +71,18 @@ export async function* streamModel(input: {
   const channel = new Channel<WireEvent>();
   channel.onmessage = push;
 
-  const onAbort = () => push({ type: "done", stopped: true });
+  const onAbort = () => {
+    void invoke<void>("llm_cancel_stream", { requestId });
+    push({ type: "done", stopped: true });
+  };
   input.signal.addEventListener("abort", onAbort, { once: true });
 
+  if (input.signal.aborted) {
+    onAbort();
+    return;
+  }
   void invoke<void>("llm_stream", {
+    requestId,
     request: {
       task: input.task,
       messages: input.messages,
@@ -108,6 +117,7 @@ export async function* streamModel(input: {
     }
   } finally {
     input.signal.removeEventListener("abort", onAbort);
+    if (!finished) void invoke<void>("llm_cancel_stream", { requestId });
   }
 }
 

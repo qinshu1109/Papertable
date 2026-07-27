@@ -43,7 +43,7 @@ buildContext({ cards, edges, snapshots, references, currentCardId });
 - `view`、`settings`
 - `interactionEvents`（append-only 行为事件）、`sessionBoundaries`、`proposals`
 
-卡片与轮次分表。日常保存走 `applyChanges()` 的增量写入：与上次落库的快照做引用比较，只写真正变了的行，一次流式 token 追加只触碰一张卡片和一条轮次。正常变化很快保存，流式生成按最多 500 ms 批量保存；停止后的部分内容保留。
+卡片与轮次分表。日常保存走 `applyChanges()` 的增量写入：与上次落库的快照做引用比较，只写真正变了的行。模型 token 先进入每个任务自己的输出闸门与 UI 节流器：当前可见卡片最多约每 80 ms 提交一次，后台卡片最多约每 360 ms 提交一次；每次只触碰一张卡片和一条轮次。持久化仍按最多 500 ms 批量保存；停止会先刷出已经通过闸门的正文，再标记为已停止。
 
 增量计算本身在 `src/lib/delta.ts`，是与存储后端无关的纯函数。未来迁移到 Tauri/SQLite 时，组件、`buildContext()` 和 `delta.ts` 都无需修改，只替换 `storage.ts`（`StorageAdapter` 就是它需要实现的全部表面）。
 
@@ -83,7 +83,10 @@ Proposal 不进入 `buildContext()`、正式卡片搜索或任何标准 Markdown
 - `server/index.mjs`：`GET /api/health`、`GET/POST /api/config`、`POST /api/llm/stream`、`POST /api/llm/generate`；
 - `server/cozai.mjs`：上游 OpenAI-style SSE 转 `token / done / error`；
 - `src/lib/provider.ts`：浏览器请求与 SSE 解析；
-- `store.tsx`：唯一的普通聊天流式入口；概念、标题、概念提取为非阻塞后台任务。
+- `store.tsx`：唯一的普通聊天流式入口；生成任务按 cardId 登记，不绑定当前项目或当前卡片。切换视图不取消，删除卡片、明确停止或应用退出才取消；
+- `src/lib/streamThrottle.ts`：合并高频 token，当前卡片平滑刷新、后台卡片低频刷新，结束和停止时强制提交最新正文；
+- `src-tauri/src/lib.rs`：桌面端持有独立生成任务表和取消标记，窗口失焦不会终止 Rust 侧上游连接；
+- 概念、标题、概念提取为非阻塞后台任务。
 
 失败时会保留部分输出。401、429、5xx、超时和网络错误都有中文提示，绝不退回假数据。
 

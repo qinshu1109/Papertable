@@ -77,7 +77,7 @@ function withConcepts(
   );
 }
 
-export function Markdown({ content, concepts = [], onConcept }: Props) {
+function MarkdownView({ content, concepts = [], onConcept }: Props) {
   const lines = content.split("\n");
   const blocks: React.ReactNode[] = [];
   let i = 0;
@@ -249,3 +249,14 @@ export function Markdown({ content, concepts = [], onConcept }: Props) {
 
   return <>{blocks}</>;
 }
+
+/**
+ * 流式回答只应该重新解析正在增长的那一轮。旧轮次的 `onConcept` 回调会随父组件
+ * 渲染而换引用，但它指向的 card/turn 语义不变；忽略这个引用可避免每个 token 都
+ * 把整张卡片的历史 Markdown 重算一遍。
+ */
+export const Markdown = React.memo(
+  MarkdownView,
+  (before, after) =>
+    before.content === after.content && before.concepts === after.concepts,
+);
