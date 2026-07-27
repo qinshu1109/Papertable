@@ -114,7 +114,10 @@ fn clear_workspace(state: State<Db>) -> Result<(), db::Error> {
 fn report_frontend_startup_failure(app: tauri::AppHandle, message: String) -> Result<(), String> {
     use std::io::Write;
 
-    let dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let path = dir.join("frontend-startup.log");
     let mut file = std::fs::OpenOptions::new()
