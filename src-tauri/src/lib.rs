@@ -107,6 +107,26 @@ fn clear_workspace(state: State<Db>) -> Result<(), db::Error> {
     with_db!(state, conn, db::clear_all(conn))
 }
 
+/// 前端模块在 WebView 初始化阶段异常时，至少把简短的诊断留在本机。这个命令
+/// 不读取业务数据、不回传路径，也不记录堆栈或请求内容；它只解决「白屏但没有
+/// 可见错误」这一类桌面端排障死角。
+#[tauri::command]
+fn report_frontend_startup_failure(app: tauri::AppHandle, message: String) -> Result<(), String> {
+    use std::io::Write;
+
+    let dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let path = dir.join("frontend-startup.log");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    let clipped: String = message.chars().take(4_000).collect();
+    writeln!(file, "{} | {}", now_millis(), clipped.replace('\n', " "))
+        .map_err(|error| error.to_string())
+}
+
 /// 首启导入整库备份。**源（浏览器的 IndexedDB）永不被触碰**，所以这一步失败是可
 /// 回滚的；导入后前端立刻重新 load 并逐表比对，结果显示在 UI 上。
 #[tauri::command]
@@ -539,6 +559,7 @@ pub fn run() {
             seed_if_empty,
             save_workspace,
             clear_workspace,
+            report_frontend_startup_failure,
             import_library,
             provider_health,
             provider_config,

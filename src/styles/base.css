@@ -2463,3 +2463,37 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* 启动器捕获到前端初始化异常时的最后一道可见兜底。 */
+.startup-failure {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  box-sizing: border-box;
+  width: min(640px, calc(100vw - 40px));
+  min-height: 100vh;
+  margin: 0 auto;
+  color: var(--ink);
+}
+.startup-failure h1,
+.startup-failure p {
+  margin: 0;
+}
+.startup-failure h1 {
+  font-size: 22px;
+}
+.startup-failure p {
+  color: var(--ink-2);
+  line-height: 1.65;
+}
+.startup-failure pre {
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pop);
+  background: var(--sunken);
+  color: var(--danger);
+  font: 12px/1.55 var(--mono);
+  white-space: pre-wrap;
+}

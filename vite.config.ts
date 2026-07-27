@@ -11,7 +11,10 @@ const target = process.env.PAPERTABLE_TARGET === "desktop" ? "desktop" : "web";
 
 export default defineConfig({
   plugins: [react()],
-  base: "./",
+  // Tauri 的打包资源从 `tauri://localhost/` 提供。这里必须生成根路径资源 URL；
+  // `./assets/...` 在 macOS WKWebView 中会被当成相对自定义协议资源，导致 CSS
+  // 偶尔能加载而 ES module 不会执行，最终只剩一片白屏。
+  base: target === "desktop" ? "/" : "./",
   define: {
     __PAPERTABLE_TARGET__: JSON.stringify(target),
   },
