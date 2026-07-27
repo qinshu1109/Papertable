@@ -135,6 +135,137 @@ test("390px mobile layout has no horizontal overflow", async ({ page }) => {
   ).toBe(true);
 });
 
+test("concepts open as four independent temporary cards without replacing each other", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const openConcept = async (term: string) => {
+    await page
+      .locator(".concept-term")
+      .filter({ hasText: term })
+      .first()
+      .click({ force: true });
+  };
+
+  await openConcept("希尔伯特空间");
+  await openConcept("玻恩规则");
+  await openConcept("量子退相干");
+  await expect(page.locator(".concept-pop")).toHaveCount(3);
+
+  // 同一概念只把旧窗口置顶，不创建第五份状态。
+  await openConcept("希尔伯特空间");
+  await expect(page.locator(".concept-pop")).toHaveCount(3);
+
+  await openConcept("厄米算符");
+  await expect(page.locator(".concept-pop")).toHaveCount(4);
+  await openConcept("波函数");
+  await expect(
+    page.getByText("最多同时打开 4 张临时卡片，先收起或关闭一张"),
+  ).toBeVisible();
+  await expect(page.locator(".concept-pop")).toHaveCount(4);
+
+  const hilbert = page.getByRole("dialog", {
+    name: /概念解释：希尔伯特空间/,
+  });
+  await hilbert.getByRole("button", { name: "最小化临时卡片" }).click();
+  await expect(
+    page.getByLabel("已最小化的临时卡片").getByText("希尔伯特空间"),
+  ).toBeVisible();
+  await page
+    .getByLabel("已最小化的临时卡片")
+    .getByTitle("恢复「希尔伯特空间」")
+    .click();
+  await expect(hilbert).toBeVisible();
+  await expect(hilbert).toContainText("不会进入主会话");
+  expect(
+    await hilbert.evaluate((element) => getComputedStyle(element).borderStyle),
+  ).toBe("dashed");
+});
+
+test("temporary follow-ups stay out of IndexedDB until an explicit reference or promotion", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("article")).toBeVisible();
+  await page.waitForTimeout(200);
+  const before = await workspaceCounts(page);
+  const referencesBefore = await page.locator(".ref-strip .ref-chip").count();
+  await page
+    .locator(".concept-term")
+    .filter({ hasText: "量子退相干" })
+    .first()
+    .click();
+  const temp = page.getByRole("dialog", { name: /概念解释：量子退相干/ });
+  await expect(temp).toContainText("退相干描述的是相位相干性");
+  await temp
+    .getByRole("textbox", { name: "追问概念：量子退相干" })
+    .fill("它与测量坍缩有什么区别？");
+  await temp.getByRole("button", { name: "发送临时追问" }).click();
+  await expect(temp.getByText("这是本地验收用的流式回答")).toBeVisible();
+  await page.waitForTimeout(700);
+
+  const afterFollowup = await workspaceCounts(page);
+  expect(afterFollowup.turns).toHaveLength(before.turns.length);
+
+  await temp.getByRole("button", { name: "带入当前探索" }).click();
+  await expect(page.locator(".ref-strip .ref-chip")).toHaveCount(
+    referencesBefore + 1,
+  );
+  const afterReference = await workspaceCounts(page);
+  expect(afterReference.turns).toHaveLength(before.turns.length);
+
+  await temp.getByRole("button", { name: "关闭临时卡片" }).click();
+  await expect(temp).toHaveCount(0);
+});
+
+test("composer grows vertically and restores a separate in-memory draft per card", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const textarea = page.getByRole("textbox", { name: "提问输入框" });
+  const firstDraft = "长".repeat(1_200);
+  await textarea.fill(firstDraft);
+  const metrics = await textarea.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    overflowY: getComputedStyle(element).overflowY,
+  }));
+  expect(metrics.clientHeight).toBeGreaterThan(40);
+  expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+  expect(metrics.overflowY).toBe("auto");
+
+  await page.getByRole("button", { name: /^打开量子退相干，/ }).click();
+  await expect(textarea).toHaveValue("");
+  await textarea.fill("另一张卡片的草稿");
+  await page.getByRole("button", { name: /^打开波函数，/ }).click();
+  await expect(textarea).toHaveValue(firstDraft);
+});
+
+test("390px uses a tabbed temporary-card sheet and a collapsible handle", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  const concepts = page.locator(".concept-term");
+  await concepts.filter({ hasText: "希尔伯特空间" }).first().click();
+  let sheet = page.locator(".temp-sheet:visible");
+  await expect(sheet).toBeVisible();
+  await sheet.getByRole("button", { name: "收起临时卡片" }).click();
+  await concepts.filter({ hasText: "玻恩规则" }).first().click();
+  sheet = page.locator(".temp-sheet:visible");
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByRole("tab")).toHaveCount(2);
+  await sheet.getByRole("button", { name: "收起临时卡片" }).click();
+  await expect(
+    page.getByRole("button", { name: "展开 2 张临时卡片" }),
+  ).toBeVisible();
+  expect(
+    await page
+      .locator("html")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
+
 test("390px mobile mode switch and ghost preview can be edited before starting", async ({
   page,
 }) => {
@@ -145,10 +276,13 @@ test("390px mobile mode switch and ghost preview can be edited before starting",
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
+  await page.getByRole("button", { name: "更多输入设置" }).click();
   await page.getByRole("button", { name: /回答依据：通用探索/ }).click();
+  await page.getByRole("button", { name: "更多输入设置" }).click();
   await expect(
     page.getByRole("button", { name: /回答依据：仅依据材料/ }),
   ).toBeVisible();
+  await page.keyboard.press("Escape");
   await seedPriorDaySignal(page);
   await page.reload();
   await page

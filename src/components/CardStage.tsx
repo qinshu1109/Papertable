@@ -26,7 +26,8 @@ import { EDGE_META } from "../types";
 import type { Card, Turn } from "../types";
 import { incomingEdge, pathToRoot } from "../lib/graph";
 import { Markdown } from "../lib/markdown";
-import { ConceptPreview, type ConceptState } from "./ConceptPreview";
+import type { TempCard } from "./ConceptPreview";
+import { TempCardLayer } from "./TempCardLayer";
 
 const spring = {
   type: "spring" as const,
@@ -53,6 +54,7 @@ function sourceRevision(turn: Turn) {
 
 export function CardStage() {
   const {
+    activeProjectId,
     cards,
     edges,
     currentCardId,
@@ -63,7 +65,6 @@ export function CardStage() {
     deleteCard,
     toggleFavoriteCard,
     addReference,
-    cacheConceptPreview,
     recordConceptPreviewOpened,
     recordCardDwell,
     rememberCardScroll,
@@ -83,7 +84,12 @@ export function CardStage() {
 
   const bodyRef = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<SelState | null>(null);
-  const [concept, setConcept] = useState<ConceptState | null>(null);
+  const [tempCards, setTempCards] = useState<TempCard[]>([]);
+  const tempCardsRef = useRef<TempCard[]>([]);
+  const tempProjectRef = useRef(activeProjectId);
+  const zCounter = useRef(80);
+  const [tempFlashId, setTempFlashId] = useState<string | null>(null);
+  const [tempShakeId, setTempShakeId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [spawn, setSpawn] = useState<
     null | { kind: "divergent" } | { kind: "branch" }
@@ -95,6 +101,62 @@ export function CardStage() {
   const [titleDraft, setTitleDraft] = useState("");
   const prevCard = useRef(currentCardId);
   const dwellRecordRef = useRef(recordCardDwell);
+
+  const updateTempCards = useCallback((next: TempCard[]) => {
+    tempCardsRef.current = next;
+    setTempCards(next);
+  }, []);
+
+  const focusTempCard = useCallback(
+    (id: string) => {
+      const z = ++zCounter.current;
+      updateTempCards(
+        tempCardsRef.current.map((tempCard) =>
+          tempCard.id === id ? { ...tempCard, z, minimized: false } : tempCard,
+        ),
+      );
+    },
+    [updateTempCards],
+  );
+
+  const moveTempCard = useCallback(
+    (id: string, pos: TempCard["pos"]) => {
+      updateTempCards(
+        tempCardsRef.current.map((tempCard) =>
+          tempCard.id === id ? { ...tempCard, pos } : tempCard,
+        ),
+      );
+    },
+    [updateTempCards],
+  );
+
+  const minimizeTempCard = useCallback(
+    (id: string) => {
+      updateTempCards(
+        tempCardsRef.current.map((tempCard) =>
+          tempCard.id === id ? { ...tempCard, minimized: true } : tempCard,
+        ),
+      );
+    },
+    [updateTempCards],
+  );
+
+  const closeTempCard = useCallback(
+    (id: string) => {
+      updateTempCards(
+        tempCardsRef.current.filter((tempCard) => tempCard.id !== id),
+      );
+    },
+    [updateTempCards],
+  );
+
+  useEffect(() => {
+    if (tempProjectRef.current === activeProjectId) return;
+    tempProjectRef.current = activeProjectId;
+    updateTempCards([]);
+    setTempFlashId(null);
+    setTempShakeId(null);
+  }, [activeProjectId, updateTempCards]);
 
   useEffect(() => {
     dwellRecordRef.current = recordCardDwell;
@@ -155,7 +217,6 @@ export function CardStage() {
     (id: string) => {
       rememberScroll();
       setSel(null);
-      setConcept(null);
       setCurrentCard(id);
     },
     [currentCardId, setCurrentCard],
@@ -216,7 +277,6 @@ export function CardStage() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setSel(null);
-      setConcept(null);
       setSpawn(null);
       setMenuOpen(false);
     };
@@ -231,6 +291,71 @@ export function CardStage() {
     ? cards.find((c) => c.id === inEdge.sourceCardId)
     : undefined;
   const meta = inEdge ? EDGE_META[inEdge.type] : null;
+
+  const openTempCard = (
+    term: string,
+    blockText: string,
+    turn: Turn,
+    element: HTMLElement,
+  ) => {
+    const normalized = term.trim().toLocaleLowerCase();
+    const existing = tempCardsRef.current.find(
+      (tempCard) => tempCard.term.trim().toLocaleLowerCase() === normalized,
+    );
+    if (existing) {
+      focusTempCard(existing.id);
+      setTempFlashId(existing.id);
+      window.setTimeout(() => setTempFlashId(null), 360);
+      return;
+    }
+
+    if (tempCardsRef.current.length >= 4) {
+      const oldest = [...tempCardsRef.current].sort(
+        (a, b) => a.createdAt - b.createdAt,
+      )[0];
+      if (oldest) {
+        setTempShakeId(oldest.id);
+        window.setTimeout(() => setTempShakeId(null), 260);
+      }
+      showToast({
+        text: "最多同时打开 4 张临时卡片，先收起或关闭一张",
+      });
+      return;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const maxX = Math.max(12, window.innerWidth - 432);
+    const maxY = Math.max(56, window.innerHeight - 390);
+    const start = {
+      x: Math.max(12, Math.min(maxX, rect.left)),
+      y: Math.max(56, Math.min(maxY, rect.bottom + 10)),
+    };
+    const previous = [...tempCardsRef.current].sort(
+      (a, b) => b.createdAt - a.createdAt,
+    )[0];
+    const cascaded = previous
+      ? { x: previous.pos.x + 28, y: previous.pos.y + 28 }
+      : start;
+    const pos = cascaded.x > maxX || cascaded.y > maxY ? start : cascaded;
+    const now = Date.now();
+    const next: TempCard = {
+      id: `temp-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      term,
+      anchor: {
+        cardId: card.id,
+        turnId: turn.id,
+        text: term,
+        exact: term,
+        blockText,
+        sourceRevision: sourceRevision(turn),
+      },
+      pos,
+      z: ++zCounter.current,
+      minimized: false,
+      createdAt: now,
+    };
+    updateTempCards([...tempCardsRef.current, next]);
+  };
 
   const copy = async (text: string, key: string) => {
     try {
@@ -339,7 +464,9 @@ export function CardStage() {
   };
 
   return (
-    <div className="stage">
+    <div
+      className={`stage${tempCards.some((tempCard) => tempCard.minimized) ? " has-temp-dock" : ""}`}
+    >
       <div className="stack">
         {/* 后方祖先卡片 */}
         {ancestors.map((id, i) => {
@@ -604,16 +731,7 @@ export function CardStage() {
                         turnId: turn.id,
                         concept: term,
                       });
-                      const r = el.getBoundingClientRect();
-                      setConcept({
-                        term,
-                        blockText,
-                        cardId: card.id,
-                        turnId: turn.id,
-                        sourceRevision: sourceRevision(turn),
-                        x: Math.min(r.left, window.innerWidth - 440),
-                        y: Math.min(r.bottom + 10, window.innerHeight - 340),
-                      });
+                      openTempCard(term, blockText, turn, el);
                     }}
                     onChild={() =>
                       spawnChild({
@@ -866,73 +984,16 @@ export function CardStage() {
         </div>
       )}
 
-      {/* 概念预览 */}
-      {concept && (
-        <ConceptPreview
-          state={concept}
-          sourceTitle={card.title}
-          cachedText={(() => {
-            const entry =
-              card.conceptPreviewCache?.[
-                `${concept.turnId ?? "card"}:${concept.term}`
-              ];
-            return entry?.sourceRevision === concept.sourceRevision
-              ? entry.content
-              : undefined;
-          })()}
-          onCache={(content) =>
-            cacheConceptPreview(
-              card.id,
-              `${concept.turnId ?? "card"}:${concept.term}`,
-              {
-                sourceRevision: concept.sourceRevision,
-                content,
-                createdAt: Date.now(),
-              },
-            )
-          }
-          onClose={() => setConcept(null)}
-          onQuote={(text) => {
-            addReference(
-              {
-                cardId: card.id,
-                turnId: concept.turnId,
-                text,
-                blockText: concept.blockText,
-              },
-              card.title,
-            );
-            setConcept(null);
-          }}
-          onPromote={(term, body) => {
-            rememberScroll();
-            createCard({
-              type: "child",
-              sourceCardId: card.id,
-              sourceTurnId: concept.turnId,
-              sourceText: term,
-              sourceBlockText: concept.blockText,
-              title: term,
-              origin: "concept-promotion",
-              seedTurns: [
-                {
-                  id: `t-${Date.now()}-u`,
-                  role: "user",
-                  content: `深挖概念：${term}`,
-                  createdAt: Date.now(),
-                },
-                {
-                  id: `t-${Date.now()}-a`,
-                  role: "ai",
-                  content: body,
-                  createdAt: Date.now(),
-                },
-              ],
-            });
-            setConcept(null);
-          }}
-        />
-      )}
+      <TempCardLayer
+        cards={tempCards}
+        flashId={tempFlashId}
+        shakeId={tempShakeId}
+        onFocus={focusTempCard}
+        onMove={moveTempCard}
+        onMinimize={minimizeTempCard}
+        onRestore={focusTempCard}
+        onClose={closeTempCard}
+      />
     </div>
   );
 }
