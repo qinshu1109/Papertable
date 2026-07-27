@@ -43,9 +43,24 @@ buildContext({ cards, edges, snapshots, references, currentCardId });
 - `view`、`settings`
 - `interactionEvents`（append-only 行为事件）、`sessionBoundaries`、`proposals`
 
-卡片与轮次分表；写入在同一个 IndexedDB transaction 中替换一致快照。正常变化很快保存，流式生成按最多 500 ms 批量保存；停止后的部分内容保留。未来迁移到 Tauri/SQLite 时，组件和 `buildContext()` 无需修改，只替换 storage adapter。
+卡片与轮次分表。日常保存走 `applyChanges()` 的增量写入：与上次落库的快照做引用比较，只写真正变了的行，一次流式 token 追加只触碰一张卡片和一条轮次。正常变化很快保存，流式生成按最多 500 ms 批量保存；停止后的部分内容保留。
 
-普通 `saveWorkspace()` 明确只替换业务表，绝不会清掉 append-only 的行为事件。项目删除与“清除本地数据”才会同时删除实验表。
+增量计算本身在 `src/lib/delta.ts`，是与存储后端无关的纯函数。未来迁移到 Tauri/SQLite 时，组件、`buildContext()` 和 `delta.ts` 都无需修改，只替换 `storage.ts`（`StorageAdapter` 就是它需要实现的全部表面）。
+
+### 删除规则（不变量）
+
+**一行只能通过 (1) 指名具体 id 的显式意图，或 (2) 在写事务内针对数据库求值的谓词来删除；永不通过与内存基线做集合差。**
+
+自动保存的写入口不具备删除能力——`WorkspaceUpsert` 里根本没有 `deletes` 字段。删除只有三个入口：
+
+- `deleteProjectCascade(projectId)`：在事务内按 projectId 重新查库定位所有从属行，因此另一个标签页刚建的卡片也会被正确删除；返回被删的行供撤销精确还原。
+- `deleteReferences(ids)` / `deleteProposals(ids)`：调用点永远拿得到具体 id。
+
+这条规则的由来：删除原本是从「每个标签页私有、挂载后再不与库对账的基线」推导出来的，于是一个陈旧的标签页会真正 `bulkDelete` 掉另一个标签页刚建的行——不是覆盖，是删除。规则与存储后端无关，SQLite 迁移后继续成立（届时级联会塌缩成一句带 `ON DELETE CASCADE` 的 `DELETE`）。
+
+残留的最坏情况是「复活已删行」：另一个标签页删了某行，本标签页的基线还留着它，于是又写回去。那是可见的、非破坏性的。真正的跨标签页实时同步（BroadcastChannel 增量广播）尚未实现。
+
+`putAttentionState()` 是 upsert-only，绝不会清掉 append-only 的行为事件，也不会清掉另一个标签页生成的会话与提案。“清除本地数据”是唯一的全量清除。
 
 ## 注意力提案侧车（第一阶段）
 
@@ -71,6 +86,11 @@ Proposal 不进入 `buildContext()`、正式卡片搜索或任何标准 Markdown
 - `store.tsx`：唯一的普通聊天流式入口；概念、标题、概念提取为非阻塞后台任务。
 
 失败时会保留部分输出。401、429、5xx、超时和网络错误都有中文提示，绝不退回假数据。
+
+模型草稿（例如上游的 `reasoning_content`）不是产品数据：本机中继识别后立刻丢弃，正文
+仍必须通过 `ANSWER_SENTINEL` 闸门才会展示或持久化。草稿不进入 React state、IndexedDB、
+SQLite、导出包、知识库同步、后续 `buildContext()` 或任何 UI；旧版本遗留字段会在存储迁移和
+每次读取前的兼容清理中移除。
 
 ## 格式适配
 

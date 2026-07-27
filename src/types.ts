@@ -179,6 +179,23 @@ export interface AppSettings {
   attentionPromptedDates?: Record<string, string>;
   /** 实验期间的提示计数历史；与每日去重表分开，避免多天被覆盖。 */
   attentionPromptHistory?: string[];
+  /**
+   * Obsidian vault 根目录。仅桌面版；未设置时同步整体关闭。
+   * Papertable 只写它下面的 `80_AI暂存/Papertable/`，见 docs/VAULT_SYNC.md。
+   */
+  vaultPath?: string;
+  /**
+   * 开启了 vault 同步的项目 id。**按项目 opt-in**，不是全局——不该有人某天醒来
+   * 发现整个工作区被镜像进了知识库。
+   */
+  vaultSyncedProjects?: string[];
+  /**
+   * Papertable 在知识库里拥有的子树，相对于 `vaultPath`。未设置时用默认值。
+   *
+   * 可配置的是**落点**，不是要不要检查：Rust 侧仍然只有一个容纳根、仍然逐次断言，
+   * 并且拒绝绝对路径、`..` 和以 `.` 开头的分量。
+   */
+  vaultSubtree?: string;
 }
 
 /**
@@ -349,3 +366,10 @@ export const EDGE_META: Record<
     enterFrom: { x: -120, y: 12, rotate: -2.5 },
   },
 };
+
+/** 挂起中的 vault 冲突：用户在 Obsidian 改过这篇笔记，同步已停在这里。 */
+export interface VaultConflict {
+  cardId: string;
+  /** vault 相对路径，用于在横幅上点名文件。 */
+  path: string;
+}

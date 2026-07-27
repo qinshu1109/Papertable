@@ -1,4 +1,5 @@
-import type { LlmMessage } from "../types";
+import type { LlmMessage } from "../../types";
+import type { OutputChannel } from "../modelOutput";
 
 export interface ProviderHealth {
   configured: boolean;
@@ -16,6 +17,33 @@ export interface ProviderConfig {
 }
 
 export type ModelTask = "chat" | "concept-preview" | "title" | "concepts";
+
+/** 密钥实际存在哪。web 端只有本机服务的 .env.local 这一种。 */
+export type KeySource = "keychain" | "file" | "none";
+
+export async function getKeySource(): Promise<KeySource> {
+  const config = await getProviderConfig();
+  return config.hasApiKey ? "file" : "none";
+}
+
+/** 这一份构建是什么。web 端没有多份 bundle 的问题，返回固定说明。 */
+export interface BuildInfo {
+  version: string;
+  commit: string;
+  builtAt: string;
+  exe: string;
+  installed: boolean;
+}
+
+export function getBuildInfo(): Promise<BuildInfo> {
+  return Promise.resolve({
+    version: "web",
+    commit: "-",
+    builtAt: "-",
+    exe: "浏览器",
+    installed: true,
+  });
+}
 
 export async function getProviderHealth(): Promise<ProviderHealth> {
   const response = await fetch("/api/health", { cache: "no-store" });
@@ -88,9 +116,17 @@ export async function* streamModel(input: {
         const type = event.match(/^event:\s*(.+)$/m)?.[1]?.trim();
         const raw = event.match(/^data:\s*(.+)$/m)?.[1];
         if (!type || !raw) continue;
-        const payload = JSON.parse(raw) as { text?: string; message?: string };
+        const payload = JSON.parse(raw) as {
+          text?: string;
+          message?: string;
+          channel?: OutputChannel;
+        };
         if (type === "token" && payload.text)
-          yield { type: "token" as const, text: payload.text };
+          yield {
+            type: "token" as const,
+            text: payload.text,
+            channel: payload.channel ?? ("unknown" as const),
+          };
         if (type === "error")
           throw new Error(payload.message || "模型生成失败。");
         if (type === "done") return;

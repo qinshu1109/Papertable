@@ -1,0 +1,39 @@
+[package]
+name = "papertable"
+version = "0.1.0"
+description = "Papertable · 本地图结构知识探索"
+authors = ["qinshu"]
+license = ""
+repository = "https://github.com/qinshu1109/Papertable"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "papertable_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+# 手写 rusqlite，不用 tauri-plugin-sql：后者向 JS 暴露 execute(sql, params) 字符串
+# API，一次触及 9 张表的 applyChanges 会变成 N 次 IPC 往返加逐行 JSON 序列化，而且
+# 无法包进一个可回滚的事务——只能把 BEGIN/COMMIT 当字符串发出去然后祈祷。
+# applyChanges 每 120 ms 触发一次（流式中 500 ms），它必须是一次 IPC、一个事务。
+# 另外 vault 写入器在 Rust 侧，需要读同一个库。
+keyring = { version = "3", features = ["apple-native"] }
+notify = "6"
+walkdir = "2"
+sha2 = "0.10"
+ureq = { version = "2", features = ["json", "tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"

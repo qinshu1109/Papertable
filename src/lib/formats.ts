@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { parseWikilinks, stripWikilinks } from "./wikilink";
 import type {
   Card,
   CardEdge,
@@ -9,10 +10,36 @@ import type {
   Project,
   ReferenceChip,
   SourceAnchor,
+  Turn,
   ViewState,
 } from "../types";
 
 const now = () => Date.now();
+
+/**
+ * v4 之前的本地库曾有一个不该存在的 `reasoning` 字段。正常迁移会在读库时清掉它；
+ * 这里再防御一次，确保用户在迁移前立即导出时也绝不把旧草稿带出应用。
+ */
+type LegacyTurn = Turn & { reasoning?: unknown };
+
+function withoutLegacyReasoning(card: Card): Card {
+  if (!card.turns.some((turn) => "reasoning" in (turn as LegacyTurn)))
+    return card;
+  return {
+    ...card,
+    turns: card.turns.map((turn) => {
+      const { reasoning: _legacy, ...safeTurn } = turn as LegacyTurn;
+      void _legacy;
+      return safeTurn as Turn;
+    }),
+  };
+}
+
+function projectWithoutLegacyReasoning(
+  project: PortableProject,
+): PortableProject {
+  return { ...project, cards: project.cards.map(withoutLegacyReasoning) };
+}
 const id = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 const safeName = (value: string) =>
   value
@@ -34,7 +61,8 @@ function metadata(project: PortableProject, card: Card) {
   };
 }
 
-export function cardMarkdown(project: PortableProject, card: Card) {
+export function cardMarkdown(project: PortableProject, input: Card) {
+  const card = withoutLegacyReasoning(input);
   const meta = metadata(project, card);
   const frontmatter = Object.entries(meta)
     .filter(([, value]) => value !== undefined)
@@ -124,6 +152,45 @@ function defaultView(projectId: string, cardId: string): Partial<ViewState> {
   };
 }
 
+/**
+ * 把导入内容里的 `[[双链]]` 变成 `ReferenceChip`。
+ *
+ * README 一直这么写着，但这个功能从来没有实现过——`assemble()` 硬编码了
+ * `references: []`。现在补上。
+ *
+ * **只生成引用，绝不推断 `CardEdge`。** 边携带冻结的 `ContextSnapshot`，而一条
+ * `[[链接]]` 没有快照；由它造一条边等于凭空伪造出处。
+ */
+function referencesFromLinks(
+  projectId: string,
+  cards: Card[],
+): ReferenceChip[] {
+  const byTitle = new Map(cards.map((card) => [card.title, card]));
+  const references: ReferenceChip[] = [];
+  const seen = new Set<string>();
+  for (const card of cards) {
+    for (const turn of card.turns) {
+      for (const link of parseWikilinks(turn.content)) {
+        const key = `${card.id}::${link.name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const target = byTitle.get(link.name);
+        references.push({
+          id: id("ref"),
+          projectId,
+          sourceTitle: target?.title ?? link.name,
+          excerpt: stripWikilinks(link.label).slice(0, 180),
+          // 链接目标不在这批导入里时仍然保留引用，anchor 指向写下它的那张卡片。
+          anchor: target
+            ? { cardId: target.id, text: link.label }
+            : { cardId: card.id, text: link.label },
+        });
+      }
+    }
+  }
+  return references;
+}
+
 function assemble(
   project: Project,
   cards: Card[],
@@ -145,7 +212,8 @@ function assemble(
   };
 }
 
-export function projectBundle(project: PortableProject) {
+export function projectBundle(input: PortableProject) {
+  const project = projectWithoutLegacyReasoning(input);
   const zip = new JSZip();
   const root = safeName(project.project.name);
   // Whitelist the portable contract. Experimental event/session/proposal data
@@ -184,7 +252,8 @@ export function projectBundle(project: PortableProject) {
     .then((blob) => ({ filename: `${root}.papertable.zip`, blob }));
 }
 
-export function markdownFolder(project: PortableProject) {
+export function markdownFolder(input: PortableProject) {
+  const project = projectWithoutLegacyReasoning(input);
   const zip = new JSZip();
   const root = safeName(project.project.name);
   for (const card of project.cards)
@@ -201,7 +270,8 @@ export function markdownFolder(project: PortableProject) {
     .then((blob) => ({ filename: `${root}-markdown.zip`, blob }));
 }
 
-export function jsonCanvas(project: PortableProject) {
+export function jsonCanvas(input: PortableProject) {
+  const project = projectWithoutLegacyReasoning(input);
   const zip = new JSZip();
   const root = safeName(project.project.name);
   const nodes = project.cards.map((card, index) => ({
@@ -287,6 +357,9 @@ async function markdownImport(input: ImportInput): Promise<PortableProject> {
       (edge) =>
         cardIds.has(edge.sourceCardId) && cardIds.has(edge.targetCardId),
     ),
+    [],
+    [],
+    referencesFromLinks(project.id, cards),
   );
 }
 
@@ -343,7 +416,14 @@ async function canvasImport(input: ImportInput): Promise<PortableProject> {
     });
   if (!cards.length)
     throw new Error("JSON Canvas 中没有可导入的文本或文件节点。");
-  return assemble(project, cards, edges);
+  return assemble(
+    project,
+    cards,
+    edges,
+    [],
+    [],
+    referencesFromLinks(project.id, cards),
+  );
 }
 
 export const formatAdapters = {

@@ -1133,7 +1133,9 @@ function TurnBlock({
 
       {turn.status === "stopped" && (
         <div className="thinking" style={{ color: "var(--ink-2)" }}>
-          已停止，已保留生成内容。
+          {turn.content.trim()
+            ? "已停止，已保留生成内容。"
+            : "已停止，未产生可显示的最终文本。"}
         </div>
       )}
 

@@ -10,6 +10,8 @@ export default tseslint.config(
       "playwright-report",
       "test-results",
       "*.tsbuildinfo",
+      // Rust 侧：图标是二进制，target/ 是构建产物。
+      "src-tauri",
     ],
   },
   js.configs.recommended,

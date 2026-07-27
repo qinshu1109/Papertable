@@ -12,8 +12,12 @@ import {
   X,
 } from "lucide-react";
 import {
+  getBuildInfo,
+  getKeySource,
   getProviderConfig,
   saveProviderConfig,
+  type BuildInfo,
+  type KeySource,
   type ProviderConfig,
 } from "../lib/provider";
 import { useStore } from "../store";
@@ -289,11 +293,21 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     provider,
     refreshProvider,
     exportAllBackup,
+    exportLibraryBackup,
+    importLibraryBackup,
     clearLocalData,
     showToast,
     attentionMetrics,
     attentionPaused,
     setAttentionPaused,
+    vaultAvailable,
+    chooseVaultPath,
+    rescanVault,
+    vaultIndexed,
+    toggleProjectVaultSync,
+    vaultPath,
+    vaultSyncedProjects,
+    projects,
   } = useStore();
   const [testing, setTesting] = useState(false);
   const [savingConnection, setSavingConnection] = useState(false);
@@ -304,6 +318,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   );
   const [model, setModel] = useState(provider?.model ?? "claude-opus-5");
   const [apiKey, setApiKey] = useState("");
+  const [keySource, setKeySource] = useState<KeySource>("none");
+  const [build, setBuild] = useState<BuildInfo | null>(null);
+  useEffect(() => {
+    void getBuildInfo()
+      .then(setBuild)
+      .catch(() => undefined);
+  }, []);
   useEffect(() => {
     let active = true;
     void getProviderConfig()
@@ -312,6 +333,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         setConnection(config);
         setBaseUrl(config.baseUrl);
         setModel(config.model);
+        void getKeySource().then((source) => active && setKeySource(source));
       })
       .catch((error) => {
         if (!active) return;
@@ -341,6 +363,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       setBaseUrl(saved.baseUrl);
       setModel(saved.model);
       setApiKey("");
+      setKeySource(await getKeySource());
       const health = await refreshProvider();
       showToast({
         text: health?.configured
@@ -425,6 +448,19 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             aria-label="API 密钥"
           />
         </label>
+        {/*
+          如实展示密钥到底存在哪。钥匙串取不到时会回落到 0600 文件——把回落显示成
+          「已进钥匙串」，会让人以为磁盘上没有明文密钥。
+        */}
+        {keySource !== "none" && (
+          <p className="note-line" style={{ marginTop: 6 }}>
+            {keySource === "keychain"
+              ? "密钥保存在系统钥匙串。"
+              : vaultAvailable
+                ? "密钥保存在应用数据目录的 0600 文件里（系统钥匙串不可用时的回落）。"
+                : "密钥保存在本机服务的 .env.local（0600，已被 Git 忽略）。"}
+          </p>
+        )}
         <button
           className="btn primary"
           style={{ marginTop: 12 }}
@@ -443,10 +479,15 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <RefreshCw size={14} />
           {testing ? "测试中…" : "测试连接"}
         </button>
+        {/*
+          密钥的落点**只在一处描述**，就是上面那行由 keySource 驱动的话。
+          这里曾经写死「保存到未提交的 .env.local」——那是 web 端本机服务的路径，
+          桌面版根本不用它，于是同一个页面上出现了两种互相矛盾的说明。
+          描述真实状态的字段已经有了，这里就不该再有第二个说法。
+        */}
         <p className="note-line">
-          密钥只提交给 127.0.0.1 的本机服务，页面不会回显、保存到 IndexedDB
-          或打包进导出文件。保存后会写入未提交的 .env.local；接口地址仅接受
-          HTTPS 或本机 HTTP。
+          密钥不会回显、不进 IndexedDB、不打包进导出文件。接口地址仅接受 HTTPS
+          或本机 HTTP。
         </p>
         <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
           注意力观察
@@ -485,6 +526,105 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         <p className="note-line">
           这里只统计本机行为；第一阶段不连接 MemOS，也不会为提案额外调用模型。
         </p>
+        {/* web 端整块不出现：浏览器里的网页碰不到硬盘，这不是「暂未实现」。 */}
+        {vaultAvailable && (
+          <>
+            <div
+              className="fmt-name"
+              style={{ marginTop: 22, marginBottom: 8 }}
+            >
+              知识库同步
+            </div>
+            <p className="note-line" style={{ marginTop: 0 }}>
+              Papertable 只写入 <code>80_AI暂存/Papertable/</code>
+              ，绝不碰知识库的 其他位置。正式知识请照常经 knowledge-coach
+              发布。你在 Obsidian
+              里改过的笔记不会被覆盖——会另存冲突文件并暂停那张卡片的同步。
+            </p>
+            <button className="btn" onClick={() => void chooseVaultPath()}>
+              <FolderTree size={14} />
+              {vaultPath ? "更换知识库目录" : "选择知识库目录"}
+            </button>
+            {vaultPath && (
+              <>
+                <p className="note-line" style={{ marginTop: 8 }}>
+                  当前：<code>{vaultPath}</code>
+                  {vaultIndexed > 0 && ` · 已索引 ${vaultIndexed} 篇笔记`}
+                </p>
+                <button
+                  className="btn"
+                  onClick={() => void rescanVault()}
+                  title="监听器出问题时的手动兜底：重新全量扫描知识库并重新开始监听"
+                >
+                  <RefreshCw size={14} />
+                  重新扫描知识库
+                </button>
+                <div className="fmt-desc" style={{ margin: "12px 0 6px" }}>
+                  按项目开启（默认全部关闭）
+                </div>
+                {projects.map((project) => {
+                  const on = vaultSyncedProjects.includes(project.id);
+                  return (
+                    <button
+                      key={project.id}
+                      className={`fmt-option${on ? " sel" : ""}`}
+                      onClick={() => void toggleProjectVaultSync(project.id)}
+                      aria-pressed={on}
+                    >
+                      <span className="fmt-icon">
+                        <FolderTree size={15} />
+                      </span>
+                      <span style={{ minWidth: 0, flex: 1 }}>
+                        <span className="fmt-name">{project.name}</span>
+                        <span className="fmt-desc">
+                          {on ? "已同步到知识库" : "未同步"}
+                        </span>
+                      </span>
+                      {on && (
+                        <Check
+                          size={15}
+                          color="var(--accent)"
+                          style={{ marginTop: 6 }}
+                        />
+                      )}
+                    </button>
+                  );
+                })}
+              </>
+            )}
+          </>
+        )}
+
+        {/*
+          构建标识。三份 bundle 共用 bundle id 和版本号、共用同一个数据库，
+          界面上曾经无从分辨打开的是哪一份——运行了三小时前的旧代码而毫无察觉。
+        */}
+        {build && (
+          <>
+            <div
+              className="fmt-name"
+              style={{ marginTop: 22, marginBottom: 8 }}
+            >
+              这一份构建
+            </div>
+            {!build.installed && (
+              <p
+                className="note-line"
+                style={{ marginTop: 0, color: "var(--danger)" }}
+              >
+                你运行的**不是** /Applications
+                里正式安装的那一份，而是构建产物。
+                它与正式版共用同一个数据库，改动看起来会像没生效。
+              </p>
+            )}
+            <p className="note-line" style={{ marginTop: 0 }}>
+              {build.commit} · 构建于 {build.builtAt}
+              <br />
+              <code>{build.exe}</code>
+            </p>
+          </>
+        )}
+
         <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
           本地数据
         </div>
@@ -492,6 +632,41 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <Package size={14} />
           导出全部备份
         </button>
+        <button
+          className="btn"
+          style={{ marginLeft: 8 }}
+          onClick={() => void exportLibraryBackup()}
+          title="一个 JSON 覆盖全部 12 张表，含视图、设置与注意力实验数据。迁移到桌面版时需要它——浏览器的 IndexedDB 无法被桌面应用直接读取。"
+        >
+          <Package size={14} />
+          导出整库 JSON
+        </button>
+        <label
+          className="btn"
+          style={{ marginLeft: 8, cursor: "pointer" }}
+          title="用整库 JSON 覆盖当前后端的全部数据。导入后会立刻重新读出来逐表比对，结果显示在提示里。"
+        >
+          <Package size={14} />
+          导入整库 JSON
+          <input
+            type="file"
+            accept="application/json,.json"
+            className="sr-only"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (!file) return;
+              void file
+                .text()
+                .then((text) => importLibraryBackup(text))
+                .catch((cause: unknown) =>
+                  showToast({
+                    text: cause instanceof Error ? cause.message : "导入失败。",
+                  }),
+                );
+            }}
+          />
+        </label>
         {!confirmClear ? (
           <button
             className="btn"

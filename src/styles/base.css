@@ -13,7 +13,14 @@
   /* 文字 */
   --ink: #342b26;
   --ink-2: #665d56;
-  --ink-3: #746b63;
+  /* 弱化文字**只有一档**。
+     原来的 #746b63 只在最亮的 --card / --raised / --bg 上勉强过 4.5:1（4.51–4.92），
+     落到 --sunken(4.17)、--composer(4.28)、--card-back(4.10) 或 hover 态的
+     --accent-soft(4.05) 上都不达标。曾经拆成两档，让调用点自己判断该用哪一个——
+     结果是漏了一批，真人两次反馈「关系面板和小图标偏低」。
+     现在只留一个值：在全部九个表面 token 上最低 4.64:1，且与正文仍有明显区分。
+     一个 token 就没有选错 token 这回事。 */
+  --ink-3: #6b6259;
 
   /* 线条 */
   --line: #d8d0c6;
@@ -799,6 +806,8 @@ textarea {
   flex-shrink: 0;
 }
 .rel-btn small {
+  /* 常态在 --raised 上，但 .k-child:hover 会把背景换成 --accent-soft，
+     11px 的 --ink-3 在那里只有 4.05:1。 */
   color: var(--ink-3);
   font-size: 11px;
   font-weight: 400;
@@ -2398,4 +2407,93 @@ textarea {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ============================================================
+   知识库同步冲突横幅
+   常驻，不自动消失：它承载的是一个待用户决定的二选一。
+   ============================================================ */
+.vault-conflicts {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 60;
+  max-width: 420px;
+  padding: 13px 15px;
+  border-radius: var(--r-pop);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--danger);
+  background: var(--card);
+  box-shadow: var(--sh-pop);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.vault-conflict-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.vault-conflicts p {
+  margin: 0 0 10px;
+  line-height: 1.6;
+}
+.vault-conflicts code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--sunken);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: var(--ink-3);
+}
+.vault-conflict-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+}
+.vault-conflict-row code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 启动器捕获到前端初始化异常时的最后一道可见兜底。 */
+.startup-failure {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  box-sizing: border-box;
+  width: min(640px, calc(100vw - 40px));
+  min-height: 100vh;
+  margin: 0 auto;
+  color: var(--ink);
+}
+.startup-failure h1,
+.startup-failure p {
+  margin: 0;
+}
+.startup-failure h1 {
+  font-size: 22px;
+}
+.startup-failure p {
+  color: var(--ink-2);
+  line-height: 1.65;
+}
+.startup-failure pre {
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pop);
+  background: var(--sunken);
+  color: var(--danger);
+  font: 12px/1.55 var(--mono);
+  white-space: pre-wrap;
 }

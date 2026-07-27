@@ -6,3 +6,4 @@ test-results
 pnpm-lock.yaml
 DESIGN_NOTES.md
 index.html
+src-tauri

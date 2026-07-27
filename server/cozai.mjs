@@ -7,8 +7,17 @@ export function friendlyProviderError(status, body = "") {
   return body.slice(0, 280) || "模型服务返回了无法处理的响应。";
 }
 
+/**
+ * 识别正文与草稿推理字段。草稿绝不转发、记录或展示；正文仍要经过客户端哨兵闸门。
+ */
 export function extractDelta(payload) {
-  return payload?.choices?.[0]?.delta?.content ?? "";
+  const delta = payload?.choices?.[0]?.delta ?? {};
+  const reasoning =
+    delta.reasoning_content ?? delta.reasoning ?? delta.thinking ?? "";
+  return {
+    content: typeof delta.content === "string" ? delta.content : "",
+    reasoning: typeof reasoning === "string" ? reasoning : "",
+  };
 }
 
 export function extractMessage(payload) {
@@ -52,9 +61,15 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
         if (!data || data === "[DONE]") continue;
         try {
           const delta = extractDelta(JSON.parse(data));
-          if (delta) {
+          if (delta.content) {
+            // `emitted` 只由 content 驱动，只有推理没有正文时仍要报错。
             emitted = true;
-            write(sseEvent("token", { text: delta }));
+            write(
+              sseEvent("token", {
+                text: delta.content,
+                channel: "unknown",
+              }),
+            );
           }
         } catch {
           // Keep the UI stream alive if a non-JSON provider heartbeat arrives.

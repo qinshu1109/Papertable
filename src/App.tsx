@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Menu, Sparkles } from "lucide-react";
+import { AlertTriangle, Menu, Sparkles } from "lucide-react";
 import { useStore } from "./store";
 import { ProjectSidebar } from "./components/ProjectSidebar";
 import { CardStage } from "./components/CardStage";
@@ -12,6 +12,7 @@ import {
   SettingsDialog,
 } from "./components/Dialogs";
 import { EDGE_META } from "./types";
+import type { VaultConflict } from "./types";
 import { incomingEdge, layoutGraph, pathToRoot } from "./lib/graph";
 import { scopeProject } from "./lib/projectScope";
 import { ProposalExplorer } from "./components/ProposalExplorer";
@@ -26,6 +27,8 @@ export function App() {
     collapsed,
     toast,
     dismissToast,
+    vaultConflicts,
+    resolveVaultConflict,
     activeProposals,
     morningPrompt,
     proposalTrayOpen,
@@ -229,6 +232,49 @@ export function App() {
           </motion.aside>
         )}
       </AnimatePresence>
+
+      {/*
+        冲突横幅是常驻的，不是 toast：它需要用户做一次二选一，在此之前那张卡片的
+        同步一直挂起。用会自动消失的提示来承载一个待决决定，等于把它丢掉。
+      */}
+      {vaultConflicts.length > 0 && (
+        <aside className="vault-conflicts" aria-label="知识库同步冲突">
+          <div className="vault-conflict-head">
+            <AlertTriangle size={15} color="var(--danger)" />
+            <strong>
+              有 {vaultConflicts.length} 篇笔记你在 Obsidian 里改过
+            </strong>
+          </div>
+          <p>
+            Papertable 没有覆盖它们，新内容另存为{" "}
+            <code>.papertable-conflict.md</code>
+            。这些卡片的同步已暂停。
+          </p>
+          {vaultConflicts.map((conflict: VaultConflict) => (
+            <div className="vault-conflict-row" key={conflict.cardId}>
+              <code>{conflict.path}</code>
+              <button
+                className="chip-btn"
+                onClick={() =>
+                  void resolveVaultConflict(conflict.cardId, "papertable")
+                }
+                title="下次同步用 Papertable 的内容覆盖那篇笔记"
+              >
+                以 Papertable 为准
+              </button>
+              <button
+                className="chip-btn"
+                onClick={() =>
+                  void resolveVaultConflict(conflict.cardId, "note")
+                }
+                title="保留你的笔记，这张卡片此后不再同步"
+              >
+                保留笔记
+              </button>
+            </div>
+          ))}
+        </aside>
+      )}
 
       <AnimatePresence>
         {toast && (
