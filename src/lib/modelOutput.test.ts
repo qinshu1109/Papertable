@@ -110,8 +110,6 @@ test("a sentinel streams everything after it, with zero heuristics", () => {
   assert.equal(gate.visible(), "量子退相干是指", "哨兵之后立刻直通");
   gate.push("系统与环境纠缠。");
   assert.equal(gate.visible(), "量子退相干是指系统与环境纠缠。");
-  // 推理进了独立通道，供可折叠组件展示；它永远不该进 turn.content。
-  assert.ok(gate.reasoning().includes("The core issue"));
   assert.ok(!gate.visible().includes("The core issue"));
 });
 
@@ -126,14 +124,13 @@ test("the real leaked transcript is split at the sentinel", () => {
   assert.ok(answer.includes(LEAK_BODY));
   assert.ok(!answer.includes("Since the user"));
   assert.ok(!answer.includes("accumulate."));
-  assert.ok(gate.reasoning().includes("Since the user"));
 });
 
 test("a partial sentinel at the tail never renders literally", () => {
   const gate = createAnswerGate();
   gate.push("## 正文开始\n\n第一句。<<<PAPER");
   assert.ok(!gate.visible().includes("<<<PAPER"), "半个哨兵不能当字面量放出去");
-  assert.ok(gate.visible().startsWith("## 正文开始"));
+  assert.equal(gate.visible(), "");
 });
 
 test("two-sentence answers with no heading survive verbatim", () => {
@@ -148,16 +145,13 @@ test("two-sentence answers with no heading survive verbatim", () => {
   assert.equal(visibleModelOutput("退相干很快"), "退相干很快");
 });
 
-/**
- * 保守例外：正文一上来就是结构化 Markdown 时直接放流。推理独白是散文，
- * 从不以 `##` 或围栏开头，所以这条例外不会放过真实的泄漏。
- */
-test("a structural head streams with zero lag even without a sentinel", () => {
+test("a structural head without a sentinel also waits for finish", () => {
   const gate = createAnswerGate();
   gate.push("## 结");
-  assert.equal(gate.visible(), "## 结");
+  assert.equal(gate.visible(), "");
   gate.push("论\n\n可以继续。");
-  assert.equal(gate.visible(), "## 结论\n\n可以继续。");
+  assert.equal(gate.visible(), "");
+  assert.equal(gate.finish(), "## 结论\n\n可以继续。");
 });
 
 // --- 不可收回 ---------------------------------------------------------------
@@ -214,14 +208,14 @@ test("a partial thinking tag at the tail never renders literally", () => {
   assert.equal(visibleModelOutput("正文。<thi"), "正文。");
 });
 
-// --- 服务端分道 -------------------------------------------------------------
+// --- 服务端标记不能越过正文闸门 ----------------------------------------------
 
-test("reasoning channel is dropped and final channel is trusted", () => {
+test("a service-side final marker cannot bypass the sentinel", () => {
   const gate = createAnswerGate();
-  gate.push("Since the user asked, I will plan.", "reasoning");
-  gate.push("量子退相干是指", "final");
-  assert.equal(gate.visible(), "量子退相干是指");
-  assert.ok(!gate.visible().includes("the user"));
+  gate.push("internal plan that must never be visible", "final");
+  assert.equal(gate.visible(), "");
+  gate.push(`${ANSWER_SENTINEL}\n完成`, "final");
+  assert.equal(gate.visible(), "完成");
 });
 
 // --- 误判护栏 ---------------------------------------------------------------
@@ -241,20 +235,16 @@ test("prose mentioning the user after the latch is not filtered", () => {
 // --- 真机截图暴露的两个泄漏 -------------------------------------------------
 
 /**
- * 截图 09：CozAI 把推理分进独立字段 → content 被标注 final → 直通——而模型按系统
- * 提示要求仍输出了哨兵，于是 `<<<PAPERTABLE_ANSWER>>>` 被原样渲染进正文并落盘。
- * 直通不等于不剥协议标记。
+ * 服务端 metadata 只是兼容信号；哨兵才是唯一的正文起点。
  */
-test("the trusted path strips the sentinel instead of rendering it", () => {
+test("a service marker still strips the sentinel instead of rendering it", () => {
   const gate = createAnswerGate();
-  gate.push("internal plan", "reasoning");
   gate.push(`${ANSWER_SENTINEL}\n\n完成`, "final");
   assert.equal(gate.visible(), "完成");
   assert.ok(!gate.visible().includes("PAPERTABLE"));
-  assert.ok(gate.reasoning().includes("internal plan"));
 });
 
-test("a sentinel split across trusted chunks never renders, even partially", () => {
+test("a sentinel split across token chunks never renders, even partially", () => {
   const gate = createAnswerGate();
   gate.push("<<<PAPERTABLE_", "final");
   assert.equal(gate.visible(), "", "半个哨兵一个字符都不能漏");
@@ -265,13 +255,12 @@ test("a sentinel split across trusted chunks never renders, even partially", () 
   assert.equal(gate.finish(), "完成");
 });
 
-test("text already shown before a late sentinel is kept, marker still stripped", () => {
+test("text before a late sentinel is discarded instead of leaked", () => {
   const gate = createAnswerGate();
   gate.push("先到的正文。", "final");
-  assert.equal(gate.visible(), "先到的正文。");
+  assert.equal(gate.visible(), "");
   gate.push(`${ANSWER_SENTINEL}后到的正文。`, "final");
-  // 只增不减：已展示的不收回；哨兵本身被剥掉。
-  assert.equal(gate.visible(), "先到的正文。后到的正文。");
+  assert.equal(gate.visible(), "后到的正文。");
 });
 
 /** 真机卡片标题被改成了「I'm looking at the answer 同步」。 */

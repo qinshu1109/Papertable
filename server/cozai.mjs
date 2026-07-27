@@ -8,8 +8,7 @@ export function friendlyProviderError(status, body = "") {
 }
 
 /**
- * 分离最终正文与草稿推理。网关把推理放进独立字段时，`content` 才是可信的最终
- * 正文——这个事实要传给前端，否则闸门只能靠文本启发式判断。
+ * 识别正文与草稿推理字段。草稿绝不转发、记录或展示；正文仍要经过客户端哨兵闸门。
  */
 export function extractDelta(payload) {
   const delta = payload?.choices?.[0]?.delta ?? {};
@@ -48,7 +47,6 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
   const decoder = new TextDecoder();
   let pending = "";
   let emitted = false;
-  let sawReasoning = false;
 
   try {
     while (!signal?.aborted) {
@@ -63,18 +61,13 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
         if (!data || data === "[DONE]") continue;
         try {
           const delta = extractDelta(JSON.parse(data));
-          if (delta.reasoning) {
-            sawReasoning = true;
-            // 只发长度，不发文本：推理绝不离开本机服务。
-            write(sseEvent("reasoning", { chars: delta.reasoning.length }));
-          }
           if (delta.content) {
             // `emitted` 只由 content 驱动，只有推理没有正文时仍要报错。
             emitted = true;
             write(
               sseEvent("token", {
                 text: delta.content,
-                channel: sawReasoning ? "final" : "unknown",
+                channel: "unknown",
               }),
             );
           }

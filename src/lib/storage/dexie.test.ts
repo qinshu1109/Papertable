@@ -114,6 +114,27 @@ const freshDb = async () => {
   await db.open();
 };
 
+test("legacy model drafts are scrubbed before a workspace is returned", async () => {
+  await freshDb();
+  await saveWorkspace(snapshot());
+  const legacy = (await db.turns.get("t")) as
+    ({ reasoning?: string } & Record<string, unknown>) | undefined;
+  assert.ok(legacy, "测试前提：旧轮次必须存在");
+  legacy.reasoning = "this internal draft must never survive";
+  await db.turns.put(legacy as never);
+
+  const restored = await loadWorkspace();
+  assert.ok(restored);
+  assert.ok(
+    !("reasoning" in restored.cards[0].turns[0]),
+    "旧草稿不得回到运行时 Card",
+  );
+  assert.ok(
+    !("reasoning" in ((await db.turns.get("t")) ?? {})),
+    "读取前的兼容清理必须把 IndexedDB 旧字段删除",
+  );
+});
+
 test("a streaming save writes exactly one turn row and never rewrites whole tables", () => {
   const before = busySnapshot();
   const after = appendStreamToken(before, "已生成更多文本");
@@ -437,7 +458,7 @@ test("IndexedDB restores cards, drafts and scroll positions", async () => {
   assert.equal(await loadWorkspace(), null);
 });
 
-test("v3 attention tables survive ordinary workspace snapshots and clear with local data", async () => {
+test("v4 attention tables survive ordinary workspace snapshots and clear with local data", async () => {
   await freshDb();
   await saveWorkspace(snapshot());
   await putAttentionState({
@@ -483,13 +504,13 @@ test("v3 attention tables survive ordinary workspace snapshots and clear with lo
       },
     ],
   });
-  // This exercises the whole-workspace reset path after v3 migration.
+  // This exercises the whole-workspace reset path after the latest migration.
   await saveWorkspace(snapshot());
   const attention = await loadAttentionState();
   assert.equal(attention.events.length, 1);
   assert.equal(attention.sessions.length, 1);
   assert.equal(attention.proposals.length, 1);
-  assert.equal(db.verno, 3);
+  assert.equal(db.verno, 4);
   await clearWorkspace();
   const cleared = await loadAttentionState();
   assert.deepEqual(cleared, { events: [], sessions: [], proposals: [] });

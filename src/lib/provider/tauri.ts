@@ -42,7 +42,6 @@ export function saveProviderConfig(input: {
 
 type WireEvent =
   | { type: "token"; text: string; channel: OutputChannel }
-  | { type: "reasoning"; chars: number }
   | { type: "error"; message: string }
   | { type: "done"; stopped: boolean };
 
@@ -96,7 +95,6 @@ export async function* streamModel(input: {
   try {
     while (!finished) {
       const event = await next();
-      if (event.type === "reasoning") continue; // 只用于进度，永远不进正文
       if (event.type === "error") throw new Error(event.message);
       if (event.type === "done") {
         finished = true;

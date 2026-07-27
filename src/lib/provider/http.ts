@@ -121,8 +121,6 @@ export async function* streamModel(input: {
           message?: string;
           channel?: OutputChannel;
         };
-        // 推理事件只带长度、不带文本，仅用于进度指示，绝不进入正文。
-        if (type === "reasoning") continue;
         if (type === "token" && payload.text)
           yield {
             type: "token" as const,

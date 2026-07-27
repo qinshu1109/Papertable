@@ -87,6 +87,11 @@ Proposal 不进入 `buildContext()`、正式卡片搜索或任何标准 Markdown
 
 失败时会保留部分输出。401、429、5xx、超时和网络错误都有中文提示，绝不退回假数据。
 
+模型草稿（例如上游的 `reasoning_content`）不是产品数据：本机中继识别后立刻丢弃，正文
+仍必须通过 `ANSWER_SENTINEL` 闸门才会展示或持久化。草稿不进入 React state、IndexedDB、
+SQLite、导出包、知识库同步、后续 `buildContext()` 或任何 UI；旧版本遗留字段会在存储迁移和
+每次读取前的兼容清理中移除。
+
 ## 格式适配
 
 `src/lib/formats.ts` 维护统一格式适配器。内部 `PortableProject` 是无损传输模型；其它格式是可互操作的视图。

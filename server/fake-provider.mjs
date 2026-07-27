@@ -93,13 +93,9 @@ export function fakeCompletion(payload) {
 }
 
 export async function emitFakeStream({ payload, write, signal }) {
-  const scenario = fakeScenario(payload);
   const content = fakeCompletion(payload);
-  // 网关把推理放进独立字段的情形：只发长度，content 标注为可信的最终正文。
-  if (scenario?.reasoning) {
-    write(sseEvent("reasoning", { chars: scenario.reasoning.length }));
-  }
-  const channel = scenario?.reasoning ? "final" : "unknown";
+  // 真实网关会在本机丢弃独立草稿；前端仍以正文哨兵而非服务端标记放行。
+  const channel = "unknown";
   // 按码点切块。曾经用 `content.match(/.{1,8}/gu)`，而 `.` 不匹配换行符——它会
   // 静默吞掉流式内容里的每一个 \n，段落边界因此永远不会到达前端。
   const points = Array.from(content);

@@ -10,31 +10,35 @@ import type {
   Project,
   ReferenceChip,
   SourceAnchor,
+  Turn,
   ViewState,
 } from "../types";
 
 const now = () => Date.now();
 
 /**
- * 把 `Turn.reasoning` 从任何要离开本机的序列化里剥掉。
- *
- * 隔离字段只解决「正文里不会混进推理」，不自动解决「推理不会被导出」——
- * 无损包的 base64 transport 和 graph.json 都是整卡片序列化，会把它一起带走。
- * 代价是重新导入后推理不再存在；那不是值得跨导出保留的用户数据。
+ * v4 之前的本地库曾有一个不该存在的 `reasoning` 字段。正常迁移会在读库时清掉它；
+ * 这里再防御一次，确保用户在迁移前立即导出时也绝不把旧草稿带出应用。
  */
-function withoutReasoning(card: Card): Card {
-  if (!card.turns.some((turn) => turn.reasoning)) return card;
+type LegacyTurn = Turn & { reasoning?: unknown };
+
+function withoutLegacyReasoning(card: Card): Card {
+  if (!card.turns.some((turn) => "reasoning" in (turn as LegacyTurn)))
+    return card;
   return {
     ...card,
-    turns: card.turns.map(({ reasoning, ...turn }) => {
-      void reasoning;
-      return turn;
+    turns: card.turns.map((turn) => {
+      const { reasoning: _legacy, ...safeTurn } = turn as LegacyTurn;
+      void _legacy;
+      return safeTurn as Turn;
     }),
   };
 }
 
-function projectWithoutReasoning(project: PortableProject): PortableProject {
-  return { ...project, cards: project.cards.map(withoutReasoning) };
+function projectWithoutLegacyReasoning(
+  project: PortableProject,
+): PortableProject {
+  return { ...project, cards: project.cards.map(withoutLegacyReasoning) };
 }
 const id = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 const safeName = (value: string) =>
@@ -58,7 +62,7 @@ function metadata(project: PortableProject, card: Card) {
 }
 
 export function cardMarkdown(project: PortableProject, input: Card) {
-  const card = withoutReasoning(input);
+  const card = withoutLegacyReasoning(input);
   const meta = metadata(project, card);
   const frontmatter = Object.entries(meta)
     .filter(([, value]) => value !== undefined)
@@ -209,7 +213,7 @@ function assemble(
 }
 
 export function projectBundle(input: PortableProject) {
-  const project = projectWithoutReasoning(input);
+  const project = projectWithoutLegacyReasoning(input);
   const zip = new JSZip();
   const root = safeName(project.project.name);
   // Whitelist the portable contract. Experimental event/session/proposal data
@@ -249,7 +253,7 @@ export function projectBundle(input: PortableProject) {
 }
 
 export function markdownFolder(input: PortableProject) {
-  const project = projectWithoutReasoning(input);
+  const project = projectWithoutLegacyReasoning(input);
   const zip = new JSZip();
   const root = safeName(project.project.name);
   for (const card of project.cards)
@@ -267,7 +271,7 @@ export function markdownFolder(input: PortableProject) {
 }
 
 export function jsonCanvas(input: PortableProject) {
-  const project = projectWithoutReasoning(input);
+  const project = projectWithoutLegacyReasoning(input);
   const zip = new JSZip();
   const root = safeName(project.project.name);
   const nodes = project.cards.map((card, index) => ({

@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 4;
+const USER_VERSION: i64 = 5;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -96,9 +96,6 @@ pub struct Turn {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "skip_none")]
     pub favorite: Option<bool>,
-    /// 与 content 物理隔离；只用于可折叠展示。
-    #[serde(default, skip_serializing_if = "skip_none")]
-    pub reasoning: Option<String>,
 }
 
 /// 落库的卡片行不含 turns，与 Dexie 侧的 `CardRecord` 一致。
@@ -277,15 +274,14 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version < USER_VERSION {
-        // SCHEMA 里除最后的 ALTER TABLE 之外都是 IF NOT EXISTS，可以整份重放。
-        // ALTER TABLE ADD COLUMN 不幂等，所以单独判断列是否已存在。
-        let (create_part, alter_part) = match SCHEMA.find("ALTER TABLE") {
-            Some(at) => SCHEMA.split_at(at),
-            None => (SCHEMA, ""),
-        };
-        conn.execute_batch(create_part)?;
-        if !alter_part.is_empty() && !has_column(conn, "turns", "reasoning")? {
-            conn.execute_batch(alter_part)?;
+        conn.execute_batch(SCHEMA)?;
+        // v4 曾把模型草稿存到 turns.reasoning。此字段不属于产品数据模型；保留旧列
+        // 只为避免在用户库上重建 turns 的风险，但升级时必须擦空其中所有内容。
+        if version < 5 && has_column(conn, "turns", "reasoning")? {
+            conn.execute(
+                "UPDATE turns SET reasoning = NULL WHERE reasoning IS NOT NULL",
+                [],
+            )?;
         }
         conn.execute_batch(&format!("PRAGMA user_version = {USER_VERSION}"))?;
     }
@@ -369,8 +365,8 @@ fn read_card_records(conn: &Connection) -> Result<Vec<CardRecord>> {
 
 fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, card_id, role, content, created_at, streaming, status, error, model, favorite,
-                reasoning FROM turns ORDER BY card_id, created_at",
+        "SELECT id, card_id, role, content, created_at, streaming, status, error, model, favorite
+         FROM turns ORDER BY card_id, created_at",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(TurnRecord {
@@ -385,7 +381,6 @@ fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
                 error: row.get(7)?,
                 model: row.get(8)?,
                 favorite: row.get::<_, Option<i64>>(9)?.map(|v| v != 0),
-                reasoning: row.get(10)?,
             },
         })
     })?;
@@ -637,13 +632,13 @@ fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
         // card_id 也在 DO UPDATE 里：改道会把一条轮次挂到另一张卡片下。
         tx.execute(
             "INSERT INTO turns (id, card_id, role, content, created_at, streaming, status,
-                                error, model, favorite, reasoning)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                                error, model, favorite)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(id) DO UPDATE SET
                card_id = excluded.card_id, role = excluded.role, content = excluded.content,
                created_at = excluded.created_at, streaming = excluded.streaming,
                status = excluded.status, error = excluded.error, model = excluded.model,
-               favorite = excluded.favorite, reasoning = excluded.reasoning",
+               favorite = excluded.favorite",
             params![
                 turn.id,
                 record.card_id,
@@ -655,7 +650,6 @@ fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
                 turn.error,
                 turn.model,
                 turn.favorite.map(|v| v as i64),
-                turn.reasoning,
             ],
         )?;
     }
@@ -1271,7 +1265,6 @@ mod tests {
                 error: None,
                 model: None,
                 favorite: None,
-                reasoning: None,
             },
         }
     }
@@ -1293,6 +1286,44 @@ mod tests {
         singletons(&mut upsert);
         apply_changes(&mut conn, &upsert).unwrap();
         conn
+    }
+
+    #[test]
+    fn v5_migration_clears_legacy_reasoning() {
+        let conn = open_in_memory().unwrap();
+        conn.execute("ALTER TABLE turns ADD COLUMN reasoning TEXT", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, pinned, updated_at) VALUES ('p', '项目', 0, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cards (id, project_id, title, favorite, unread, created_at, concepts)
+             VALUES ('c', 'p', '卡片', 0, 0, 1, '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO turns (id, card_id, role, content, created_at, reasoning)
+             VALUES ('t', 'c', 'ai', '正文', 1, 'internal draft')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 4").unwrap();
+
+        migrate(&conn).unwrap();
+
+        let reasoning: Option<String> = conn
+            .query_row("SELECT reasoning FROM turns WHERE id = 't'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(reasoning, None, "旧草稿必须在升级时擦空");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, USER_VERSION);
     }
 
     /// 移植过来最容易在第一天炸的地方：Dexie 侧刻意把 turns 写在 cards 之前（那边

@@ -50,7 +50,7 @@ pnpm start # 构建后在 http://127.0.0.1:8787 提供网页与本机 API
 - 输入器的「本次上下文」直接读取实际 `buildContext()` 结果，显示带入与排除的内容。
 - IndexedDB 自动保存项目、卡片、轮次、边、锚点、快照、引用、草稿、阅读位置和折叠状态。生成中至少每 500 ms 保存一次；中断后保留已生成文本并标记为已停止。
 - 点击文本选区可深挖、引用或复制；概念解释浮层使用真实模型流式回答，按「概念 + 来源版本」持久缓存，可升级为正式卡片。
-- 回答后的短标题与概念提取在后台执行，不阻塞继续提问；不会保存或展示模型隐藏推理。所有模型文本都经过 `src/lib/modelOutput.ts` 的闸门：正文按句子逐段释放，已释放的内容不会回退，未能确认为最终回答的部分宁可继续缓冲——被停止时缓冲区直接丢弃，不会落盘。网关若把推理放在独立字段，本机服务只转发长度、不转发文本。
+- 回答后的短标题与概念提取在后台执行，不阻塞继续提问；不会保存或展示模型隐藏推理。所有模型文本都经过 `src/lib/modelOutput.ts` 的闸门：正文按句子逐段释放，已释放的内容不会回退，未能确认为最终回答的部分宁可继续缓冲——被停止时缓冲区直接丢弃，不会落盘。网关若把推理放在独立字段，本机服务会在进程内直接丢弃它，只转发可信正文。
 - 导入：单个 Markdown、Markdown 文件夹、JSON Canvas + Markdown、无损项目包。
 - 导出：Markdown 文件夹 ZIP、JSON Canvas + Markdown ZIP、无损项目包 ZIP；无损包可恢复关系、上下文快照、锚点、引用和视图状态。
 - 卡片 / 关系树联动、三种关系、删除撤销、独立滚动位置、项目隔离、移动端抽屉和迷你关系导航全部保留。
@@ -69,7 +69,7 @@ pnpm start # 构建后在 http://127.0.0.1:8787 提供网页与本机 API
 ```text
 server/
   index.mjs             # 127.0.0.1 本机 API：健康检查 / 本机设置 / 流式 / 后台生成
-  cozai.mjs             # OpenAI SSE → Papertable token/done/error 适配；推理与正文分道
+  cozai.mjs             # OpenAI SSE → Papertable token/done/error 适配；草稿丢弃、正文标记
 src/
   lib/context.ts        # 与 React、Dexie、模型 SDK 无关的 buildContext()
   lib/modelOutput.ts    # 默认扣留的输出闸门：隐藏推理不展示、更不落盘
@@ -85,7 +85,7 @@ src-tauri/src/
   db.rs                 # SQLite；语义与 dexie 逐条对齐，外键顺序父→子
   vault.rs              # 容纳规则、归一化哈希、冲突隔离
   watcher.rs            # 三层环路防护；入向只新增 ReferenceChip
-  llm.rs                # 模型通道；推理只发长度、不发文本
+  llm.rs                # 桌面模型通道；草稿推理在进程内丢弃
   lib/formats.ts        # Markdown / JSON Canvas / 无损包格式适配器
   store.tsx             # 业务编排；组件只使用其公开动作
   components/           # 卡片堆叠、关系树、输入器、概念预览、对话框

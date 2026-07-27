@@ -59,24 +59,24 @@ test("stream relay emits normalized token and done events", async () => {
   assert.match(chunks.join(""), /event: done/);
 });
 
-test("reasoning deltas never reach the browser as text", async () => {
+test("reasoning deltas never reach the browser", async () => {
   const output = await relay([
     deltaFrame({ reasoning_content: "Since the user asked, I will plan." }),
     deltaFrame({ content: "量子退相干是指" }),
   ]);
   assert.ok(!output.includes("Since the user"), "推理文本泄漏到了 SSE 流里");
   assert.ok(!output.includes("I will plan"));
-  assert.match(output, /event: reasoning/);
-  assert.match(output, /"chars":34/);
+  assert.doesNotMatch(output, /event: reasoning/);
+  assert.doesNotMatch(output, /"chars":34/);
   assert.match(output, /量子退相干是指/);
 });
 
-test("content after a reasoning delta is labelled as trusted final text", async () => {
+test("content after a reasoning delta stays subject to the output gate", async () => {
   const output = await relay([
     deltaFrame({ reasoning: "draft" }),
     deltaFrame({ content: "正文" }),
   ]);
-  assert.match(output, /"channel":"final"/);
+  assert.match(output, /"channel":"unknown"/);
 });
 
 test("content without any reasoning delta stays unlabelled", async () => {

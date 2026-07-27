@@ -83,6 +83,27 @@ class PapertableDb extends Dexie {
           "id, projectId, sessionId, status, createdAt, expiresAt, purgeAt, candidateKey",
       })
       .upgrade(() => undefined);
+    // v4 removes the transient model-draft field introduced by a short-lived
+    // build. It was never part of the product contract and must not survive
+    // into user data, exports, or future model context.
+    this.version(4)
+      .stores({
+        ...schema,
+        interactionEvents:
+          "id, projectId, sessionId, createdAt, type, targetCardId, sourceCardId",
+        sessionBoundaries:
+          "id, projectId, localDate, startedAt, lastActiveAt, endedAt, processedAt",
+        proposals:
+          "id, projectId, sessionId, status, createdAt, expiresAt, purgeAt, candidateKey",
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table("turns")
+          .toCollection()
+          .modify((record: { reasoning?: unknown }) => {
+            delete record.reasoning;
+          });
+      });
   }
 }
 
@@ -122,7 +143,22 @@ const attentionTables = () => [
   db.proposals,
 ];
 
+/**
+ * 兼容来自旧版本、手工导回或被浏览器中断过的数据库。v4 迁移会完成正常清理；
+ * 每次读取前再做一次幂等的定点清理，确保旧草稿绝不会重新进入内存状态。
+ */
+async function scrubLegacyReasoning(): Promise<void> {
+  await enqueue(() =>
+    db.turns
+      .filter((record) => "reasoning" in (record as object))
+      .modify((record) => {
+        delete (record as TurnRecord & { reasoning?: unknown }).reasoning;
+      }),
+  );
+}
+
 export async function loadWorkspace(): Promise<WorkspaceSnapshot | null> {
+  await scrubLegacyReasoning();
   const [
     projects,
     records,

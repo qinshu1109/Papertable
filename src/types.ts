@@ -83,14 +83,6 @@ export interface Turn {
   error?: string;
   model?: string;
   favorite?: boolean;
-  /**
-   * 模型的思考过程，**与 `content` 物理隔离**。
-   *
-   * 只用于独立的可折叠展示。它绝不进入 `buildContext()` 发给模型的消息、导出包、
-   * 或同步到知识库的笔记——把它和正文放同一个字段，就等于让「正文里不能有推理」
-   * 这条约束依赖每一处调用点都记得过滤，而漏一处就是泄漏。
-   */
-  reasoning?: string;
 }
 
 export interface ConceptPreviewCacheEntry {

@@ -1,8 +1,8 @@
 //! 模型通道。把 `server/index.mjs` 的四条路由移植成 Tauri 命令。
 //!
 //! 移植的参照实现是 `server/cozai.mjs`，两处的语义必须一致：
-//! - `content` 与 `reasoning_content` 分道，**推理只发长度、绝不发文本**；
-//! - 见过推理之后的 content token 标注为 `final`，前端闸门据此可以直通；
+//! - `content` 与 `reasoning_content` 分道，**推理直接丢弃、绝不离开本进程**；
+//! - 所有正文 token 仍受前端正文哨兵闸门约束，服务端元数据不能绕过它；
 //! - 只有推理没有正文时仍然报「没有返回可显示的文本」。
 //!
 //! 目标地址由本进程持有，前端**不能**指定——和 Node 版一样，这不是开放代理。
@@ -117,20 +117,9 @@ pub struct ChatRequest {
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum StreamEvent {
-    Token {
-        text: String,
-        channel: &'static str,
-    },
-    /// **只带长度**。推理文本绝不离开本进程。
-    Reasoning {
-        chars: usize,
-    },
-    Error {
-        message: String,
-    },
-    Done {
-        stopped: bool,
-    },
+    Token { text: String, channel: &'static str },
+    Error { message: String },
+    Done { stopped: bool },
 }
 
 const ALLOWED_TASKS: [&str; 4] = ["chat", "concept-preview", "title", "concepts"];
@@ -615,7 +604,6 @@ pub fn stream(
     };
 
     let mut emitted = false;
-    let mut saw_reasoning = false;
     for line in BufReader::new(reader).lines() {
         let Ok(line) = line else { break };
         let Some(data) = line.strip_prefix("data:") else {
@@ -630,19 +618,13 @@ pub fn stream(
             // 非 JSON 的心跳帧不该打断这条流。
             continue;
         };
-        let (content, reasoning) = extract_delta(&payload);
-        if !reasoning.is_empty() {
-            saw_reasoning = true;
-            let _ = channel.send(StreamEvent::Reasoning {
-                chars: reasoning.chars().count(),
-            });
-        }
+        let (content, _reasoning) = extract_delta(&payload);
         if !content.is_empty() {
             // `emitted` 只由 content 驱动：只有推理没有正文时仍要报错。
             emitted = true;
             let _ = channel.send(StreamEvent::Token {
                 text: content,
-                channel: if saw_reasoning { "final" } else { "unknown" },
+                channel: "unknown",
             });
         }
     }
@@ -661,21 +643,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reasoning_and_content_are_separated() {
+    fn reasoning_is_dropped_before_any_frontend_event() {
         let payload = json!({"choices":[{"delta":{
             "content":"正文","reasoning_content":"Since the user asked, I will plan."}}]});
         let (content, reasoning) = extract_delta(&payload);
         assert_eq!(content, "正文");
         assert!(reasoning.contains("the user"));
-        // 事件只带长度，文本永远不离开本进程。
-        let event = StreamEvent::Reasoning {
-            chars: reasoning.chars().count(),
+        let event = StreamEvent::Token {
+            text: content,
+            channel: "unknown",
         };
         let wire = serde_json::to_string(&event).unwrap();
-        assert!(
-            !wire.contains("the user"),
-            "推理文本泄漏到了发往前端的事件里"
-        );
+        assert!(!wire.contains("the user"), "推理不得进入发往前端的事件");
     }
 
     #[test]

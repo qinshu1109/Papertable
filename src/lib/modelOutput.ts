@@ -65,7 +65,8 @@ const PASSTHROUGH_CHARS = 200;
 /** 收尾时「已释放为空但存在干净尾段」的兜底阈值。 */
 const SALVAGE_MIN_CHARS = 40;
 
-export type OutputChannel = "final" | "reasoning" | "unknown";
+/** 兼容旧中继标记；无论值为何，都不能绕过正文哨兵。 */
+export type OutputChannel = "final" | "unknown";
 
 /**
  * 正文起点哨兵。**系统提示要求模型在最终回答之前输出它**，见 `lib/context.ts`。
@@ -86,38 +87,16 @@ export const SENTINEL_INSTRUCTION = `无论你在内部如何思考，正式输�
 /** 容忍模型把哨兵写得略有出入（大小写、下划线/连字符、两三个尖括号）。 */
 const SENTINEL_RE = /<{2,3}\s*PAPERTABLE[_\- ]?ANSWER\s*>{2,3}/i;
 
-/**
- * 哨兵可能跨 chunk 到达，尾部像半个哨兵时要扣住，绝不能当正文放出去。
- *
- * 必须取**最长**匹配尾：旧实现用 `lastIndexOf("<")`，对 `<<<PAPER` 只会扣住
- * `<PAPER`，前面的 `<<` 就漏出去了。也要认带 `>` 的前缀（`…ANSWER>`、`…ANSWER>>`），
- * 否则最后几个字符到达的那一拍会把整个哨兵短暂放出去再收回，违反只增不减。
- */
-function partialSentinelHold(text: string): number {
-  const max = Math.min(text.length, ANSWER_SENTINEL.length + 2);
-  for (let k = max; k > 0; k--) {
-    const tail = text.slice(text.length - k);
-    if (tail[0] !== "<") continue;
-    if (/^<{1,3}[A-Za-z_\-\s]*>{0,2}$/.test(tail)) return k;
-  }
-  return 0;
-}
-
 /** 完整哨兵：要么后面还有内容，要么以全部三个 `>` 结尾——否则再等一拍。 */
 function sentinelComplete(text: string, m: RegExpExecArray): boolean {
   return m.index + m[0].length < text.length || m[0].endsWith(">>>");
 }
 
 export interface AnswerGate {
-  /** 追加一段原始增量。`channel` 来自服务端的推理分道标注。 */
+  /** 追加一段原始增量。`channel` 只说明正文是否已由本机中继确认。 */
   push(text: string, channel?: OutputChannel): void;
   /** 目前可以安全展示并落盘的正文。只增不减。 */
   visible(): string;
-  /**
-   * 已识别出的推理内容，供独立的可折叠组件展示。
-   * **它与 `visible()` 物理隔离**，绝不能写进 `turn.content`。
-   */
-  reasoning(): string;
   /** **只在流正常结束时调用**：中断路径必须只用 `visible()`。 */
   finish(): string;
 }
@@ -363,20 +342,13 @@ function createHeuristicGate(): AnswerGate {
   }
 
   return {
-    push(text: string, channel: OutputChannel = "unknown") {
+    push(text: string) {
       if (done || !text) return;
-      // 网关把草稿放进独立字段时，content 才是可信的最终正文。
-      if (channel === "reasoning") return;
-      if (channel === "final") mode = "passthrough";
       raw += text;
       drain(false);
     },
     visible() {
       return released;
-    },
-    reasoning() {
-      // 兜底路径无法可靠归因哪一段是推理。不猜——返回空，让 UI 不显示折叠块。
-      return "";
     },
     finish() {
       if (done) return released;
@@ -408,64 +380,27 @@ export function visibleModelOutput(raw: string): string {
  *
  * 三条路径，按可靠性排序：
  *
- * 1. **网关分道**（`channel === "reasoning"` / `"final"`）——最可靠。网关自己把推理
- *    放进了独立字段，我们直接采信。
- * 2. **哨兵**——可靠。系统提示要求模型在正文前输出 `ANSWER_SENTINEL`；哨兵之前的
+ * 1. **哨兵**——可靠。系统提示要求模型在正文前输出 `ANSWER_SENTINEL`；哨兵之前的
  *    一律是推理，之后的一律是正文，此后纯直通、零启发式。
- * 3. **兜底启发式**——不可靠，只在流结束时仍未见到哨兵才使用。
+ * 2. **兜底启发式**——不可靠，只在流结束时仍未见到哨兵才使用。
  *
  * 之前只有第 3 条，而真机上模型输出了 1573 字符的英文推理、紧接着不加任何分隔就
  * 写 `## 材料说明`。任何短语枚举都拦不住那种输入。
  */
 export function createAnswerGate(): AnswerGate {
-  /** 哨兵之前累积的内容——推理。 */
+  /** 哨兵之前累积的内容。它只在本次请求闭包里短暂存在，永不输出或持久化。 */
   let before = "";
   /** 哨兵之后累积的内容——正文，直通。 */
   let answer = "";
-  /** 网关明确标了 reasoning 的文本；同样只进推理区。 */
-  let channelReasoning = "";
   let sawSentinel = false;
-  /** 网关已经分道过：content 可信，无需等哨兵。 */
-  let trusted = false;
   let done = false;
-  /** 兜底用：没等到哨兵时，把 `before` 交给启发式处理。 */
-  let fallback = "";
 
   function ingest(text: string) {
     if (sawSentinel) {
       answer += text;
       return;
     }
-    if (trusted) {
-      // 网关已把推理分进独立字段，content 可信、逐 token 直通——但模型按系统提示
-      // 的要求**仍会输出哨兵**。真机截图里它就被原样渲染进了正文。
-      // 直通不等于不剥协议标记：哨兵是我们的线材符号，永远不是内容。
-      answer += text;
-      const m = SENTINEL_RE.exec(answer);
-      if (m && sentinelComplete(answer, m)) {
-        sawSentinel = true;
-        const pre = answer.slice(0, m.index);
-        const post = answer.slice(m.index + m[0].length);
-        // pre 已经展示过，不能收回（只增不减）；只有纯空白才顺手丢掉。
-        answer = pre.trim() ? pre + post : post.replace(/^\s+/, "");
-      }
-      return;
-    }
     before += text;
-
-    // 保守例外：正文一上来就是结构化 Markdown（标题 / 围栏 / 列表 / 引用 / 表格）时，
-    // 认定这个模型不会输出哨兵、也没有推理，直接放流。
-    //
-    // 之所以安全：推理独白是散文，**从不以 `##` 或围栏开头**。真机上泄漏的那段正是
-    // 散文开头（"The core issue is…"），这条例外不会放过它。
-    // 代价是：不输出哨兵、且用散文开头的模型，正文要等流结束才出现。那正是无法
-    // 区分的情形，宁可晚一点也不能混进推理。
-    if (!sawSentinel && BLOCK_START.test(before.trimStart().slice(0, 17))) {
-      trusted = true;
-      answer = before.trimStart();
-      before = "";
-      return;
-    }
 
     const match = SENTINEL_RE.exec(before);
     if (!match || !sentinelComplete(before, match)) return;
@@ -476,36 +411,23 @@ export function createAnswerGate(): AnswerGate {
   }
 
   return {
-    push(text: string, channel: OutputChannel = "unknown") {
+    push(text: string) {
       if (done || !text) return;
-      if (channel === "reasoning") {
-        channelReasoning += text;
-        return;
-      }
-      if (channel === "final") trusted = true;
       ingest(text);
     },
     visible() {
-      if (sawSentinel || trusted) {
-        // 尾部可能是半个哨兵，扣住不放。
-        const hold = sawSentinel ? 0 : partialSentinelHold(answer);
-        return hold ? answer.slice(0, answer.length - hold) : answer;
-      }
+      if (sawSentinel) return answer;
       // 还没见到哨兵：一个字都不放。正在流的内容全部按推理处理。
       return "";
-    },
-    reasoning() {
-      return (channelReasoning + before).trim();
     },
     finish() {
       if (done) return this.visible();
       done = true;
-      if (sawSentinel || trusted) return answer.trim();
+      if (sawSentinel) return answer.trim();
       // 流结束仍无哨兵：模型没按要求输出正文。退到启发式，并把它的结果作为正文。
       const heuristic = createHeuristicGate();
       heuristic.push(before);
-      fallback = heuristic.finish();
-      answer = fallback;
+      answer = heuristic.finish();
       before = "";
       return answer;
     },

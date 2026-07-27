@@ -10,9 +10,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowDownRight,
   ArrowUpLeft,
-  Brain,
   Check,
-  ChevronDown,
   Copy,
   CornerDownRight,
   Edit3,
@@ -43,53 +41,6 @@ interface SelState {
   text: string;
   blockText: string;
   turnId: string;
-}
-
-/**
- * 可折叠的推理块。
- *
- * 内容来自 `turn.reasoning`，**与 `turn.content` 是两个字段**。正文的渲染路径
- * (`<Markdown content={turn.content} />`) 永远不经过这里，所以「正文里不会出现
- * 推理」不依赖任何过滤逻辑记得执行——它由数据结构保证。
- *
- * 生成中显示动态状态并保持展开，完成后自动折叠：推理是过程，不是结论。
- */
-function ReasoningBlock({
-  reasoning,
-  streaming,
-}: {
-  reasoning: string;
-  streaming: boolean;
-}) {
-  const [open, setOpen] = useState(streaming);
-  const wasStreaming = useRef(streaming);
-  useEffect(() => {
-    // 从生成中变为完成时自动折叠；用户之后手动展开的状态不再被覆盖。
-    if (wasStreaming.current && !streaming) setOpen(false);
-    wasStreaming.current = streaming;
-  }, [streaming]);
-
-  const chars = reasoning.length;
-  return (
-    <div className={`reasoning-block${open ? " open" : ""}`}>
-      <button
-        className="reasoning-head"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-      >
-        {streaming ? <span className="dot-pulse" /> : <Brain size={13} />}
-        <span>{streaming ? "正在思考…" : "思考过程"}</span>
-        <span className="reasoning-count">{chars} 字</span>
-        <ChevronDown size={13} className="reasoning-chevron" />
-      </button>
-      {open && (
-        <div className="reasoning-body scroll-y">
-          {/* 刻意用纯文本而不是 Markdown 渲染：这是模型的草稿，不该被排版成正式内容。 */}
-          <pre>{reasoning}</pre>
-        </div>
-      )}
-    </div>
-  );
 }
 
 function sourceRevision(turn: Turn) {
@@ -1157,17 +1108,7 @@ function TurnBlock({
         </div>
       </div>
 
-      {/*
-        推理独立展示，与正文物理隔离：它来自 turn.reasoning，正文只来自 turn.content。
-        生成中默认展开一行状态，完成后自动折叠——它是过程，不是结论。
-      */}
-      {turn.reasoning && (
-        <div className="reasoning-slot">
-          <ReasoningBlock reasoning={turn.reasoning} streaming={streaming} />
-        </div>
-      )}
-
-      {streaming && turn.content.length === 0 && !turn.reasoning && (
+      {streaming && turn.content.length === 0 && (
         <div className="thinking" role="status" aria-live="polite">
           <span className="dot-pulse" />
           正在生成回答…
