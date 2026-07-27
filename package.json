@@ -22,7 +22,8 @@
     "tauri": "tauri",
     "desktop": "tauri dev",
     "desktop:build": "tauri build",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:rust": "if command -v cargo >/dev/null 2>&1; then cargo test --manifest-path src-tauri/Cargo.toml; elif [ -x \"$HOME/.cargo/bin/cargo\" ]; then \"$HOME/.cargo/bin/cargo\" test --manifest-path src-tauri/Cargo.toml; else echo \"Rust toolchain not found: install cargo or add it to PATH.\" >&2; exit 127; fi",
+    "verify": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test && pnpm test:rust && pnpm build",
     "desktop:signed": "bash scripts/build-desktop.sh release",
     "desktop:signed:debug": "bash scripts/build-desktop.sh debug"
   },
@@ -33,6 +34,7 @@
     "framer-motion": "^11.11.17",
     "jszip": "^3.10.1",
     "lucide-react": "^0.462.0",
+    "minisearch": "^7.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

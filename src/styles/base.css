@@ -174,6 +174,33 @@ textarea {
   position: relative;
 }
 
+/* IndexedDB 水合完成前不开放可操作的 seed UI，避免冷启动的写入竞争。 */
+.workspace-bootstrap {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 7px;
+  box-sizing: border-box;
+  min-height: 100dvh;
+  padding: 28px;
+  color: var(--ink);
+  background:
+    radial-gradient(
+      circle at 50% 38%,
+      rgba(255, 255, 255, 0.58),
+      transparent 38%
+    ),
+    var(--bg);
+}
+.workspace-bootstrap strong {
+  font-size: 15px;
+  font-weight: 650;
+}
+.workspace-bootstrap span {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
 /* ============================================================
    项目侧栏
    ============================================================ */
@@ -1008,6 +1035,103 @@ textarea {
   font-size: 12.5px;
   color: var(--ink-3);
   padding: 4px 0;
+}
+
+/* Harness citations are explicit evidence handles, never invisible prompt text. */
+.note-citation-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 9px 0 2px;
+}
+.note-citation-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 25px;
+  max-width: 100%;
+  padding: 0 9px;
+  overflow: hidden;
+  border: 1px dashed #aeb5c8;
+  border-radius: 99px;
+  background: var(--branch-soft);
+  color: var(--branch);
+  font-size: 11px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note-citation-chip:hover {
+  border-color: var(--branch);
+  color: var(--ink);
+}
+
+.note-source-preview {
+  position: fixed;
+  z-index: 110;
+  right: 24px;
+  bottom: calc(var(--composer-live-height, 96px) + 14px);
+  width: min(430px, calc(100vw - 32px));
+  max-height: min(64dvh, 590px);
+  overflow: hidden;
+  border: 1px dashed #aeb5c8;
+  border-radius: var(--r-pop);
+  background: var(--card);
+  box-shadow:
+    0 2px 5px rgba(52, 43, 38, 0.04),
+    0 12px 30px -14px rgba(52, 43, 38, 0.2);
+}
+.note-source-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 11px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--raised);
+}
+.note-source-head b {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note-source-meta,
+.note-source-discipline {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 13px 0;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+.note-source-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.note-source-meta .warn {
+  color: #9a6340;
+}
+.note-source-meta svg {
+  flex: 0 0 auto;
+}
+.note-source-meta span svg {
+  animation: generation-spin 1.1s linear infinite;
+}
+.note-source-discipline {
+  padding-top: 3px;
+  padding-bottom: 8px;
+}
+.note-source-body {
+  max-height: min(45dvh, 420px);
+  padding: 0 14px 14px;
+  font-size: 13px;
+  line-height: 1.7;
 }
 .dot-pulse {
   width: 6px;
@@ -2399,7 +2523,13 @@ textarea {
     background: rgba(246, 242, 234, 0.96);
     backdrop-filter: blur(14px);
     transform: translateX(-100%);
-    transition: transform var(--d-panel) var(--e-out);
+    /* A closed off-canvas drawer must not remain focusable or tappable. */
+    visibility: hidden;
+    pointer-events: none;
+    will-change: transform;
+    transition:
+      transform var(--d-panel) var(--e-out),
+      visibility 0s linear var(--d-panel);
     box-shadow: 0 0 48px rgba(52, 43, 38, 0.2);
   }
   .sidebar.collapsed {
@@ -2407,6 +2537,9 @@ textarea {
   }
   .sidebar.drawer-open {
     transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+    transition-delay: 0s, 0s;
   }
   .drawer-scrim {
     display: block;
@@ -2657,6 +2790,17 @@ textarea {
   .ctx-panel {
     width: calc(100vw - 24px);
     left: 0;
+  }
+  .note-source-preview {
+    right: 10px;
+    bottom: calc(var(--composer-live-height, 104px) + 6px);
+    left: 10px;
+    width: auto;
+    max-height: min(70dvh, 620px);
+    border-radius: 18px 18px 14px 14px;
+  }
+  .note-source-body {
+    max-height: min(51dvh, 480px);
   }
   .composer-menu {
     right: 0 !important;

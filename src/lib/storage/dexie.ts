@@ -11,6 +11,7 @@ import type {
   Turn,
   ViewState,
 } from "../../types";
+import type { NoteChunk, NoteDocument, NoteLibrary } from "../notes/types";
 import {
   type AnchorRecord,
   type AttentionSnapshot,
@@ -37,6 +38,16 @@ export type {
   WorkspaceUpsert,
 };
 
+export interface NoteDocumentRecord extends NoteDocument {
+  /** Web imports retain a source copy solely to allow explicit rebuilds. */
+  content: string;
+}
+
+export interface ProjectNoteLibraryRecord {
+  projectId: string;
+  libraryId: string;
+}
+
 class PapertableDb extends Dexie {
   projects!: Table<Project, string>;
   cards!: Table<CardRecord, string>;
@@ -50,6 +61,10 @@ class PapertableDb extends Dexie {
   interactionEvents!: Table<InteractionEvent, string>;
   sessionBoundaries!: Table<SessionBoundary, string>;
   proposals!: Table<Proposal, string>;
+  noteLibraries!: Table<NoteLibrary, string>;
+  noteDocuments!: Table<NoteDocumentRecord, string>;
+  noteChunks!: Table<NoteChunk, string>;
+  projectNoteLibraries!: Table<ProjectNoteLibraryRecord, [string, string]>;
 
   constructor() {
     super("papertable-web-v1");
@@ -104,6 +119,24 @@ class PapertableDb extends Dexie {
             delete record.reasoning;
           });
       });
+    // v5 is intentionally a separate corpus namespace.  It is not part of
+    // workspace snapshots or StorageAdapter because an imported source library
+    // has different lifecycle and access rules from Card data.
+    this.version(5)
+      .stores({
+        ...schema,
+        interactionEvents:
+          "id, projectId, sessionId, createdAt, type, targetCardId, sourceCardId",
+        sessionBoundaries:
+          "id, projectId, localDate, startedAt, lastActiveAt, endedAt, processedAt",
+        proposals:
+          "id, projectId, sessionId, status, createdAt, expiresAt, purgeAt, candidateKey",
+        noteLibraries: "id, kind, updatedAt",
+        noteDocuments: "id, libraryId, relativePath, versionHash, updatedAt",
+        noteChunks: "id, libraryId, documentId, ordinal",
+        projectNoteLibraries: "[projectId+libraryId], projectId, libraryId",
+      })
+      .upgrade(() => undefined);
   }
 }
 

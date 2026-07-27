@@ -1,6 +1,7 @@
 import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import test from "node:test";
+import Dexie from "dexie";
 import {
   applyAttentionChanges,
   applyChanges,
@@ -112,6 +113,24 @@ const appendStreamToken = (
 const freshDb = async () => {
   await db.delete();
   await db.open();
+};
+
+const v4Schema = {
+  projects: "id, updatedAt, pinned",
+  cards: "id, projectId, createdAt, trashed",
+  turns: "id, cardId, createdAt",
+  edges: "id, sourceCardId, targetCardId",
+  anchors: "id, cardId, turnId",
+  snapshots: "id, edgeId",
+  references: "id, projectId",
+  view: "id, activeProjectId, currentCardId",
+  settings: "id",
+  interactionEvents:
+    "id, projectId, sessionId, createdAt, type, targetCardId, sourceCardId",
+  sessionBoundaries:
+    "id, projectId, localDate, startedAt, lastActiveAt, endedAt, processedAt",
+  proposals:
+    "id, projectId, sessionId, status, createdAt, expiresAt, purgeAt, candidateKey",
 };
 
 test("legacy model drafts are scrubbed before a workspace is returned", async () => {
@@ -458,7 +477,118 @@ test("IndexedDB restores cards, drafts and scroll positions", async () => {
   assert.equal(await loadWorkspace(), null);
 });
 
-test("v4 attention tables survive ordinary workspace snapshots and clear with local data", async () => {
+test("v4 workspace migrates to v5 corpus tables without touching existing cards", async () => {
+  // Construct a genuine v4 database before opening the current Dexie class.
+  // This guards the real in-browser upgrade path rather than merely checking
+  // that a freshly-created v5 database has the new tables.
+  db.close();
+  await db.delete();
+  const legacy = new Dexie("papertable-web-v1");
+  legacy.version(4).stores(v4Schema);
+  await legacy.open();
+  await legacy.table("projects").put({
+    id: "legacy-project",
+    name: "旧项目",
+    pinned: false,
+    updatedAt: 1,
+  });
+  await legacy.table("cards").put({
+    id: "legacy-card",
+    projectId: "legacy-project",
+    title: "旧卡片",
+    favorite: false,
+    unread: false,
+    concepts: [],
+    createdAt: 1,
+  });
+  await legacy.table("turns").put({
+    id: "legacy-turn",
+    cardId: "legacy-card",
+    role: "user",
+    content: "旧问题",
+    createdAt: 1,
+  });
+  await legacy.table("view").put({
+    id: "main",
+    activeProjectId: "legacy-project",
+    currentCardId: "legacy-card",
+    drafts: {},
+    lastCardByProject: { "legacy-project": "legacy-card" },
+    collapsed: [],
+    scrollPositions: {},
+  });
+  await legacy.table("settings").put({ id: "app", model: "claude-opus-5" });
+  legacy.close();
+
+  await db.open();
+  const restored = await loadWorkspace();
+  assert.equal(db.verno, 5);
+  assert.equal(restored?.cards[0]?.id, "legacy-card");
+  assert.equal(restored?.cards[0]?.turns[0]?.content, "旧问题");
+  assert.equal(await db.noteLibraries.count(), 0);
+  assert.equal(await db.noteDocuments.count(), 0);
+  assert.equal(await db.noteChunks.count(), 0);
+  assert.equal(await db.projectNoteLibraries.count(), 0);
+});
+
+test("workspace snapshots preserve the independent note corpus and clear-all removes it", async () => {
+  await freshDb();
+  await saveWorkspace(snapshot());
+  await db.noteLibraries.put({
+    id: "library-a",
+    name: "只读资料",
+    kind: "web-import",
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  await db.noteDocuments.put({
+    id: "document-a",
+    libraryId: "library-a",
+    relativePath: "资料/唯一事实.md",
+    title: "唯一事实",
+    tags: [],
+    versionHash: "hash-a",
+    charCount: 12,
+    updatedAt: 1,
+    content: "唯一事实",
+  });
+  await db.noteChunks.put({
+    id: "chunk-a",
+    libraryId: "library-a",
+    documentId: "document-a",
+    documentVersionHash: "hash-a",
+    relativePath: "资料/唯一事实.md",
+    titlePath: ["唯一事实"],
+    tags: [],
+    ordinal: 0,
+    start: 0,
+    end: 4,
+    text: "唯一事实",
+  });
+  await db.projectNoteLibraries.put({
+    projectId: "p",
+    libraryId: "library-a",
+  });
+
+  // `saveWorkspace` intentionally lists only ordinary business tables.  A
+  // full snapshot must never erase append-only events *or* read-only corpus.
+  await saveWorkspace({
+    ...snapshot(),
+    projects: [{ ...snapshot().projects[0], name: "改名" }],
+  });
+  assert.equal(await db.noteLibraries.count(), 1);
+  assert.equal(await db.noteDocuments.count(), 1);
+  assert.equal(await db.noteChunks.count(), 1);
+  assert.equal(await db.projectNoteLibraries.count(), 1);
+
+  await clearWorkspace();
+  assert.equal(await db.noteLibraries.count(), 0);
+  assert.equal(await db.noteDocuments.count(), 0);
+  assert.equal(await db.noteChunks.count(), 0);
+  assert.equal(await db.projectNoteLibraries.count(), 0);
+});
+
+test("v5 attention tables survive ordinary workspace snapshots and clear with local data", async () => {
   await freshDb();
   await saveWorkspace(snapshot());
   await putAttentionState({
@@ -510,7 +640,7 @@ test("v4 attention tables survive ordinary workspace snapshots and clear with lo
   assert.equal(attention.events.length, 1);
   assert.equal(attention.sessions.length, 1);
   assert.equal(attention.proposals.length, 1);
-  assert.equal(db.verno, 4);
+  assert.equal(db.verno, 5);
   await clearWorkspace();
   const cleared = await loadAttentionState();
   assert.deepEqual(cleared, { events: [], sessions: [], proposals: [] });

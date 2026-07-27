@@ -1,4 +1,4 @@
--- Papertable · SQLite schema (user_version = 1)
+-- Papertable · SQLite schema (user_version = 7)
 --
 -- 列的取舍只有一条判据：当且仅当字段是 (a) 外键、(b) ORDER BY 键、
 -- (c) 按项目删除的 WHERE 键、(d) Rust 侧 vault 写入器需要解释的字段，
@@ -44,7 +44,12 @@ CREATE TABLE IF NOT EXISTS turns (
   status     TEXT,
   error      TEXT,
   model      TEXT,
-  favorite   INTEGER
+  favorite   INTEGER,
+  -- Harness Alpha 只保存可审计的工具轨迹与受控引用，绝不保存隐藏推理。
+  agent_run  TEXT,
+  citations  TEXT,
+  -- 生成中的可见进度；刷新后仍能告诉用户正在检索、阅读还是组织最终回答。
+  agent_phase TEXT
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -159,3 +164,50 @@ CREATE TABLE IF NOT EXISTS vault_index (
 );
 CREATE INDEX IF NOT EXISTS vault_index_name ON vault_index(name);
 CREATE INDEX IF NOT EXISTS vault_index_note ON vault_index(note_id);
+
+-- v6：只读资料库。它和工作区表刻意分开：资料不是 Card，也不因导入而污染关系图。
+-- `root_path` 只在桌面 Vault 型资料库中存在；网页导入资料库没有本机路径。
+CREATE TABLE IF NOT EXISTS note_libraries (
+  id         TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL, -- vault | import
+  name       TEXT NOT NULL,
+  root_path  TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS note_libraries_root
+  ON note_libraries(root_path) WHERE root_path IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS note_documents (
+  id           TEXT PRIMARY KEY,
+  library_id   TEXT NOT NULL REFERENCES note_libraries(id) ON DELETE CASCADE,
+  relative_path TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  tags         TEXT NOT NULL DEFAULT '[]',
+  version_hash TEXT NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  UNIQUE(library_id, relative_path)
+);
+CREATE INDEX IF NOT EXISTS note_documents_library ON note_documents(library_id);
+
+CREATE TABLE IF NOT EXISTS note_chunks (
+  id           TEXT PRIMARY KEY,
+  library_id   TEXT NOT NULL REFERENCES note_libraries(id) ON DELETE CASCADE,
+  document_id  TEXT NOT NULL REFERENCES note_documents(id) ON DELETE CASCADE,
+  ordinal      INTEGER NOT NULL,
+  heading_path TEXT NOT NULL, -- JSON array
+  content      TEXT NOT NULL,
+  char_start   INTEGER NOT NULL,
+  char_end     INTEGER NOT NULL,
+  version_hash TEXT NOT NULL,
+  UNIQUE(document_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS note_chunks_library ON note_chunks(library_id);
+CREATE INDEX IF NOT EXISTS note_chunks_document ON note_chunks(document_id, ordinal);
+
+-- 项目绑定是宿主控制的检索范围。模型工具永远拿不到 Vault 路径或 libraryId 参数。
+CREATE TABLE IF NOT EXISTS project_note_libraries (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  library_id TEXT NOT NULL REFERENCES note_libraries(id) ON DELETE CASCADE,
+  PRIMARY KEY(project_id, library_id)
+);

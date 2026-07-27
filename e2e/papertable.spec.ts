@@ -96,6 +96,39 @@ async function seedPriorDaySignal(page: import("@playwright/test").Page) {
   );
 }
 
+async function importReadOnlyFixture(page: import("@playwright/test").Page) {
+  // `page.goto()` only guarantees document load. Wait for React's shell before
+  // deciding whether this viewport has the mobile drawer; otherwise an early
+  // zero-count can skip opening the drawer and try to tap its off-canvas item.
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  const drawer = page.getByRole("button", { name: "打开项目抽屉" });
+  if (await drawer.isVisible()) {
+    await drawer.click();
+    const drawerPanel = page.getByRole("dialog", { name: "项目栏" });
+    await expect(drawerPanel).toBeVisible();
+    await expect(
+      drawerPanel.getByRole("button", { name: "导入笔记" }),
+    ).toBeInViewport();
+  }
+  await page.getByRole("button", { name: "导入笔记" }).click();
+  const dialog = page.getByRole("dialog", { name: "导入笔记" });
+  await dialog.getByRole("button", { name: "建立只读资料库" }).click();
+  await dialog
+    .locator('input[type="file"]')
+    .first()
+    .setInputFiles({
+      name: "验收资料/海蓝计划.md",
+      mimeType: "text/markdown",
+      buffer: Buffer.from(`# 海蓝计划
+
+唯一事实：海蓝计划的内部代号是 ORBIT-97。
+
+这份资料只用于只读 Harness 验收。`),
+    });
+  await dialog.getByRole("button", { name: /导入 1 个文件/ }).click();
+  await expect(page.getByText(/已建立只读资料库：1 篇笔记/)).toBeVisible();
+}
+
 test("desktop flow creates a real streamed card without an API key", async ({
   page,
 }) => {
@@ -133,6 +166,33 @@ test("390px mobile layout has no horizontal overflow", async ({ page }) => {
       .locator("html")
       .evaluate((element) => element.scrollWidth <= element.clientWidth),
   ).toBe(true);
+});
+
+test("mobile drawer actions close the drawer before opening a modal", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+
+  const drawerButton = page.getByRole("button", { name: "打开项目抽屉" });
+  const sidebar = page.locator(".sidebar");
+  const openDrawer = async () => {
+    await drawerButton.click();
+    await expect(sidebar).toHaveClass(/drawer-open/);
+  };
+
+  for (const [action, dialog] of [
+    ["导入笔记", "导入笔记"],
+    ["导出项目", "导出项目"],
+    ["设置", "设置"],
+  ] as const) {
+    await openDrawer();
+    await page.getByRole("button", { name: action }).click();
+    await expect(page.getByRole("dialog", { name: dialog })).toBeVisible();
+    await expect(sidebar).not.toHaveClass(/drawer-open/);
+    await page.keyboard.press("Escape");
+  }
 });
 
 test("concepts open as four independent temporary cards without replacing each other", async ({
@@ -348,6 +408,96 @@ test("answer-mode chip changes the next real request and child cards inherit it"
   expect(requests.at(-1)?.messages?.[0]?.content).toContain(
     "只能使用下方明确提供的上下文",
   );
+});
+
+test("workspace becomes interactive only after hydration and a new project survives refresh", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(
+    page.getByRole("button", { name: /CozAI · papertable-test-model/ }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "新建项目" }).click();
+  await expect(
+    page.getByRole("heading", { name: "未命名卡片", exact: true }),
+  ).toBeVisible();
+  // 自动保存的正常节流窗口；这不是为了掩盖水合竞争，而是确认已开放的工作区
+  // 会把正常用户操作写入 IndexedDB。
+  await page.waitForTimeout(220);
+
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "未命名卡片", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+});
+
+test("a read-only library uses bounded tools, renders a controlled citation, and refuses missing evidence", async ({
+  page,
+}) => {
+  const streams: Array<{
+    messages?: Array<{ role?: string; content?: string }>;
+    tools?: unknown[];
+  }> = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/llm/stream"))
+      streams.push(request.postDataJSON());
+  });
+  await page.goto("/");
+  // Use an empty project so the sources-only half of this test does not get
+  // unrelated demo references as legitimate frozen evidence.
+  await page.getByRole("button", { name: "新建项目" }).click();
+  await importReadOnlyFixture(page);
+
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("海蓝计划的内部代号是什么？");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText("我已阅读本轮检索到的资料")).toBeVisible();
+  await expect(page.getByLabel("笔记引用")).toBeVisible();
+  await expect.poll(() => streams.length).toBe(3);
+  expect(streams[0]?.tools).toHaveLength(2);
+  expect(
+    streams
+      .slice(1)
+      .some((request) =>
+        request.messages?.some((message) => message.role === "tool"),
+      ),
+  ).toBe(true);
+
+  await page.getByLabel("笔记引用").getByRole("button").click();
+  const source = page.getByRole("dialog", { name: /笔记来源：海蓝计划/ });
+  await expect(source).toContainText("ORBIT-97");
+  await expect(source).toContainText("不会进入主会话");
+  await source.getByRole("button", { name: "关闭来源卡" }).click();
+
+  await page.getByRole("button", { name: /回答依据：通用探索/ }).click();
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("资料库里没有出现的赤霄项目代号是什么？");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(
+    page.getByText("在已绑定的只读资料库中没有找到足够证据"),
+  ).toBeVisible();
+});
+
+test("390px keeps read-only Harness citations reachable without horizontal overflow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await importReadOnlyFixture(page);
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("海蓝计划的内部代号是什么？");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByLabel("笔记引用")).toBeVisible();
+  expect(
+    await page
+      .locator("html")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
 });
 
 test("stopping a stream keeps partial content after reload", async ({

@@ -32,9 +32,20 @@ import { incomingEdge, subtreeIds } from "./lib/graph";
 import {
   generateModel,
   getProviderHealth,
-  streamModel,
+  probeProviderCapabilities,
   type ProviderHealth,
 } from "./lib/provider";
+import {
+  AgentRunFailure,
+  controlledCitations,
+  runAgentTurn,
+} from "./lib/agent";
+import {
+  exportNoteCorpusForBackup,
+  importNoteCorpusFromBackup,
+  noteLibraries,
+} from "./lib/notes";
+import { connectDesktopVault } from "./lib/notes/tauri";
 import {
   backupCounts,
   buildLibraryBackup,
@@ -81,6 +92,7 @@ import {
 import { EDGE_META } from "./types";
 import type {
   AnswerMode,
+  AgentExecutionMode,
   AppSettings,
   AttentionMetrics,
   BuiltContext,
@@ -100,6 +112,7 @@ import type {
   VaultConflict,
   ViewState,
 } from "./types";
+import type { IndexReport, NoteLibrary } from "./lib/notes";
 
 const uid = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 const defaultSettings: AppSettings = {
@@ -111,6 +124,7 @@ const defaultSettings: AppSettings = {
   attentionExperimentStartedAt: Date.now(),
   attentionPromptedDates: {},
   attentionPromptHistory: [],
+  providerCapabilities: [],
 };
 const defaultView = (): ViewState => ({
   id: "main",
@@ -293,6 +307,9 @@ interface Ctx {
   lastCreated: { cardId: string; type: EdgeType } | null;
   hydrated: boolean;
   provider: ProviderHealth | null;
+  agentMode: AgentExecutionMode;
+  noteLibraries: NoteLibrary[];
+  boundNoteLibraryIds: string[];
 
   cardById: (id: string) => Card | undefined;
   setActiveProject: (id: string) => void;
@@ -335,6 +352,10 @@ interface Ctx {
   retryLast: () => void;
   contextForCurrent: () => BuiltContext;
   refreshProvider: () => Promise<ProviderHealth | null>;
+  refreshNoteLibraries: () => Promise<void>;
+  importNoteLibrary: (files: File[], name?: string) => Promise<IndexReport>;
+  setProjectNoteLibraries: (libraryIds: string[]) => Promise<void>;
+  removeNoteLibrary: (id: string) => Promise<void>;
   importFiles: (format: ImportInput["format"], files: File[]) => Promise<void>;
   exportProject: (format: "md-dir" | "canvas" | "bundle") => Promise<void>;
   exportAllBackup: () => Promise<void>;
@@ -435,6 +456,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   /** 挂起中的 vault 冲突。常驻横幅，不是 toast——它需要用户做一次二选一。 */
   const [vaultConflicts, setVaultConflicts] = useState<VaultConflict[]>([]);
   const [vaultIndexed, setVaultIndexed] = useState(0);
+  /** 资料库与卡片工作区完全分表；这里只缓存 UI 视图与当前项目的已绑定范围。 */
+  const [noteLibraryList, setNoteLibraryList] = useState<NoteLibrary[]>([]);
+  const [boundNoteLibraryIds, setBoundNoteLibraryIds] = useState<string[]>([]);
   const vaultTimer = useRef<number | null>(null);
   const [streamingTurnsByCard, setStreamingTurnsByCard] = useState<
     Record<string, string>
@@ -503,6 +527,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           message: settings.providerMessage ?? "",
         };
 
+  const agentMode: AgentExecutionMode =
+    settings.providerCapabilities?.find(
+      (capability) =>
+        capability.baseUrl ===
+          (settings.providerBaseUrl ?? "https://cozai.net/v1") &&
+        capability.model === settings.model,
+    )?.mode ?? "two-stage";
+
   const activeProposals = useMemo(
     () => activeProposalsForProject(proposals, activeProjectId),
     [activeProjectId, proposals],
@@ -545,6 +577,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           now,
         attentionPromptedDates: next.settings.attentionPromptedDates ?? {},
         attentionPromptHistory: next.settings.attentionPromptHistory ?? [],
+        providerCapabilities: next.settings.providerCapabilities ?? [],
       };
       const pruned = pruneProjectScopedState({
         projects: next.projects,
@@ -769,6 +802,131 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (hydrated) void refreshProvider();
   }, [hydrated, refreshProvider]);
+
+  const refreshNoteLibraries = useCallback(async () => {
+    const [libraries, bindings] = await Promise.all([
+      noteLibraries.listLibraries(),
+      noteLibraries.projectLibraryIds(activeProjectId),
+    ]);
+    setNoteLibraryList(libraries);
+    setBoundNoteLibraryIds(bindings);
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    void refreshNoteLibraries().catch(() => {
+      // 资料库不可用不能阻断原有卡片流程；发送时会明确显示为无绑定资料。
+      setNoteLibraryList([]);
+      setBoundNoteLibraryIds([]);
+    });
+  }, [hydrated, refreshNoteLibraries]);
+
+  const importNoteLibrary = useCallback(
+    async (files: File[], name?: string): Promise<IndexReport> => {
+      if (!files.length) throw new Error("请先选择至少一篇 Markdown 笔记。");
+      const now = Date.now();
+      const library: NoteLibrary = {
+        id: uid("library"),
+        name:
+          name?.trim() ||
+          `只读资料库 · ${new Date(now).toLocaleDateString("zh-CN")}`,
+        kind: "web-import",
+        createdAt: now,
+        updatedAt: now,
+      };
+      const report = await noteLibraries.importFiles({
+        library,
+        files: await Promise.all(
+          files.map(async (file) => ({
+            relativePath:
+              (file as File & { webkitRelativePath?: string })
+                .webkitRelativePath || file.name,
+            content: await file.text(),
+            modifiedAt: file.lastModified || now,
+          })),
+        ),
+      });
+      const previous = await noteLibraries.projectLibraryIds(activeProjectId);
+      await noteLibraries.setProjectLibraries(activeProjectId, [
+        ...previous,
+        library.id,
+      ]);
+      await refreshNoteLibraries();
+      showToast({
+        text: `已建立只读资料库：${report.documents} 篇笔记、${report.chunks} 个片段；已绑定当前项目。`,
+      });
+      return report;
+    },
+    [activeProjectId, refreshNoteLibraries, showToast],
+  );
+
+  const setProjectNoteLibraries = useCallback(
+    async (libraryIds: string[]) => {
+      await noteLibraries.setProjectLibraries(activeProjectId, libraryIds);
+      await refreshNoteLibraries();
+    },
+    [activeProjectId, refreshNoteLibraries],
+  );
+
+  const removeNoteLibrary = useCallback(
+    async (id: string) => {
+      await noteLibraries.removeLibrary(id);
+      await refreshNoteLibraries();
+      showToast({ text: "已移除只读资料库；项目卡片没有被修改。" });
+    },
+    [refreshNoteLibraries, showToast],
+  );
+
+  const ensureProviderCapability = useCallback(async () => {
+    const current = latestRef.current.settings;
+    const baseUrl = current.providerBaseUrl ?? "https://cozai.net/v1";
+    const model = current.model;
+    const cached = current.providerCapabilities?.find(
+      (capability) =>
+        capability.baseUrl === baseUrl && capability.model === model,
+    );
+    if (cached) return cached;
+    try {
+      const probe = await probeProviderCapabilities();
+      const next = {
+        baseUrl,
+        model,
+        mode: probe.mode,
+        streamingToolCalls: probe.streamingToolCalls,
+        toolResultAccepted: probe.toolResultAccepted,
+        testedAt: Date.parse(probe.testedAt) || Date.now(),
+      } as const;
+      setSettings((previous) => {
+        // A late probe for an old endpoint must never overwrite a new setting.
+        if (
+          previous.model !== model ||
+          (previous.providerBaseUrl ?? "https://cozai.net/v1") !== baseUrl
+        )
+          return previous;
+        return {
+          ...previous,
+          providerCapabilities: [
+            ...(previous.providerCapabilities ?? []).filter(
+              (capability) =>
+                capability.baseUrl !== baseUrl || capability.model !== model,
+            ),
+            next,
+          ].slice(-12),
+        };
+      });
+      return next;
+    } catch {
+      // Unknown is intentionally deterministic: safe two-stage retrieval.
+      return {
+        baseUrl,
+        model,
+        mode: "two-stage" as const,
+        streamingToolCalls: false,
+        toolResultAccepted: false,
+        testedAt: Date.now(),
+      };
+    }
+  }, []);
 
   const updateCard = useCallback(
     (cardId: string, updater: (card: Card) => Card) =>
@@ -1133,24 +1291,47 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           references: input.references,
           currentCardId: input.cardId,
         });
-        for await (const event of streamModel({
-          task: "chat",
-          messages: built.messages,
+        // 资料库范围在一轮开始时从宿主绑定表冻结。模型工具永远拿不到
+        // libraryId、Vault 路径或项目 scope，切项目也不会改变这次后台任务的范围。
+        const libraryIds = await noteLibraries.projectLibraryIds(
+          target.projectId,
+        );
+        // 普通卡片聊天不需要先花一次真实模型请求探测工具能力。只有用户明确
+        // 绑定了只读资料库，才探测并进入 Harness；这也避免无资料项目首问变慢。
+        const capability = libraryIds.length
+          ? await ensureProviderCapability()
+          : undefined;
+        const outcome = await runAgentTurn({
+          built,
+          projectId: target.projectId,
+          libraryIds,
+          capability,
           signal: controller.signal,
-        })) {
-          if (event.type !== "token") continue;
-          gate.push(event.text, event.channel);
-          const nextAnswer = gate.visible();
-          if (nextAnswer === answer) continue;
-          answer = nextAnswer;
-          throttle.push(answer);
-        }
+          onPhase: (agentPhase) =>
+            updateCard(input.cardId, (card) => ({
+              ...card,
+              turns: card.turns.map((turn) =>
+                turn.id === aiId && turn.status === "streaming"
+                  ? { ...turn, agentPhase }
+                  : turn,
+              ),
+            })),
+          onToken: (event) => {
+            gate.push(event.text, event.channel);
+            const nextAnswer = gate.visible();
+            if (nextAnswer === answer) return;
+            answer = nextAnswer;
+            throttle.push(answer);
+          },
+        });
         if (!controller.signal.aborted) {
           // 收尾 flush 只在正常结束时发生；中断路径永远不会走到这里。
-          answer = gate.finish();
+          answer = outcome.directAnswer ?? gate.finish();
           throttle.dispose();
           if (!answer.trim())
             throw new Error("模型没有返回可显示的最终文本，请重试。");
+          const cited = controlledCitations(answer, outcome.readChunks);
+          answer = cited.content;
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
@@ -1160,6 +1341,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                     content: answer,
                     streaming: false,
                     status: "complete",
+                    agentPhase: undefined,
+                    agentRun: outcome.trace,
+                    citations: cited.citations,
                   }
                 : turn,
             ),
@@ -1172,6 +1356,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           throttle.dispose();
           const message =
             error instanceof Error ? error.message : "模型生成失败。";
+          const agentRun =
+            error instanceof AgentRunFailure ? error.trace : undefined;
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
@@ -1182,6 +1368,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                     status: "error",
                     error: message,
                     content: answer || "生成失败。",
+                    agentPhase: undefined,
+                    ...(agentRun ? { agentRun } : {}),
                   }
                 : turn,
             ),
@@ -1196,6 +1384,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     },
     [
       edges,
+      ensureProviderCapability,
       runBackgroundTasks,
       settings.model,
       showToast,
@@ -2208,14 +2397,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
    * 是已经落盘的内容。IndexedDB → SQLite 无法自动迁移，这个文件是唯一的通路。
    */
   const exportLibraryBackup = useCallback(async () => {
-    const [workspace, attention] = await Promise.all([
+    const [workspace, attention, noteCorpus] = await Promise.all([
       loadWorkspace(),
       loadAttentionState(),
+      exportNoteCorpusForBackup(),
     ]);
     if (!workspace) throw new Error("本机还没有可备份的数据。");
     const backup = buildLibraryBackup({
       workspace,
       attention,
+      noteCorpus,
       exportedAt: Date.now(),
     });
     const counts = backupCounts(backup);
@@ -2224,7 +2415,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       blob: new Blob([JSON.stringify(backup)], { type: "application/json" }),
     });
     showToast({
-      text: `已导出整库备份：${counts.projects} 个项目 · ${counts.cards} 张卡片 · ${counts.turns} 条轮次。请自己收好，迁移到桌面版时需要它。`,
+      text: `已导出整库备份：${counts.projects} 个项目 · ${counts.cards} 张卡片 · ${counts.turns} 条轮次${counts.noteLibraries ? ` · ${counts.noteLibraries} 个只读资料库` : ""}。请自己收好，迁移到桌面版时需要它。`,
     });
   }, [showToast]);
 
@@ -2242,6 +2433,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         workspace: backup.workspace,
         attention: backup.attention,
       });
+      await importNoteCorpusFromBackup(backup.noteCorpus);
       const [workspace, attention] = await Promise.all([
         loadWorkspace(),
         loadAttentionState(),
@@ -2249,16 +2441,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       if (!workspace) throw new Error("导入之后读不回任何内容，请勿继续使用。");
       const check = diffBackupCounts(
         backup,
-        buildLibraryBackup({ workspace, attention, exportedAt: Date.now() }),
+        buildLibraryBackup({
+          workspace,
+          attention,
+          noteCorpus: await exportNoteCorpusForBackup(),
+          exportedAt: Date.now(),
+        }),
       );
       showToast({
         text: check.equal
           ? "导入已校验：每张表的行数都与备份一致。刷新后生效。"
           : `导入后校验不一致：${check.mismatches.join("；")}。请勿在此数据上继续使用。`,
       });
+      await refreshNoteLibraries();
       return check;
     },
-    [showToast],
+    [refreshNoteLibraries, showToast],
   );
 
   // -------------------------------------------------------------------------
@@ -2368,10 +2566,24 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setSettings((current) => ({ ...current, vaultPath: picked }));
     const indexed = await vault.watch(picked);
     setVaultIndexed(indexed);
+    // Desktop-only: connection creates/updates a read-only library separate
+    // from the existing optional Papertable→Vault export sync.
+    try {
+      const library = await connectDesktopVault(picked);
+      const bound = await noteLibraries.projectLibraryIds(activeProjectId);
+      await noteLibraries.setProjectLibraries(activeProjectId, [
+        ...bound,
+        library.id,
+      ]);
+      await refreshNoteLibraries();
+    } catch {
+      // The vault watcher remains useful for ordinary wikilinks even if the
+      // Harness corpus cannot be built (for example a transient DB lock).
+    }
     showToast({
-      text: `已选择知识库：${picked}，索引到 ${indexed} 篇笔记。Papertable 只会写入其中的 ${settings.vaultSubtree ?? DEFAULT_VAULT_SUBTREE}/。`,
+      text: `已选择知识库：${picked}，索引到 ${indexed} 篇笔记；当前项目已尝试绑定为只读资料库。Papertable 只会写入其中的 ${settings.vaultSubtree ?? DEFAULT_VAULT_SUBTREE}/。`,
     });
-  }, [showToast]);
+  }, [activeProjectId, refreshNoteLibraries, settings.vaultSubtree, showToast]);
 
   /** 监听器出问题时的手动兜底。 */
   const rescanVault = useCallback(async () => {
@@ -2617,6 +2829,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setInteractionEvents([]);
     setSessions([]);
     setProposals([]);
+    setNoteLibraryList([]);
+    setBoundNoteLibraryIds([]);
     setMorningPrompt(null);
     setProposalTrayOpenState(false);
     setSelectedProposalId(null);
@@ -2651,6 +2865,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       lastCreated,
       hydrated,
       provider,
+      agentMode,
+      noteLibraries: noteLibraryList,
+      boundNoteLibraryIds,
       cardById,
       setActiveProject,
       renameProject,
@@ -2680,6 +2897,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       retryLast,
       contextForCurrent,
       refreshProvider,
+      refreshNoteLibraries,
+      importNoteLibrary,
+      setProjectNoteLibraries,
+      removeNoteLibrary,
       importFiles,
       exportProject,
       exportAllBackup,
@@ -2732,6 +2953,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       lastCreated,
       hydrated,
       provider,
+      agentMode,
+      noteLibraryList,
+      boundNoteLibraryIds,
       cardById,
       setActiveProject,
       renameProject,
@@ -2761,6 +2985,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       retryLast,
       contextForCurrent,
       refreshProvider,
+      refreshNoteLibraries,
+      importNoteLibrary,
+      setProjectNoteLibraries,
+      removeNoteLibrary,
       importFiles,
       exportProject,
       exportAllBackup,

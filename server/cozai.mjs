@@ -20,8 +20,68 @@ export function extractDelta(payload) {
   };
 }
 
+/**
+ * OpenAI-compatible providers stream tool calls in `delta.tool_calls`.  Keep
+ * this separate from `extractDelta`: tool arguments are protocol data, never
+ * visible model prose and therefore must not pass through the answer gate.
+ */
+export function extractToolCallDeltas(payload) {
+  const calls = payload?.choices?.[0]?.delta?.tool_calls;
+  if (!Array.isArray(calls)) return [];
+  return calls.flatMap((call, fallbackIndex) => {
+    if (!call || typeof call !== "object") return [];
+    const functionCall = call.function;
+    const event = {
+      index: Number.isInteger(call.index) ? call.index : fallbackIndex,
+      ...(typeof call.id === "string" && call.id ? { id: call.id } : {}),
+      ...(typeof functionCall?.name === "string" && functionCall.name
+        ? { name: functionCall.name }
+        : {}),
+      ...(typeof functionCall?.arguments === "string"
+        ? { arguments: functionCall.arguments }
+        : {}),
+    };
+    return Object.keys(event).length > 1 ? [event] : [];
+  });
+}
+
+/** Return normalized completed tool calls from a non-streaming response. */
+export function extractToolCalls(payload) {
+  const calls = payload?.choices?.[0]?.message?.tool_calls;
+  if (!Array.isArray(calls)) return [];
+  return calls.flatMap((call) => {
+    const functionCall = call?.function;
+    if (
+      typeof call?.id !== "string" ||
+      !call.id ||
+      typeof functionCall?.name !== "string" ||
+      !functionCall.name
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: call.id,
+        name: functionCall.name,
+        arguments:
+          typeof functionCall.arguments === "string"
+            ? functionCall.arguments
+            : "{}",
+      },
+    ];
+  });
+}
+
 export function extractMessage(payload) {
-  return payload?.choices?.[0]?.message?.content ?? "";
+  const content = payload?.choices?.[0]?.message?.content;
+  return typeof content === "string" ? content : "";
+}
+
+export function extractFinishReason(payload) {
+  const finishReason = payload?.choices?.[0]?.finish_reason;
+  return typeof finishReason === "string" && finishReason
+    ? finishReason.slice(0, 80)
+    : undefined;
 }
 
 export function sseEvent(event, payload) {
@@ -46,7 +106,9 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
   let pending = "";
-  let emitted = false;
+  let emittedText = false;
+  let emittedToolCall = false;
+  let finishReason;
 
   try {
     while (!signal?.aborted) {
@@ -60,10 +122,11 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
         const data = line.slice(5).trim();
         if (!data || data === "[DONE]") continue;
         try {
-          const delta = extractDelta(JSON.parse(data));
+          const payload = JSON.parse(data);
+          const delta = extractDelta(payload);
           if (delta.content) {
-            // `emitted` 只由 content 驱动，只有推理没有正文时仍要报错。
-            emitted = true;
+            // 只有正文走 answer gate；工具调用和独立推理都绝不作为正文。
+            emittedText = true;
             write(
               sseEvent("token", {
                 text: delta.content,
@@ -71,6 +134,11 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
               }),
             );
           }
+          for (const toolCall of extractToolCallDeltas(payload)) {
+            emittedToolCall = true;
+            write(sseEvent("tool-call-delta", toolCall));
+          }
+          finishReason ??= extractFinishReason(payload);
         } catch {
           // Keep the UI stream alive if a non-JSON provider heartbeat arrives.
         }
@@ -84,8 +152,13 @@ export async function relayOpenAiStream({ upstream, write, signal }) {
     reader.cancel().catch(() => undefined);
   }
 
-  if (!emitted && !signal?.aborted) {
+  if (!emittedText && !emittedToolCall && !signal?.aborted) {
     write(sseEvent("error", { message: "模型没有返回可显示的文本，请重试。" }));
   }
-  write(sseEvent("done", { stopped: Boolean(signal?.aborted) }));
+  write(
+    sseEvent("done", {
+      stopped: Boolean(signal?.aborted),
+      ...(finishReason ? { finishReason } : {}),
+    }),
+  );
 }

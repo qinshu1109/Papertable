@@ -1,5 +1,6 @@
 mod db;
 mod llm;
+mod notes;
 mod vault;
 mod watcher;
 
@@ -104,7 +105,7 @@ fn seed_if_empty(
 #[tauri::command]
 fn save_workspace(state: State<Db>, snapshot: WorkspaceSnapshot) -> Result<(), db::Error> {
     with_db!(state, conn, {
-        db::clear_all(conn)?;
+        db::clear_workspace_data(conn)?;
         db::write_snapshot(conn, &snapshot, &AttentionSnapshot::default())
     })
 }
@@ -146,7 +147,7 @@ fn import_library(
     attention: AttentionSnapshot,
 ) -> Result<(), db::Error> {
     with_db!(state, conn, {
-        db::clear_all(conn)?;
+        db::clear_workspace_data(conn)?;
         db::write_snapshot(conn, &workspace, &attention)
     })
 }
@@ -233,6 +234,24 @@ fn provider_key_source(state: State<Provider>) -> Result<KeySource, llm::Error> 
 #[tauri::command]
 fn llm_generate(state: State<Provider>, request: ChatRequest) -> Result<String, llm::Error> {
     llm::generate(&provider_snapshot(&state)?, &request)
+}
+
+/// Harness 的非流式通道：除最终正文外还能安全回传结构化 tool_calls。普通标题和
+/// 概念任务继续走 llm_generate，避免旧调用方意外把工具协议当正文。
+#[tauri::command]
+fn llm_complete(
+    state: State<Provider>,
+    request: ChatRequest,
+) -> Result<llm::Completion, llm::Error> {
+    llm::complete(&provider_snapshot(&state)?, &request)
+}
+
+/// 能力探测只返回布尔协议结果；前端按 baseUrl+model 缓存，Rust 不写入密钥或原始回复。
+#[tauri::command]
+fn provider_probe_capability(
+    state: State<Provider>,
+) -> Result<llm::ProviderCapabilityResult, llm::Error> {
+    Ok(llm::probe_capability(&provider_snapshot(&state)?))
 }
 
 /// 流式生成。事件走 Tauri `Channel`，替代浏览器里的 SSE 解析循环。
@@ -520,19 +539,28 @@ fn vault_watch(
     shared: State<SharedDb>,
     watch: State<watcher::VaultWatcher>,
     vault: String,
+    subtree: Option<String>,
 ) -> Result<usize, vault::Error> {
     let root = std::path::PathBuf::from(&vault);
+    let excluded = vault::subtree_or_default(subtree.as_deref().unwrap_or_default())?;
+    let excluded_path = std::path::PathBuf::from(excluded);
     let now = now_millis();
     let count = {
         let conn = shared.0.lock().map_err(|_| "数据库锁被毒化".to_string())?;
-        watcher::scan(&conn, &root, now).map_err(|e| vault::Error::from(e.to_string()))?
+        watcher::scan_excluding(&conn, &root, Some(&excluded_path), now)
+            .map_err(|e| vault::Error::from(e.to_string()))?
     };
     let handle = app.clone();
     watch
-        .start(root, Arc::clone(&shared.0), move |notes| {
-            use tauri::Emitter;
-            let _ = handle.emit("vault-changed", notes);
-        })
+        .start_excluding(
+            root,
+            Arc::clone(&shared.0),
+            Some(excluded_path),
+            move |notes| {
+                use tauri::Emitter;
+                let _ = handle.emit("vault-changed", notes);
+            },
+        )
         .map_err(|e| vault::Error::from(e.to_string()))?;
     Ok(count)
 }
@@ -549,6 +577,150 @@ fn vault_resolve_link(
 #[tauri::command]
 fn vault_indexed_count(db: State<Db>) -> Result<i64, db::Error> {
     with_db!(db, conn, db::indexed_count(conn))
+}
+
+// ---------------------------------------------------------------------------
+// 只读资料库
+//
+// 所有检索命令都以 projectId 为边界。模型不可能经由 IPC 传入 Vault 路径或任意
+// libraryId；项目和资料库的绑定是由用户界面在 Agent Loop 开始前冻结的。
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn note_library_list(db: State<Db>) -> Result<Vec<notes::PublicNoteLibrary>, notes::Error> {
+    with_db!(db, conn, {
+        Ok(notes::list_libraries(conn)?
+            .iter()
+            .map(notes::PublicNoteLibrary::from)
+            .collect())
+    })
+}
+
+#[tauri::command]
+fn note_library_connect_vault(
+    app: tauri::AppHandle,
+    db: State<Db>,
+    shared: State<SharedDb>,
+    watch: State<watcher::VaultWatcher>,
+    vault: String,
+    subtree: Option<String>,
+) -> Result<notes::PublicNoteLibrary, notes::Error> {
+    let root = std::path::PathBuf::from(&vault);
+    if !root.is_dir() {
+        return Err("资料库路径不存在或不是文件夹。".into());
+    }
+    let now = now_millis();
+    let excluded = vault::subtree_or_default(subtree.as_deref().unwrap_or_default())
+        .map_err(|error| notes::Error::from(error.to_string()))?;
+    let excluded_path = std::path::PathBuf::from(excluded);
+    let library = with_db!(db, conn, {
+        let library = notes::connect_vault(conn, &root, Some(now))?;
+        watcher::scan_excluding(conn, &root, Some(&excluded_path), now)
+            .map_err(|error| notes::Error::from(error.to_string()))?;
+        notes::library(conn, &library.id)?
+            .ok_or_else(|| notes::Error::from("资料库创建后无法读取。"))
+    })?;
+    // 与旧 vault_watch 使用同一个单例 watcher。重复连接会先替换旧 watcher，绝不
+    // 叠出多条监听线程。
+    let handle = app.clone();
+    watch
+        .start_excluding(
+            root,
+            Arc::clone(&shared.0),
+            Some(excluded_path),
+            move |changes| {
+                use tauri::Emitter;
+                let _ = handle.emit("vault-changed", changes);
+            },
+        )
+        .map_err(|error| notes::Error::from(error.to_string()))?;
+    Ok(notes::PublicNoteLibrary::from(&library))
+}
+
+#[tauri::command]
+fn note_library_import(
+    db: State<Db>,
+    input: notes::NoteImportRequest,
+) -> Result<notes::PublicIndexReport, notes::Error> {
+    with_db!(db, conn, notes::import_request(conn, &input))
+}
+
+#[tauri::command]
+fn note_library_bind_project(
+    db: State<Db>,
+    project_id: String,
+    library_ids: Vec<String>,
+) -> Result<(), notes::Error> {
+    with_db!(
+        db,
+        conn,
+        notes::bind_project(conn, &project_id, &library_ids)
+    )
+}
+
+#[tauri::command]
+fn note_library_project_bindings(
+    db: State<Db>,
+    project_id: String,
+) -> Result<Vec<String>, notes::Error> {
+    with_db!(db, conn, notes::project_library_ids(conn, &project_id))
+}
+
+#[tauri::command]
+fn note_library_search(
+    db: State<Db>,
+    project_id: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<notes::PublicNoteHit>, notes::Error> {
+    with_db!(db, conn, {
+        Ok(notes::search_project(conn, &project_id, &query, limit)?
+            .iter()
+            .map(notes::PublicNoteHit::from)
+            .collect())
+    })
+}
+
+#[tauri::command]
+fn note_library_read(
+    db: State<Db>,
+    project_id: String,
+    chunk_ids: Vec<String>,
+) -> Result<Vec<notes::PublicNoteChunk>, notes::Error> {
+    with_db!(db, conn, {
+        Ok(notes::read_project(conn, &project_id, &chunk_ids)?
+            .iter()
+            .map(notes::PublicNoteChunk::from)
+            .collect())
+    })
+}
+
+#[tauri::command]
+fn note_library_rebuild(
+    db: State<Db>,
+    id: String,
+) -> Result<notes::PublicIndexReport, notes::Error> {
+    let now = now_millis();
+    with_db!(db, conn, {
+        let root = notes::vault_root(conn, &id)?
+            .ok_or_else(|| notes::Error::from("这个资料库不是可重建的本地 Vault。"))?;
+        let count = watcher::scan(conn, &root, now)
+            .map_err(|error| notes::Error::from(error.to_string()))?;
+        let library =
+            notes::library(conn, &id)?.ok_or_else(|| notes::Error::from("资料库不存在。"))?;
+        let report = notes::IndexReport {
+            library_id: id,
+            documents_indexed: count,
+            chunks_indexed: library.chunk_count as usize,
+            skipped: 0,
+        };
+        Ok(notes::PublicIndexReport::from(&report))
+    })
+}
+
+#[tauri::command]
+fn note_library_remove(db: State<Db>, id: String) -> Result<(), notes::Error> {
+    with_db!(db, conn, notes::remove_library(conn, &id))
 }
 
 fn now_millis() -> i64 {
@@ -620,6 +792,8 @@ pub fn run() {
             provider_key_source,
             build_info,
             llm_generate,
+            llm_complete,
+            provider_probe_capability,
             llm_stream,
             llm_cancel_stream,
             vault_sync,
@@ -629,6 +803,15 @@ pub fn run() {
             vault_watch,
             vault_resolve_link,
             vault_indexed_count,
+            note_library_list,
+            note_library_connect_vault,
+            note_library_import,
+            note_library_bind_project,
+            note_library_project_bindings,
+            note_library_search,
+            note_library_read,
+            note_library_rebuild,
+            note_library_remove,
             vault_written_paths,
             vault_conflicts,
             vault_resolve_conflict,

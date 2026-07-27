@@ -35,10 +35,13 @@ export function Composer({
     backgroundGenerationCount,
     contextForCurrent,
     currentCardId,
+    cardById,
     setCardAnswerMode,
     provider,
     refreshProvider,
     showToast,
+    agentMode,
+    boundNoteLibraryIds,
   } = useStore();
   const [modelOpen, setModelOpen] = useState(false);
   const [ctxOpen, setCtxOpen] = useState(false);
@@ -51,6 +54,9 @@ export function Composer({
   const ta = useRef<HTMLTextAreaElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const built = contextForCurrent();
+  const latestAgentRun = [...(cardById(currentCardId)?.turns ?? [])]
+    .reverse()
+    .find((turn) => turn.role === "ai" && turn.agentRun)?.agentRun;
 
   useEffect(() => {
     const projectChanged = previousProject.current !== activeProjectId;
@@ -231,6 +237,29 @@ export function Composer({
                   </div>
                 ))}
               </div>
+              <div className="ctx-group">
+                <div className="ctx-group-t">本轮检索</div>
+                <div className="ctx-line">
+                  <Layers size={13} color="var(--ctx)" />
+                  <span>
+                    {boundNoteLibraryIds.length
+                      ? `已绑定 ${boundNoteLibraryIds.length} 个只读资料库 · ${agentMode === "native-tools" ? "原生工具" : "双阶段检索"}`
+                      : "当前项目未绑定资料库；本轮不会检索笔记。"}
+                  </span>
+                </div>
+                {latestAgentRun && (
+                  <div className="ctx-line">
+                    <Layers size={13} color="var(--branch)" />
+                    <span>
+                      上次实际读取 {latestAgentRun.readChunkIds.length}{" "}
+                      个片段、命中 {latestAgentRun.hitCount} 项
+                      {latestAgentRun.retrievalUnavailable
+                        ? " · 检索不可用"
+                        : ""}
+                    </span>
+                  </div>
+                )}
+              </div>
               <div className="ctx-foot">
                 <span>约 {tokens.toLocaleString()} tokens · 预算 8,000</span>
                 <span className="meter" aria-label={`上下文占用 ${pct}%`}>
@@ -291,6 +320,11 @@ export function Composer({
                         {provider?.configured
                           ? "本机代理已配置，密钥不会进入浏览器。"
                           : (provider?.message ?? "尚未配置模型")}
+                        <br />
+                        Harness：
+                        {agentMode === "native-tools"
+                          ? "原生工具"
+                          : "双阶段检索"}
                       </div>
                       <button
                         className="menu-item"

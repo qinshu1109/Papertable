@@ -65,6 +65,72 @@ function lastUserMessage(payload) {
   );
 }
 
+function requestedToolName(payload) {
+  const tools = Array.isArray(payload.tools) ? payload.tools : [];
+  if (!tools.length) return null;
+  const available = new Set(
+    tools
+      .map((tool) => tool?.function?.name ?? tool?.name)
+      .filter((name) => typeof name === "string" && name),
+  );
+  const choice = payload.toolChoice ?? payload.tool_choice;
+  const forcedName =
+    choice && typeof choice === "object"
+      ? (choice.function?.name ?? choice.name)
+      : undefined;
+  if (typeof forcedName === "string" && available.has(forcedName))
+    return forcedName;
+  return available.values().next().value ?? null;
+}
+
+/**
+ * The local fake provider behaves like an OpenAI tool-capable model so browser
+ * E2E can verify the protocol without hitting CozAI.  Once a tool result is
+ * present it returns ordinary visible text instead of asking for it again.
+ */
+export function fakeToolCalls(payload) {
+  const toolMessages = (payload.messages ?? []).filter(
+    (message) => message?.role === "tool",
+  );
+  const latestTool = toolMessages.at(-1);
+  if (latestTool) {
+    // Native-tool browser tests must exercise the full host gate, not just a
+    // cosmetic first search.  The fake model reads only an id returned in its
+    // own preceding search result, exactly like a well-behaved provider.
+    try {
+      const result = JSON.parse(latestTool.content ?? "{}");
+      const firstHit = Array.isArray(result.hits) ? result.hits[0] : null;
+      if (typeof firstHit?.chunkId === "string") {
+        return [
+          {
+            id: "fake-tool-call-read-1",
+            name: "read_notes",
+            arguments: JSON.stringify({ chunkIds: [firstHit.chunkId] }),
+          },
+        ];
+      }
+    } catch {
+      // Tool-result parsing is deliberately best-effort in the fake only.
+    }
+    return [];
+  }
+  const name = requestedToolName(payload);
+  if (!name) return [];
+  const userText = lastUserMessage(payload).slice(0, 160);
+  const argumentsByName = {
+    search_notes: JSON.stringify({ query: userText || "测试资料", limit: 3 }),
+    read_notes: JSON.stringify({ chunkIds: ["fake-note-chunk-1"] }),
+    papertable_probe: JSON.stringify({ probe: "ok" }),
+  };
+  return [
+    {
+      id: "fake-tool-call-1",
+      name,
+      arguments: argumentsByName[name] ?? "{}",
+    },
+  ];
+}
+
 export function fakeScenario(payload) {
   if (payload.task === "title" || payload.task === "concepts") return null;
   const lastUser = lastUserMessage(payload);
@@ -73,7 +139,11 @@ export function fakeScenario(payload) {
       (scenario) =>
         (scenario.task
           ? payload.task === scenario.task
-          : payload.task === "chat") && lastUser.includes(scenario.tag),
+          : // Ordinary chat now enters the shared Harness stream entry point,
+            // even when no library is bound.  Keep legacy fixture scenarios
+            // valid for that safe no-tool path as well.
+            payload.task === "chat" || payload.task === "agent") &&
+        lastUser.includes(scenario.tag),
     ) ?? null
   );
 }
@@ -85,6 +155,22 @@ export function fakeCompletion(payload) {
   // 概念必须逐字出现在正文里；给概念浮层用例一个可点击的词。
   if (payload.task === "concepts")
     return lastUser.includes("量子退相干") ? `${S}["量子退相干"]` : `${S}[]`;
+  const systemText = (payload.messages ?? [])
+    .filter((message) => message?.role === "system")
+    .map((message) => message.content ?? "")
+    .join("\n");
+  if (payload.task === "agent" && systemText.includes("只读笔记检索规划器")) {
+    return JSON.stringify({ queries: [topic] });
+  }
+  const toolContent = (payload.messages ?? [])
+    .filter((message) => message?.role === "tool")
+    .map((message) => message.content ?? "")
+    .join("\n");
+  const citedId =
+    toolContent.match(/"chunkId"\s*:\s*"([^"]+)"/)?.[1] ??
+    systemText.match(/\[chunkId=([^\]\s]+)\]/)?.[1];
+  if (payload.task === "agent" && citedId)
+    return `${S}我已阅读本轮检索到的资料，并据此给出回答。[[source:${citedId}]]`;
   const scenario = fakeScenario(payload);
   if (scenario) return scenario.content;
   // 默认回答也带哨兵：系统提示要求它，fake provider 必须反映真实契约，
@@ -93,6 +179,27 @@ export function fakeCompletion(payload) {
 }
 
 export async function emitFakeStream({ payload, write, signal }) {
+  const toolCalls = fakeToolCalls(payload);
+  if (toolCalls.length) {
+    for (const [index, toolCall] of toolCalls.entries()) {
+      if (signal?.aborted) break;
+      write(
+        sseEvent("tool-call-delta", {
+          index,
+          id: toolCall.id,
+          name: toolCall.name,
+          arguments: toolCall.arguments,
+        }),
+      );
+    }
+    write(
+      sseEvent("done", {
+        stopped: Boolean(signal?.aborted),
+        finishReason: "tool_calls",
+      }),
+    );
+    return;
+  }
   const content = fakeCompletion(payload);
   // 真实网关会在本机丢弃独立草稿；前端仍以正文哨兵而非服务端标记放行。
   const channel = "unknown";

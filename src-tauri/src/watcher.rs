@@ -69,6 +69,12 @@ pub fn should_watch(relative: &Path) -> bool {
             .is_some_and(|e| e.eq_ignore_ascii_case("md"))
 }
 
+/// Papertable 自己写入的容纳子树不能再作为资料入库，否则“导出→监听→检索→再导出”
+/// 会把模型自己的旧回答当作证据。这个判断独立于隐藏目录规则，方便自定义容纳根。
+fn is_excluded(relative: &Path, excluded: Option<&Path>) -> bool {
+    excluded.is_some_and(|prefix| relative.starts_with(prefix))
+}
+
 /// 事件分类。**纯函数**：三层防护的判定逻辑全在这里，这样它能被测到，而不用去
 /// 驱动一个真实的文件系统监听器。
 pub fn verdict(
@@ -180,12 +186,16 @@ fn adopt(conn: &Connection, root: &Path, relative: &Path, now: i64) -> Option<In
     let full = root.join(relative);
     let Ok(text) = std::fs::read_to_string(&full) else {
         let _ = crate::db::drop_indexed(conn, &key);
+        // 资料库存在时，同步删除对应 chunk；旧 vault_index 语义不受影响。
+        let _ = crate::notes::remove_vault_file(conn, root, relative);
         return None;
     };
     let hash = crate::vault::normalized_hash(&text);
     let name = note_name(relative);
     let note_id = note_id_of(&text);
     let _ = crate::db::put_indexed(conn, &key, &name, note_id.as_deref(), &hash, now);
+    // NoteLibrary 还没连接时这是 no-op；连接后 watcher 是桌面端的增量语料来源。
+    let _ = crate::notes::index_vault_file(conn, root, relative, &text, now);
     Some(IndexedNote {
         path: key,
         name,
@@ -233,9 +243,27 @@ pub fn process_settled(
 
 /// 全量重扫。监听器出问题时的手动兜底，也是首次开启同步时建立索引的方式。
 pub fn scan(conn: &Connection, root: &Path, now: i64) -> std::io::Result<usize> {
+    scan_excluding(
+        conn,
+        root,
+        Some(Path::new(crate::vault::DEFAULT_SUBTREE)),
+        now,
+    )
+}
+
+pub fn scan_excluding(
+    conn: &Connection,
+    root: &Path,
+    excluded: Option<&Path>,
+    now: i64,
+) -> std::io::Result<usize> {
     // 与 start() 用同一套解析后的根，否则扫描出来的相对路径和监听事件的相对路径
     // 对不上，同一篇笔记会在索引里存成两条。
     let root = &root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // 保留既有 Vault 监听入口，但它现在也建立一个独立的只读资料库。资料不会成为
+    // Card；是否能被某个项目检索仍要显式绑定。
+    let library = crate::notes::connect_vault(conn, root, Some(now))
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let mut alive = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
@@ -255,13 +283,17 @@ pub fn scan(conn: &Connection, root: &Path, now: i64) -> std::io::Result<usize> 
         let Ok(relative) = entry.path().strip_prefix(root) else {
             continue;
         };
-        if !should_watch(relative) {
+        if !should_watch(relative) || is_excluded(relative, excluded) {
             continue;
         }
         if adopt(conn, root, relative, now).is_some() {
             alive.push(relative.to_string_lossy().to_string());
         }
     }
+    // 监听器会处理运行期的删除；这里补上应用关闭期间发生的删除，避免已经从
+    // Vault 消失的笔记仍被资料库检索到。只影响当前 root 对应的只读资料库。
+    crate::notes::retain_vault_documents(conn, &library.id, &alive)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let _ = crate::db::retain_indexed(conn, &alive);
     Ok(alive.len())
 }
@@ -288,8 +320,15 @@ impl VaultWatcher {
         }
     }
 
-    /// 开始监听。重复调用会先停掉上一个。
-    pub fn start<F>(&self, root: PathBuf, db: Arc<Mutex<Connection>>, emit: F) -> notify::Result<()>
+    /// 开始监听。重复调用会先停掉上一个；`excluded` 是 Papertable 写入子树，
+    /// 永远不应重新成为只读检索资料。
+    pub fn start_excluding<F>(
+        &self,
+        root: PathBuf,
+        db: Arc<Mutex<Connection>>,
+        excluded: Option<PathBuf>,
+        emit: F,
+    ) -> notify::Result<()>
     where
         F: Fn(Vec<IndexedNote>) + Send + 'static,
     {
@@ -312,7 +351,9 @@ impl VaultWatcher {
                     Ok(Ok(event)) => {
                         for path in event.paths {
                             if let Ok(relative) = path.strip_prefix(&root) {
-                                if should_watch(relative) {
+                                if should_watch(relative)
+                                    && !is_excluded(relative, excluded.as_deref())
+                                {
                                     debouncer.touch(relative.to_path_buf(), Instant::now());
                                 }
                             }
@@ -370,6 +411,19 @@ mod tests {
         assert!(!should_watch(&p(".trash/删掉的.md")));
         assert!(!should_watch(&p("项目/图.canvas")));
         assert!(!should_watch(&p("")));
+    }
+
+    #[test]
+    fn papertable_owned_output_is_excluded_from_read_only_sources() {
+        let owned = p("80_AI暂存/Papertable/项目/卡片.md");
+        assert!(is_excluded(
+            &owned,
+            Some(Path::new(crate::vault::DEFAULT_SUBTREE))
+        ));
+        assert!(!is_excluded(
+            &p("10_活跃知识/真实资料.md"),
+            Some(Path::new(crate::vault::DEFAULT_SUBTREE))
+        ));
     }
 
     #[test]

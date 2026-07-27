@@ -61,6 +61,36 @@ function metadata(project: PortableProject, card: Card) {
   };
 }
 
+/**
+ * 普通 Markdown / Canvas 是给人阅读和交换的格式，不应要求接收端理解
+ * Papertable 的内部 chunk id。把经过工具闸门确认过的引用写成标题、相对
+ * 路径和冻结摘录；原始 `Turn.citations` 仍由无损运输数据完整保留。
+ */
+function readableCitations(turn: Turn) {
+  if (!turn.citations?.length) return "";
+  const sources = turn.citations
+    .map((citation, index) => {
+      const excerpt = citation.excerpt
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 360);
+      return [
+        `${index + 1}. **${citation.title}**（\`${citation.relativePath}\`）`,
+        excerpt ? `   > ${excerpt}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n");
+  return `\n\n### 本轮引用的笔记\n\n${sources}`;
+}
+
+function turnMarkdown(turn: Turn) {
+  return `## ${turn.role === "user" ? "用户" : "助手"}\n\n${turn.content}${
+    turn.role === "ai" ? readableCitations(turn) : ""
+  }`;
+}
+
 export function cardMarkdown(project: PortableProject, input: Card) {
   const card = withoutLegacyReasoning(input);
   const meta = metadata(project, card);
@@ -68,12 +98,7 @@ export function cardMarkdown(project: PortableProject, input: Card) {
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
     .join("\n");
-  const turns = card.turns
-    .map(
-      (turn) =>
-        `## ${turn.role === "user" ? "用户" : "助手"}\n\n${turn.content}`,
-    )
-    .join("\n\n");
+  const turns = card.turns.map(turnMarkdown).join("\n\n");
   const transport = btoa(
     unescape(
       encodeURIComponent(
@@ -263,7 +288,7 @@ export function markdownFolder(input: PortableProject) {
     );
   zip.file(
     `${root}/README.md`,
-    `# ${project.project.name}\n\n由 Papertable 导出。每张卡片保存在 cards/ 目录。\n`,
+    `# ${project.project.name}\n\n由 Papertable 导出。每张卡片保存在 cards/ 目录；回答中的“本轮引用的笔记”保留当时可核对的标题、相对路径与摘录，原始资料库不随本包复制。\n`,
   );
   return zip
     .generateAsync({ type: "blob" })

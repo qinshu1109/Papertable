@@ -34,6 +34,7 @@ export function App() {
     proposalTrayOpen,
     setProposalTrayOpen,
     dismissMorningPrompt,
+    hydrated,
   } = useStore();
   const [sbCollapsed, setSbCollapsed] = useState(false);
   const [drawer, setDrawer] = useState(false);
@@ -98,10 +99,21 @@ export function App() {
     } else {
       workspace.removeAttribute("inert");
       workspace.removeAttribute("aria-hidden");
-      if (drawerWasOpen.current) drawerTriggerRef.current?.focus();
+      // Opening a modal from the drawer closes the drawer in the same render.
+      // Let the dialog keep focus instead of pulling it back to the menu button.
+      if (drawerWasOpen.current && modal === null) {
+        drawerTriggerRef.current?.focus();
+      }
     }
     drawerWasOpen.current = drawer;
-  }, [drawer]);
+  }, [drawer, modal]);
+
+  const openModal = (next: "import" | "export" | "settings") => {
+    // A modal is a new foreground layer. Keeping the mobile drawer beneath it
+    // leaves an off-canvas, focusable action surface behind the dialog.
+    setDrawer(false);
+    setModal(next);
+  };
 
   const orderedNodes = useMemo(
     () =>
@@ -112,6 +124,18 @@ export function App() {
         .filter(Boolean),
     [nodes, hidden, cards],
   );
+
+  // `seed` 只是第一帧的安全占位，不是可操作的工作区。若在 IndexedDB 恢复前
+  // 允许新建项目，后到的水合快照会覆盖这次内存操作，用户刷新后就像「项目丢了」。
+  // 把整个工作台延后到恢复完成再开放，既避免竞争，也让「本地恢复中」有明确反馈。
+  if (!hydrated) {
+    return (
+      <main className="workspace-bootstrap" role="status" aria-live="polite">
+        <strong>正在恢复本地工作区…</strong>
+        <span>不会覆盖已有项目</span>
+      </main>
+    );
+  }
 
   return (
     <div className="app">
@@ -127,9 +151,9 @@ export function App() {
         onToggle={() => setSbCollapsed((v) => !v)}
         drawerOpen={drawer}
         onCloseDrawer={() => setDrawer(false)}
-        onImport={() => setModal("import")}
-        onExport={() => setModal("export")}
-        onSettings={() => setModal("settings")}
+        onImport={() => openModal("import")}
+        onExport={() => openModal("export")}
+        onSettings={() => openModal("settings")}
       />
 
       <main className="workspace" ref={workspaceRef}>

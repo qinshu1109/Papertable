@@ -5,11 +5,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   extractMessage,
+  extractToolCalls,
   friendlyProviderError,
   relayOpenAiStream,
   sseEvent,
 } from "./cozai.mjs";
-import { emitFakeStream, fakeCompletion } from "./fake-provider.mjs";
+import {
+  emitFakeStream,
+  fakeCompletion,
+  fakeToolCalls,
+} from "./fake-provider.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -28,7 +33,20 @@ let providerConfig = {
 };
 const fakeModel = process.env.PAPERTABLE_FAKE_LLM === "1";
 const serveDist = process.argv.includes("--serve-dist");
-const allowedTasks = new Set(["chat", "concept-preview", "title", "concepts"]);
+const allowedTasks = new Set([
+  "chat",
+  "agent",
+  "concept-preview",
+  "title",
+  "concepts",
+]);
+const allowedToolNames = new Set([
+  "search_notes",
+  "read_notes",
+  // 仅供本机能力探测使用；浏览器请求不能声明这个工具。
+  "papertable_probe",
+]);
+const clientToolNames = new Set(["search_notes", "read_notes"]);
 const managedConfigKeys = new Set([
   "COZAI_BASE_URL",
   "COZAI_MODEL",
@@ -54,19 +72,137 @@ async function readJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function validatePayload(payload) {
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function messageToolCalls(message) {
+  const calls = message?.toolCalls ?? message?.tool_calls;
+  return Array.isArray(calls) ? calls : [];
+}
+
+function toolFunction(tool) {
+  if (!isPlainObject(tool)) return null;
+  return isPlainObject(tool.function) ? tool.function : tool;
+}
+
+function toolName(tool) {
+  return toolFunction(tool)?.name;
+}
+
+function validateToolCalls(calls, allowedNames = clientToolNames) {
+  if (!Array.isArray(calls) || calls.length > 8) return "工具调用格式不正确。";
+  for (const call of calls) {
+    const functionCall = isPlainObject(call?.function) ? call.function : call;
+    if (
+      !isPlainObject(call) ||
+      typeof call.id !== "string" ||
+      !call.id ||
+      call.id.length > 200 ||
+      typeof functionCall?.name !== "string" ||
+      !allowedNames.has(functionCall.name) ||
+      (functionCall.arguments !== undefined &&
+        (typeof functionCall.arguments !== "string" ||
+          functionCall.arguments.length > 32_000))
+    ) {
+      return "工具调用格式不正确。";
+    }
+  }
+  return null;
+}
+
+function validateTools(tools, allowedNames = clientToolNames) {
+  if (tools === undefined) return null;
+  if (!Array.isArray(tools) || tools.length > 2) return "工具定义格式不正确。";
+  const names = new Set();
+  for (const tool of tools) {
+    const functionTool = toolFunction(tool);
+    const name = functionTool?.name;
+    if (
+      !functionTool ||
+      typeof name !== "string" ||
+      !allowedNames.has(name) ||
+      names.has(name) ||
+      (tool.type !== undefined && tool.type !== "function") ||
+      (functionTool.description !== undefined &&
+        (typeof functionTool.description !== "string" ||
+          functionTool.description.length > 4_000)) ||
+      (functionTool.parameters !== undefined &&
+        (!isPlainObject(functionTool.parameters) ||
+          JSON.stringify(functionTool.parameters).length > 16_000))
+    ) {
+      return "工具定义格式不正确。";
+    }
+    names.add(name);
+  }
+  return null;
+}
+
+function requestedToolChoice(payload) {
+  return payload?.toolChoice ?? payload?.tool_choice;
+}
+
+function validateToolChoice(choice, toolNames) {
+  if (choice === undefined) return null;
+  if (["auto", "none", "required"].includes(choice)) return null;
+  const name = isPlainObject(choice) && (choice.function?.name ?? choice.name);
+  if (
+    !isPlainObject(choice) ||
+    (choice.type !== undefined && choice.type !== "function") ||
+    typeof name !== "string" ||
+    !toolNames.has(name)
+  ) {
+    return "工具选择格式不正确。";
+  }
+  return null;
+}
+
+function validatePayload(payload, { allowProbeTool = false } = {}) {
   if (!payload || !allowedTasks.has(payload.task)) return "不支持的模型任务。";
   if (!Array.isArray(payload.messages) || payload.messages.length === 0)
     return "缺少对话内容。";
-  if (
-    payload.messages.some(
-      (message) =>
-        !["system", "user", "assistant"].includes(message?.role) ||
-        typeof message?.content !== "string",
-    )
-  ) {
-    return "对话内容格式不正确。";
+  const allowedNames = allowProbeTool ? allowedToolNames : clientToolNames;
+  for (const message of payload.messages) {
+    if (!isPlainObject(message)) return "对话内容格式不正确。";
+    if (!["system", "user", "assistant", "tool"].includes(message.role))
+      return "对话内容格式不正确。";
+    const calls = messageToolCalls(message);
+    if (message.role === "assistant") {
+      if (
+        !["string", "object"].includes(typeof message.content) ||
+        (message.content !== null && typeof message.content !== "string")
+      ) {
+        return "对话内容格式不正确。";
+      }
+      const toolError = validateToolCalls(calls, allowedNames);
+      if (toolError) return toolError;
+      if (message.content === null && calls.length === 0)
+        return "对话内容格式不正确。";
+      continue;
+    }
+    if (typeof message.content !== "string" || message.content.length > 160_000)
+      return "对话内容格式不正确。";
+    if (message.role === "tool") {
+      const toolCallId = message.toolCallId ?? message.tool_call_id;
+      if (
+        typeof toolCallId !== "string" ||
+        !toolCallId ||
+        toolCallId.length > 200 ||
+        calls.length
+      ) {
+        return "对话内容格式不正确。";
+      }
+    } else if (calls.length) {
+      return "对话内容格式不正确。";
+    }
   }
+  const toolError = validateTools(payload.tools, allowedNames);
+  if (toolError) return toolError;
+  const names = new Set((payload.tools ?? []).map(toolName));
+  const choiceError = validateToolChoice(requestedToolChoice(payload), names);
+  if (choiceError) return choiceError;
+  if (payload.tools?.length && !["chat", "agent"].includes(payload.task))
+    return "当前模型任务不支持工具调用。";
   return null;
 }
 
@@ -167,14 +303,71 @@ async function persistProviderConfig(config) {
   await chmod(localConfigPath, 0o600);
 }
 
+function normalizeToolCall(call) {
+  const functionCall = isPlainObject(call?.function) ? call.function : call;
+  return {
+    id: call.id,
+    type: "function",
+    function: {
+      name: functionCall.name,
+      arguments:
+        typeof functionCall.arguments === "string"
+          ? functionCall.arguments
+          : "{}",
+    },
+  };
+}
+
+function normalizeTool(tool) {
+  const functionTool = toolFunction(tool);
+  return {
+    type: "function",
+    function: {
+      name: functionTool.name,
+      ...(typeof functionTool.description === "string"
+        ? { description: functionTool.description }
+        : {}),
+      ...(functionTool.parameters
+        ? { parameters: functionTool.parameters }
+        : {}),
+    },
+  };
+}
+
+function normalizeToolChoice(choice) {
+  if (choice === undefined || typeof choice === "string") return choice;
+  const name = choice.function?.name ?? choice.name;
+  return { type: "function", function: { name } };
+}
+
 function providerPayload(payload, stream) {
+  const tools = Array.isArray(payload.tools)
+    ? payload.tools.map(normalizeTool)
+    : [];
+  const toolChoice = normalizeToolChoice(requestedToolChoice(payload));
   return {
     model: providerConfig.model,
     stream,
-    messages: payload.messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-    })),
+    messages: payload.messages.map((message) => {
+      if (message.role === "assistant") {
+        const calls = messageToolCalls(message);
+        return {
+          role: "assistant",
+          content: message.content ?? null,
+          ...(calls.length ? { tool_calls: calls.map(normalizeToolCall) } : {}),
+        };
+      }
+      if (message.role === "tool") {
+        return {
+          role: "tool",
+          tool_call_id: message.toolCallId ?? message.tool_call_id,
+          content: message.content,
+        };
+      }
+      return { role: message.role, content: message.content };
+    }),
+    ...(tools.length ? { tools } : {}),
+    ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
     temperature:
       typeof payload.temperature === "number"
         ? Math.min(1, Math.max(0, payload.temperature))
@@ -193,6 +386,170 @@ async function providerFetch(payload, stream, signal) {
     body: JSON.stringify(providerPayload(payload, stream)),
     signal,
   });
+}
+
+const probeTool = {
+  type: "function",
+  function: {
+    name: "papertable_probe",
+    description: "Papertable 本机模型能力探测工具。",
+    parameters: {
+      type: "object",
+      properties: { probe: { type: "string" } },
+      required: ["probe"],
+      additionalProperties: false,
+    },
+  },
+};
+
+function probeRequest() {
+  return {
+    task: "agent",
+    messages: [
+      {
+        role: "user",
+        content: "请只调用 papertable_probe，参数 probe 为 ok。",
+      },
+    ],
+    tools: [probeTool],
+    toolChoice: { type: "function", function: { name: "papertable_probe" } },
+    temperature: 0,
+  };
+}
+
+function parseSseEventText(text, eventName) {
+  return text
+    .split("\n\n")
+    .filter((part) => part.startsWith(`event: ${eventName}\n`))
+    .map((part) => {
+      const data = part.match(/^event: [^\n]+\ndata: (.*)$/ms)?.[1];
+      try {
+        return data ? JSON.parse(data) : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+/**
+ * Probe only the OpenAI-compatible protocol, never cache the answer here.
+ * The browser/desktop host owns a safe per-(baseUrl, model) cache because a
+ * local configuration change must invalidate capabilities immediately.
+ */
+async function probeProviderCapabilities(signal) {
+  const testedAt = new Date().toISOString();
+  if (fakeModel) {
+    return {
+      mode: "native-tools",
+      streamingToolCalls: true,
+      toolResultAccepted: true,
+      testedAt,
+    };
+  }
+  if (!providerConfig.apiKey) {
+    return {
+      mode: "two-stage",
+      streamingToolCalls: false,
+      toolResultAccepted: false,
+      testedAt,
+      error: "未配置模型密钥。",
+    };
+  }
+
+  let nonStreamingToolCalls = false;
+  let toolResultAccepted = false;
+  let streamingToolCalls = false;
+  let error;
+  let responseMessage;
+  let calls = [];
+  try {
+    const response = await providerFetch(probeRequest(), false, signal);
+    const body = await response.text();
+    if (!response.ok) {
+      error = friendlyProviderError(response.status, body);
+    } else {
+      const parsed = JSON.parse(body);
+      calls = extractToolCalls(parsed);
+      responseMessage = extractMessage(parsed);
+      nonStreamingToolCalls = calls.length > 0;
+    }
+  } catch (caught) {
+    error =
+      caught?.name === "AbortError"
+        ? "模型能力探测超时。"
+        : "无法连接模型服务。";
+  }
+
+  if (nonStreamingToolCalls) {
+    try {
+      const first = calls[0];
+      const response = await providerFetch(
+        {
+          ...probeRequest(),
+          messages: [
+            ...probeRequest().messages,
+            {
+              role: "assistant",
+              content: responseMessage || null,
+              toolCalls: calls,
+            },
+            {
+              role: "tool",
+              toolCallId: first.id,
+              content: '{"ok":true}',
+            },
+          ],
+          toolChoice: "none",
+        },
+        false,
+        signal,
+      );
+      const body = await response.text();
+      if (response.ok) {
+        // 2xx is enough: this specifically checks that the provider accepts
+        // assistant tool_calls + a tool-role result, not prose quality.
+        toolResultAccepted = true;
+      } else if (!error) {
+        error = friendlyProviderError(response.status, body);
+      }
+    } catch (caught) {
+      if (!error)
+        error =
+          caught?.name === "AbortError"
+            ? "模型能力探测超时。"
+            : "模型不接受工具结果回填。";
+    }
+  }
+
+  if (nonStreamingToolCalls) {
+    try {
+      const response = await providerFetch(probeRequest(), true, signal);
+      const chunks = [];
+      await relayOpenAiStream({
+        upstream: response,
+        write: (chunk) => chunks.push(new TextDecoder().decode(chunk)),
+        signal,
+      });
+      streamingToolCalls =
+        parseSseEventText(chunks.join(""), "tool-call-delta").length > 0;
+    } catch (caught) {
+      if (!error)
+        error =
+          caught?.name === "AbortError"
+            ? "模型能力探测超时。"
+            : "模型不支持流式工具调用。";
+    }
+  }
+
+  const nativeTools = nonStreamingToolCalls && toolResultAccepted;
+  return {
+    mode: nativeTools ? "native-tools" : "two-stage",
+    streamingToolCalls,
+    toolResultAccepted,
+    testedAt,
+    ...(error ? { error } : {}),
+  };
 }
 
 async function serveStatic(req, res) {
@@ -308,6 +665,26 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === "POST" && pathname === "/api/llm/capabilities") {
+    if (!isLocalOrigin(req))
+      return json(res, 403, { message: "仅允许本机页面探测模型能力。" });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60_000);
+    try {
+      return json(res, 200, await probeProviderCapabilities(controller.signal));
+    } catch {
+      return json(res, 200, {
+        mode: "two-stage",
+        streamingToolCalls: false,
+        toolResultAccepted: false,
+        testedAt: new Date().toISOString(),
+        error: "模型能力探测失败，已改用双阶段检索。",
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   if (req.method === "POST" && pathname === "/api/llm/stream") {
     let payload;
     try {
@@ -376,7 +753,13 @@ const server = http.createServer(async (req, res) => {
     }
     const validationError = validatePayload(payload);
     if (validationError) return json(res, 400, { message: validationError });
-    if (fakeModel) return json(res, 200, { content: fakeCompletion(payload) });
+    if (fakeModel) {
+      const toolCalls = fakeToolCalls(payload);
+      return json(res, 200, {
+        content: toolCalls.length ? "" : fakeCompletion(payload),
+        ...(toolCalls.length ? { toolCalls } : {}),
+      });
+    }
     if (!providerConfig.apiKey)
       return json(res, 401, {
         message: "未配置 COZAI_API_KEY，请在 .env.local 中填写轮换后的密钥。",
@@ -390,8 +773,13 @@ const server = http.createServer(async (req, res) => {
         return json(res, upstream.status, {
           message: friendlyProviderError(upstream.status, body),
         });
-      const content = extractMessage(JSON.parse(body));
-      return json(res, 200, { content });
+      const parsed = JSON.parse(body);
+      const content = extractMessage(parsed);
+      const toolCalls = extractToolCalls(parsed);
+      return json(res, 200, {
+        content,
+        ...(toolCalls.length ? { toolCalls } : {}),
+      });
     } catch (error) {
       return json(res, error?.name === "AbortError" ? 504 : 502, {
         message:

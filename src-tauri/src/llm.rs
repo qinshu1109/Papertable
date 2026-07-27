@@ -98,11 +98,47 @@ pub struct ProviderHealth {
     pub message: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub role: String,
-    pub content: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default, alias = "tool_calls")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, alias = "tool_call_id")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "empty_json_object")]
+    pub arguments: String,
+}
+
+fn empty_json_object() -> String {
+    "{}".to_string()
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDefinition {
+    #[serde(default)]
+    pub r#type: Option<String>,
+    pub function: ToolFunction,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolFunction {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub parameters: Option<Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -112,36 +148,172 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub temperature: Option<f64>,
+    #[serde(default)]
+    pub tools: Vec<ToolDefinition>,
+    #[serde(default, alias = "tool_choice")]
+    pub tool_choice: Option<Value>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Completion {
+    pub content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapabilityResult {
+    pub mode: String,
+    pub streaming_tool_calls: bool,
+    pub tool_result_accepted: bool,
+    pub tested_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// 与前端 `streamModel` 消费的 SSE 事件一一对应。
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum StreamEvent {
-    Token { text: String, channel: &'static str },
-    Error { message: String },
-    Done { stopped: bool },
+    Token {
+        text: String,
+        channel: &'static str,
+    },
+    ToolCallDelta {
+        index: usize,
+        id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    },
+    Error {
+        message: String,
+    },
+    Done {
+        stopped: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        finish_reason: Option<String>,
+    },
 }
 
-const ALLOWED_TASKS: [&str; 4] = ["chat", "concept-preview", "title", "concepts"];
-const ALLOWED_ROLES: [&str; 3] = ["system", "user", "assistant"];
+const ALLOWED_TASKS: [&str; 5] = ["chat", "agent", "concept-preview", "title", "concepts"];
+const ALLOWED_ROLES: [&str; 4] = ["system", "user", "assistant", "tool"];
+const CLIENT_TOOLS: [&str; 2] = ["search_notes", "read_notes"];
+const PROBE_TOOL: &str = "papertable_probe";
 
-fn validate(request: &ChatRequest) -> Result<()> {
+/// 对来自 WebView 的模型请求做白名单校验。`papertable_probe` 是能力探测的内部
+/// 实现细节，绝不能从 `llm_complete` / `llm_stream` 这两条公开命令声明出来。
+fn validate_with_probe_permission(request: &ChatRequest, allow_probe_tool: bool) -> Result<()> {
     if !ALLOWED_TASKS.contains(&request.task.as_str()) {
         return Err("不支持的模型任务。".into());
     }
     if request.messages.is_empty() {
         return Err("缺少对话内容。".into());
     }
+    let can_probe = allow_probe_tool
+        && request.task == "agent"
+        && request
+            .tools
+            .iter()
+            .any(|tool| tool.function.name == PROBE_TOOL);
+    let allowed_tools: Vec<&str> = if can_probe {
+        CLIENT_TOOLS.into_iter().chain([PROBE_TOOL]).collect()
+    } else {
+        CLIENT_TOOLS.to_vec()
+    };
+    if request.tools.len() > if can_probe { 3 } else { 2 } {
+        return Err("工具定义格式不正确。".into());
+    }
+    let mut tool_names = std::collections::HashSet::new();
+    for tool in &request.tools {
+        let name = tool.function.name.as_str();
+        if !allowed_tools.contains(&name)
+            || !tool_names.insert(name)
+            || tool
+                .r#type
+                .as_deref()
+                .is_some_and(|kind| kind != "function")
+            || tool
+                .function
+                .description
+                .as_ref()
+                .is_some_and(|text| text.chars().count() > 4_000)
+            || tool.function.parameters.as_ref().is_some_and(|value| {
+                serde_json::to_string(value).map_or(true, |wire| wire.len() > 16_000)
+            })
+        {
+            return Err("工具定义格式不正确。".into());
+        }
+    }
+    if let Some(choice) = &request.tool_choice {
+        let valid_string = choice
+            .as_str()
+            .is_some_and(|value| matches!(value, "auto" | "none" | "required"));
+        let chosen = choice
+            .get("function")
+            .and_then(|value| value.get("name"))
+            .or_else(|| choice.get("name"))
+            .and_then(Value::as_str);
+        if !valid_string && !chosen.is_some_and(|name| tool_names.contains(name)) {
+            return Err("工具选择格式不正确。".into());
+        }
+    }
+    if !request.tools.is_empty() && !matches!(request.task.as_str(), "chat" | "agent") {
+        return Err("当前模型任务不支持工具调用。".into());
+    }
     for message in &request.messages {
         if !ALLOWED_ROLES.contains(&message.role.as_str()) {
             return Err("对话角色不正确。".into());
         }
-        if message.content.is_empty() {
+        let content_too_long = message
+            .content
+            .as_ref()
+            .is_some_and(|content| content.chars().count() > 160_000);
+        let calls_are_valid = message.tool_calls.len() <= 8
+            && message.tool_calls.iter().all(|call| {
+                !call.id.is_empty()
+                    && call.id.chars().count() <= 200
+                    && allowed_tools.contains(&call.name.as_str())
+                    && call.arguments.chars().count() <= 32_000
+            });
+        if content_too_long || !calls_are_valid {
+            return Err("对话内容格式不正确。".into());
+        }
+        match message.role.as_str() {
+            "assistant" if message.content.is_none() && message.tool_calls.is_empty() => {
+                return Err("对话内容不能为空。".into())
+            }
+            "assistant" => {}
+            "tool"
+                if message.content.as_ref().map_or(true, String::is_empty)
+                    || message.tool_call_id.as_deref().map_or(true, str::is_empty)
+                    || !message.tool_calls.is_empty() =>
+            {
+                return Err("对话内容格式不正确。".into())
+            }
+            "tool" => {}
+            _ if message.content.as_ref().map_or(true, String::is_empty)
+                || !message.tool_calls.is_empty()
+                || message.tool_call_id.is_some() =>
+            {
+                return Err("对话内容不能为空。".into())
+            }
+            _ => {}
+        }
+        if message.role != "tool" && message.tool_call_id.is_some() {
             return Err("对话内容不能为空。".into());
         }
     }
     Ok(())
+}
+
+fn validate(request: &ChatRequest) -> Result<()> {
+    validate_with_probe_permission(request, false)
+}
+
+fn validate_internal_probe(request: &ChatRequest) -> Result<()> {
+    validate_with_probe_permission(request, true)
 }
 
 pub fn friendly_provider_error(status: u16, body: &str) -> String {
@@ -394,15 +566,91 @@ fn set_owner_only(path: &Path) -> Result<()> {
 // 上游调用
 // ---------------------------------------------------------------------------
 
-fn body_for(config: &ProviderConfig, request: &ChatRequest, stream: bool) -> Value {
+fn wire_tool_call(call: &ToolCall) -> Value {
     json!({
-        "model": config.model,
-        "stream": stream,
-        "messages": request.messages.iter().map(|m| json!({
-            "role": m.role, "content": m.content
-        })).collect::<Vec<_>>(),
-        "temperature": request.temperature.unwrap_or(0.35).clamp(0.0, 1.0),
+        "id": call.id,
+        "type": "function",
+        "function": { "name": call.name, "arguments": call.arguments },
     })
+}
+
+fn wire_message(message: &Message) -> Value {
+    match message.role.as_str() {
+        "assistant" => {
+            let mut object = serde_json::Map::new();
+            object.insert("role".into(), Value::String("assistant".into()));
+            object.insert(
+                "content".into(),
+                message
+                    .content
+                    .as_ref()
+                    .map(|content| Value::String(content.clone()))
+                    .unwrap_or(Value::Null),
+            );
+            if !message.tool_calls.is_empty() {
+                object.insert(
+                    "tool_calls".into(),
+                    Value::Array(message.tool_calls.iter().map(wire_tool_call).collect()),
+                );
+            }
+            Value::Object(object)
+        }
+        "tool" => json!({
+            "role": "tool",
+            "tool_call_id": message.tool_call_id,
+            "content": message.content,
+        }),
+        _ => json!({ "role": message.role, "content": message.content }),
+    }
+}
+
+fn wire_tool(tool: &ToolDefinition) -> Value {
+    let mut function = serde_json::Map::new();
+    function.insert("name".into(), Value::String(tool.function.name.clone()));
+    if let Some(description) = &tool.function.description {
+        function.insert("description".into(), Value::String(description.clone()));
+    }
+    if let Some(parameters) = &tool.function.parameters {
+        function.insert("parameters".into(), parameters.clone());
+    }
+    json!({ "type": "function", "function": function })
+}
+
+fn wire_tool_choice(choice: &Value) -> Value {
+    if choice.is_string() {
+        return choice.clone();
+    }
+    let name = choice
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .or_else(|| choice.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    json!({ "type": "function", "function": { "name": name } })
+}
+
+fn body_for(config: &ProviderConfig, request: &ChatRequest, stream: bool) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("model".into(), Value::String(config.model.clone()));
+    body.insert("stream".into(), Value::Bool(stream));
+    body.insert(
+        "messages".into(),
+        Value::Array(request.messages.iter().map(wire_message).collect()),
+    );
+    if !request.tools.is_empty() {
+        body.insert(
+            "tools".into(),
+            Value::Array(request.tools.iter().map(wire_tool).collect()),
+        );
+    }
+    if let Some(choice) = &request.tool_choice {
+        body.insert("tool_choice".into(), wire_tool_choice(choice));
+    }
+    body.insert(
+        "temperature".into(),
+        Value::from(request.temperature.unwrap_or(0.35).clamp(0.0, 1.0)),
+    );
+    Value::Object(body)
 }
 
 /// 分离最终正文与草稿推理。与 `server/cozai.mjs` 的 `extractDelta` 逐字对应。
@@ -438,6 +686,89 @@ pub fn extract_message(payload: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
+}
+
+pub fn extract_tool_calls(payload: &Value) -> Vec<ToolCall> {
+    let Some(calls) = payload
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(Value::as_array)
+    else {
+        return vec![];
+    };
+    calls
+        .iter()
+        .filter_map(|call| {
+            let id = call.get("id")?.as_str()?.trim();
+            let function = call.get("function")?;
+            let name = function.get("name")?.as_str()?.trim();
+            (!id.is_empty() && !name.is_empty()).then(|| ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: function
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+/// `(index, id, function name, arguments fragment)` from one OpenAI SSE delta.
+/// Type alias keeps the extraction API readable without introducing an extra allocation per chunk.
+pub type ToolCallDelta = (usize, Option<String>, Option<String>, Option<String>);
+
+pub fn extract_tool_call_deltas(payload: &Value) -> Vec<ToolCallDelta> {
+    let Some(calls) = payload
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("tool_calls"))
+        .and_then(Value::as_array)
+    else {
+        return vec![];
+    };
+    calls
+        .iter()
+        .enumerate()
+        .filter_map(|(fallback_index, call)| {
+            let index = call
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(fallback_index);
+            let id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let function = call.get("function");
+            let name = function
+                .and_then(|value| value.get("name"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let arguments = function
+                .and_then(|value| value.get("arguments"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            (id.is_some() || name.is_some() || arguments.is_some())
+                .then_some((index, id, name, arguments))
+        })
+        .collect()
+}
+
+pub fn extract_finish_reason(payload: &Value) -> Option<String> {
+    payload
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| reason.chars().take(80).collect())
 }
 
 /// 诊断:上游 SSE 原始帧转存。
@@ -528,8 +859,16 @@ pub fn health(config: &ProviderConfig) -> ProviderHealth {
     }
 }
 
-pub fn generate(config: &ProviderConfig, request: &ChatRequest) -> Result<String> {
-    validate(request)?;
+fn complete_with_probe_permission(
+    config: &ProviderConfig,
+    request: &ChatRequest,
+    allow_probe_tool: bool,
+) -> Result<Completion> {
+    if allow_probe_tool {
+        validate_internal_probe(request)?;
+    } else {
+        validate(request)?;
+    }
     if config.api_key.is_empty() {
         return Err("模型服务未配置或密钥无效，请在设置页填写。".into());
     }
@@ -542,11 +881,14 @@ pub fn generate(config: &ProviderConfig, request: &ChatRequest) -> Result<String
     match response {
         Ok(res) => {
             let value: Value = serde_json::from_str(&res.into_string()?)?;
-            let content = extract_message(&value);
-            if content.is_empty() {
+            let completion = Completion {
+                content: extract_message(&value),
+                tool_calls: extract_tool_calls(&value),
+            };
+            if completion.content.is_empty() && completion.tool_calls.is_empty() {
                 Err("模型没有返回内容。".into())
             } else {
-                Ok(content)
+                Ok(completion)
             }
         }
         Err(ureq::Error::Status(status, res)) => Err(Error(friendly_provider_error(
@@ -554,6 +896,26 @@ pub fn generate(config: &ProviderConfig, request: &ChatRequest) -> Result<String
             &res.into_string().unwrap_or_default(),
         ))),
         Err(e) => Err(Error(format!("模型连接中断，请重试：{e}"))),
+    }
+}
+
+/// 公开通道：只有真正的只读笔记工具可进入模型请求。
+pub fn complete(config: &ProviderConfig, request: &ChatRequest) -> Result<Completion> {
+    complete_with_probe_permission(config, request, false)
+}
+
+/// 仅 `provider_probe_capability` 在本模块内部调用，不能暴露到 Tauri command。
+fn complete_internal_probe(config: &ProviderConfig, request: &ChatRequest) -> Result<Completion> {
+    complete_with_probe_permission(config, request, true)
+}
+
+/// 旧的标题、概念等文本功能仍用这个窄接口；Harness 要工具调用时走 `complete()`。
+pub fn generate(config: &ProviderConfig, request: &ChatRequest) -> Result<String> {
+    let completion = complete(config, request)?;
+    if completion.content.is_empty() {
+        Err("模型没有返回内容。".into())
+    } else {
+        Ok(completion.content)
     }
 }
 
@@ -569,18 +931,27 @@ pub fn stream(
         let _ = channel.send(StreamEvent::Error {
             message: e.to_string(),
         });
-        let _ = channel.send(StreamEvent::Done { stopped: false });
+        let _ = channel.send(StreamEvent::Done {
+            stopped: false,
+            finish_reason: None,
+        });
         return Ok(());
     }
     if config.api_key.is_empty() {
         let _ = channel.send(StreamEvent::Error {
             message: "模型服务未配置或密钥无效，请在设置页填写。".into(),
         });
-        let _ = channel.send(StreamEvent::Done { stopped: false });
+        let _ = channel.send(StreamEvent::Done {
+            stopped: false,
+            finish_reason: None,
+        });
         return Ok(());
     }
     if cancelled.load(Ordering::Relaxed) {
-        let _ = channel.send(StreamEvent::Done { stopped: true });
+        let _ = channel.send(StreamEvent::Done {
+            stopped: true,
+            finish_reason: None,
+        });
         return Ok(());
     }
 
@@ -597,19 +968,27 @@ pub fn stream(
             let _ = channel.send(StreamEvent::Error {
                 message: friendly_provider_error(status, &res.into_string().unwrap_or_default()),
             });
-            let _ = channel.send(StreamEvent::Done { stopped: false });
+            let _ = channel.send(StreamEvent::Done {
+                stopped: false,
+                finish_reason: None,
+            });
             return Ok(());
         }
         Err(e) => {
             let _ = channel.send(StreamEvent::Error {
                 message: format!("模型连接中断，请重试：{e}"),
             });
-            let _ = channel.send(StreamEvent::Done { stopped: false });
+            let _ = channel.send(StreamEvent::Done {
+                stopped: false,
+                finish_reason: None,
+            });
             return Ok(());
         }
     };
 
     let mut emitted = false;
+    let mut emitted_tool_call = false;
+    let mut finish_reason = None;
     let mut stopped = cancelled.load(Ordering::Relaxed);
     for line in BufReader::new(reader).lines() {
         if cancelled.load(Ordering::Relaxed) {
@@ -638,15 +1017,180 @@ pub fn stream(
                 channel: "unknown",
             });
         }
+        for (index, id, name, arguments) in extract_tool_call_deltas(&payload) {
+            emitted_tool_call = true;
+            let _ = channel.send(StreamEvent::ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments,
+            });
+        }
+        if finish_reason.is_none() {
+            finish_reason = extract_finish_reason(&payload);
+        }
     }
 
-    if !emitted && !stopped {
+    if !emitted && !emitted_tool_call && !stopped {
         let _ = channel.send(StreamEvent::Error {
             message: "模型没有返回可显示的文本，请重试。".into(),
         });
     }
-    let _ = channel.send(StreamEvent::Done { stopped });
+    let _ = channel.send(StreamEvent::Done {
+        stopped,
+        finish_reason,
+    });
     Ok(())
+}
+
+fn probe_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        r#type: Some("function".into()),
+        function: ToolFunction {
+            name: PROBE_TOOL.into(),
+            description: Some("Papertable 本机模型能力探测工具。".into()),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": { "probe": { "type": "string" } },
+                "required": ["probe"],
+                "additionalProperties": false,
+            })),
+        },
+    }
+}
+
+fn probe_request() -> ChatRequest {
+    ChatRequest {
+        task: "agent".into(),
+        messages: vec![Message {
+            role: "user".into(),
+            content: Some("请只调用 papertable_probe，参数 probe 为 ok。".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }],
+        temperature: Some(0.0),
+        tools: vec![probe_tool_definition()],
+        tool_choice: Some(json!({ "type": "function", "function": { "name": PROBE_TOOL } })),
+    }
+}
+
+fn streaming_probe_has_tool_call(config: &ProviderConfig, request: &ChatRequest) -> Result<bool> {
+    validate_internal_probe(request)?;
+    let response = agent()
+        .post(&format!("{}/chat/completions", config.base_url))
+        .set("authorization", &format!("Bearer {}", config.api_key))
+        .set("content-type", "application/json")
+        .timeout(std::time::Duration::from_secs(45))
+        .send_json(body_for(config, request, true));
+    let reader = match response {
+        Ok(response) => response.into_reader(),
+        Err(ureq::Error::Status(status, response)) => {
+            return Err(friendly_provider_error(
+                status,
+                &response.into_string().unwrap_or_default(),
+            )
+            .into())
+        }
+        Err(error) => return Err(format!("模型连接中断，请重试：{error}").into()),
+    };
+    for line in BufReader::new(reader).lines() {
+        let line = line?;
+        let Some(raw) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let raw = raw.trim();
+        if raw.is_empty() || raw == "[DONE]" {
+            continue;
+        }
+        let Ok(payload) = serde_json::from_str::<Value>(raw) else {
+            continue;
+        };
+        if !extract_tool_call_deltas(&payload).is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 探测只验证 OpenAI-compatible 的工具协议，绝不把原始回复、密钥或模型推理持久化。
+/// 结果由前端按 baseUrl+model 缓存；地址或模型变化会自然失效。
+pub fn probe_capability(config: &ProviderConfig) -> ProviderCapabilityResult {
+    let tested_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_else(|_| "0".into());
+    if config.api_key.is_empty() {
+        return ProviderCapabilityResult {
+            mode: "two-stage".into(),
+            streaming_tool_calls: false,
+            tool_result_accepted: false,
+            tested_at,
+            error: Some("未配置模型密钥。".into()),
+        };
+    }
+    let mut error = None;
+    let initial = match complete_internal_probe(config, &probe_request()) {
+        Ok(completion) => completion,
+        Err(cause) => {
+            return ProviderCapabilityResult {
+                mode: "two-stage".into(),
+                streaming_tool_calls: false,
+                tool_result_accepted: false,
+                tested_at,
+                error: Some(cause.to_string()),
+            }
+        }
+    };
+    let has_calls = !initial.tool_calls.is_empty();
+    let mut tool_result_accepted = false;
+    if let Some(call) = initial.tool_calls.first() {
+        let mut request = probe_request();
+        request.messages.push(Message {
+            role: "assistant".into(),
+            content: if initial.content.is_empty() {
+                None
+            } else {
+                Some(initial.content.clone())
+            },
+            tool_calls: initial.tool_calls.clone(),
+            tool_call_id: None,
+        });
+        request.messages.push(Message {
+            role: "tool".into(),
+            content: Some("{\"ok\":true}".into()),
+            tool_calls: vec![],
+            tool_call_id: Some(call.id.clone()),
+        });
+        request.tool_choice = Some(Value::String("none".into()));
+        match complete_internal_probe(config, &request) {
+            Ok(_) => tool_result_accepted = true,
+            Err(cause) => error = Some(cause.to_string()),
+        }
+    }
+    let streaming_tool_calls = if has_calls {
+        match streaming_probe_has_tool_call(config, &probe_request()) {
+            Ok(value) => value,
+            Err(cause) => {
+                if error.is_none() {
+                    error = Some(cause.to_string());
+                }
+                false
+            }
+        }
+    } else {
+        false
+    };
+    ProviderCapabilityResult {
+        mode: if has_calls && tool_result_accepted {
+            "native-tools".into()
+        } else {
+            "two-stage".into()
+        },
+        streaming_tool_calls,
+        tool_result_accepted,
+        tested_at,
+        error,
+    }
 }
 
 #[cfg(test)]
@@ -773,9 +1317,13 @@ mod tests {
             task: "shell".into(),
             messages: vec![Message {
                 role: "user".into(),
-                content: "x".into(),
+                content: Some("x".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
             }],
             temperature: None,
+            tools: vec![],
+            tool_choice: None,
         };
         assert!(validate(&bad_task).is_err());
 
@@ -783,10 +1331,112 @@ mod tests {
             task: "chat".into(),
             messages: vec![Message {
                 role: "root".into(),
-                content: "x".into(),
+                content: Some("x".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
             }],
             temperature: None,
+            tools: vec![],
+            tool_choice: None,
         };
         assert!(validate(&bad_role).is_err());
+    }
+
+    #[test]
+    fn tool_role_and_assistant_tool_calls_are_normalized_for_openai() {
+        let request = ChatRequest {
+            task: "agent".into(),
+            messages: vec![
+                Message {
+                    role: "user".into(),
+                    content: Some("查资料".into()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: "assistant".into(),
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call-1".into(),
+                        name: "search_notes".into(),
+                        arguments: "{\"query\":\"量子\"}".into(),
+                    }],
+                    tool_call_id: None,
+                },
+                Message {
+                    role: "tool".into(),
+                    content: Some("[{\"chunkId\":\"c\"}]".into()),
+                    tool_calls: vec![],
+                    tool_call_id: Some("call-1".into()),
+                },
+            ],
+            temperature: Some(0.2),
+            tools: vec![ToolDefinition {
+                r#type: Some("function".into()),
+                function: ToolFunction {
+                    name: "search_notes".into(),
+                    description: None,
+                    parameters: Some(json!({"type":"object"})),
+                },
+            }],
+            tool_choice: Some(Value::String("auto".into())),
+        };
+        validate(&request).unwrap();
+        let body = body_for(&ProviderConfig::default(), &request, false);
+        assert_eq!(body["messages"][1]["content"], Value::Null);
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["name"],
+            "search_notes"
+        );
+        assert_eq!(body["messages"][2]["tool_call_id"], "call-1");
+        assert_eq!(body["tools"][0]["type"], "function");
+    }
+
+    #[test]
+    fn streaming_tool_deltas_are_kept_as_protocol_not_text() {
+        let payload = json!({"choices":[{"delta":{
+            "reasoning_content":"hidden",
+            "tool_calls":[{"index":0,"id":"call-1","function":{
+              "name":"search_notes","arguments":"{\"query\":\"唯一事实\"}"}}]
+        },"finish_reason":"tool_calls"}]});
+        let (text, reasoning) = extract_delta(&payload);
+        assert!(text.is_empty());
+        assert_eq!(reasoning, "hidden");
+        let calls = extract_tool_call_deltas(&payload);
+        assert_eq!(calls[0].0, 0);
+        assert_eq!(calls[0].2.as_deref(), Some("search_notes"));
+        assert_eq!(
+            extract_finish_reason(&payload).as_deref(),
+            Some("tool_calls")
+        );
+    }
+
+    #[test]
+    fn a_client_cannot_declare_the_probe_tool() {
+        let mut request = ChatRequest {
+            task: "chat".into(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: Some("x".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            }],
+            temperature: None,
+            tools: vec![probe_tool_definition()],
+            tool_choice: None,
+        };
+        assert!(validate(&request).is_err());
+        request.task = "agent".into();
+        assert!(validate(&request).is_err());
+        assert!(validate_internal_probe(&request).is_ok());
+    }
+
+    #[test]
+    fn missing_key_capability_probe_is_safe_two_stage_fallback() {
+        let result = probe_capability(&ProviderConfig::default());
+        assert_eq!(result.mode, "two-stage");
+        assert!(!result.streaming_tool_calls);
+        assert!(!result.tool_result_accepted);
+        assert!(result.error.unwrap_or_default().contains("密钥"));
     }
 }

@@ -14,19 +14,35 @@
  * `view`、`settings` 和注意力实验的三张表。迁移需要的是整库。
  */
 import type { AttentionSnapshot, WorkspaceSnapshot } from "./delta";
+import type { NoteLibrary } from "./notes/types";
 
-export const LIBRARY_BACKUP_SCHEMA = 1;
+export const LIBRARY_BACKUP_SCHEMA = 2;
+
+/** Web-imported source material is durable; desktop Vault indexes are rebuildable. */
+export interface NoteCorpusBackup {
+  libraries: NoteLibrary[];
+  documents: Array<{
+    id: string;
+    libraryId: string;
+    relativePath: string;
+    content: string;
+    updatedAt: number;
+  }>;
+  bindings: Array<{ projectId: string; libraryId: string }>;
+}
 
 export interface LibraryBackup {
   schema: number;
   exportedAt: string;
   workspace: WorkspaceSnapshot;
   attention: AttentionSnapshot;
+  noteCorpus?: NoteCorpusBackup;
 }
 
 export function buildLibraryBackup(input: {
   workspace: WorkspaceSnapshot;
   attention: AttentionSnapshot;
+  noteCorpus?: NoteCorpusBackup;
   exportedAt: number;
 }): LibraryBackup {
   return {
@@ -34,6 +50,7 @@ export function buildLibraryBackup(input: {
     exportedAt: new Date(input.exportedAt).toISOString(),
     workspace: input.workspace,
     attention: input.attention,
+    ...(input.noteCorpus ? { noteCorpus: input.noteCorpus } : {}),
   };
 }
 
@@ -48,9 +65,9 @@ export function parseLibraryBackup(text: string): LibraryBackup {
   const backup = raw as Partial<LibraryBackup>;
   if (!backup || typeof backup !== "object")
     throw new Error("备份文件结构无法识别。");
-  if (backup.schema !== LIBRARY_BACKUP_SCHEMA)
+  if (backup.schema !== 1 && backup.schema !== LIBRARY_BACKUP_SCHEMA)
     throw new Error(
-      `备份文件版本是 ${String(backup.schema)}，本版本只认 ${LIBRARY_BACKUP_SCHEMA}。`,
+      `备份文件版本是 ${String(backup.schema)}，本版本只认 1 或 ${LIBRARY_BACKUP_SCHEMA}。`,
     );
   const workspace = backup.workspace;
   const attention = backup.attention;
@@ -86,6 +103,8 @@ export function backupCounts(backup: LibraryBackup): Record<string, number> {
     events: attention.events.length,
     sessions: attention.sessions.length,
     proposals: attention.proposals.length,
+    noteLibraries: backup.noteCorpus?.libraries.length ?? 0,
+    noteDocuments: backup.noteCorpus?.documents.length ?? 0,
   };
 }
 

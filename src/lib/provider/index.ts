@@ -14,16 +14,25 @@ export type {
   BuildInfo,
   KeySource,
   ModelTask,
+  ProviderCapabilityResult,
   ProviderConfig,
   ProviderHealth,
+  ProviderTool,
 } from "./http";
 
-const impl = __PAPERTABLE_TARGET__ === "desktop" ? tauri : http;
+// Node's unit-test loader does not run Vite's compile-time `define`.  Default
+// that non-product environment to the web transport; production builds still
+// replace this expression with their literal target and retain the same branch.
+const target =
+  typeof __PAPERTABLE_TARGET__ === "undefined" ? "web" : __PAPERTABLE_TARGET__;
+const impl = target === "desktop" ? tauri : http;
 
 export const getProviderHealth = impl.getProviderHealth;
 export const getKeySource = impl.getKeySource;
 export const getBuildInfo = impl.getBuildInfo;
 export const getProviderConfig = impl.getProviderConfig;
 export const saveProviderConfig = impl.saveProviderConfig;
+export const probeProviderCapabilities = impl.probeProviderCapabilities;
 export const streamModel = impl.streamModel;
+export const completeModel = impl.completeModel;
 export const generateModel = impl.generateModel;

@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 5;
+const USER_VERSION: i64 = 7;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -96,6 +96,15 @@ pub struct Turn {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "skip_none")]
     pub favorite: Option<bool>,
+    /// 可审计的 Harness 运行轨迹；没有模型隐藏推理。
+    #[serde(default, skip_serializing_if = "skip_none")]
+    pub agent_run: Option<Value>,
+    /// 只允许由实际读取过的 note chunk 生成的受控引用。
+    #[serde(default, skip_serializing_if = "skip_none")]
+    pub citations: Option<Value>,
+    /// 生成中可见的 Harness 阶段；只为恢复 UI，不含模型内部过程。
+    #[serde(default, skip_serializing_if = "skip_none")]
+    pub agent_phase: Option<String>,
 }
 
 /// 落库的卡片行不含 turns，与 Dexie 侧的 `CardRecord` 一致。
@@ -283,10 +292,50 @@ fn migrate(conn: &Connection) -> Result<()> {
                 [],
             )?;
         }
+        // `CREATE TABLE IF NOT EXISTS` 不会给已有 turns 补列，v6 必须显式升级。
+        // 这两列都是 JSON 运输字段，不加索引，避免流式落库的写放大。
+        if version < 6 && !has_column(conn, "turns", "agent_run")? {
+            conn.execute("ALTER TABLE turns ADD COLUMN agent_run TEXT", [])?;
+        }
+        if version < 6 && !has_column(conn, "turns", "citations")? {
+            conn.execute("ALTER TABLE turns ADD COLUMN citations TEXT", [])?;
+        }
+        // v7 只补一个用户可见的短状态。它不是推理链，也不参与上下文组装。
+        if version < 7 && !has_column(conn, "turns", "agent_phase")? {
+            conn.execute("ALTER TABLE turns ADD COLUMN agent_phase TEXT", [])?;
+        }
         conn.execute_batch(&format!("PRAGMA user_version = {USER_VERSION}"))?;
     }
+    // FTS 虚表不是 schema.sql 的静态 DDL（需要在 trigram 不可用时降级），所以
+    // 即使某个历史库的 user_version 已经写成最新，也在打开时补一次缺失索引。
+    ensure_note_fts(conn)?;
     // 每次打开都要重设：foreign_keys 是 per-connection 的，不随库持久化。
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+    Ok(())
+}
+
+/// FTS5 由 rusqlite bundled SQLite 提供。优先 trigram（中英文、片段查询都好用），
+/// 若某个旧系统 SQLite 不识别该 tokenizer，仍保留一个 unicode61 FTS5 索引，让只读
+/// 检索降级而不是让整个桌面应用无法启动。
+fn ensure_note_fts(conn: &Connection) -> Result<()> {
+    let exists: Option<String> = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'note_chunks_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if exists.is_some() {
+        return Ok(());
+    }
+    let trigram = "CREATE VIRTUAL TABLE note_chunks_fts USING fts5(\
+        chunk_id UNINDEXED, library_id UNINDEXED, content, tokenize='trigram')";
+    if conn.execute_batch(trigram).is_err() {
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE note_chunks_fts USING fts5(\
+              chunk_id UNINDEXED, library_id UNINDEXED, content, tokenize='unicode61')",
+        )?;
+    }
     Ok(())
 }
 
@@ -365,26 +414,49 @@ fn read_card_records(conn: &Connection) -> Result<Vec<CardRecord>> {
 
 fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, card_id, role, content, created_at, streaming, status, error, model, favorite
+        "SELECT id, card_id, role, content, created_at, streaming, status, error, model, favorite,
+                agent_run, citations, agent_phase
          FROM turns ORDER BY card_id, created_at",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(TurnRecord {
-            card_id: row.get(1)?,
-            turn: Turn {
-                id: row.get(0)?,
-                role: row.get(2)?,
-                content: row.get(3)?,
-                created_at: row.get(4)?,
-                streaming: row.get::<_, Option<i64>>(5)?.map(|v| v != 0),
-                status: row.get(6)?,
-                error: row.get(7)?,
-                model: row.get(8)?,
-                favorite: row.get::<_, Option<i64>>(9)?.map(|v| v != 0),
-            },
-        })
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<i64>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
+            row.get::<_, Option<String>>(12)?,
+        ))
     })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut output = Vec::new();
+    for row in rows {
+        let value = row?;
+        output.push(TurnRecord {
+            card_id: value.1,
+            turn: Turn {
+                id: value.0,
+                role: value.2,
+                content: value.3,
+                created_at: value.4,
+                streaming: value.5.map(|flag| flag != 0),
+                status: value.6,
+                error: value.7,
+                model: value.8,
+                favorite: value.9.map(|flag| flag != 0),
+                agent_run: json_col(value.10)?,
+                citations: json_col(value.11)?,
+                agent_phase: value.12,
+            },
+        });
+    }
+    Ok(output)
 }
 
 fn read_edges(conn: &Connection) -> Result<Vec<CardEdge>> {
@@ -632,13 +704,14 @@ fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
         // card_id 也在 DO UPDATE 里：改道会把一条轮次挂到另一张卡片下。
         tx.execute(
             "INSERT INTO turns (id, card_id, role, content, created_at, streaming, status,
-                                error, model, favorite)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                                error, model, favorite, agent_run, citations, agent_phase)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
              ON CONFLICT(id) DO UPDATE SET
                card_id = excluded.card_id, role = excluded.role, content = excluded.content,
                created_at = excluded.created_at, streaming = excluded.streaming,
                status = excluded.status, error = excluded.error, model = excluded.model,
-               favorite = excluded.favorite",
+               favorite = excluded.favorite, agent_run = excluded.agent_run,
+               citations = excluded.citations, agent_phase = excluded.agent_phase",
             params![
                 turn.id,
                 record.card_id,
@@ -650,6 +723,15 @@ fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
                 turn.error,
                 turn.model,
                 turn.favorite.map(|v| v as i64),
+                turn.agent_run
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                turn.citations
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                turn.agent_phase,
             ],
         )?;
     }
@@ -1044,7 +1126,9 @@ pub fn is_empty(conn: &Connection) -> Result<bool> {
     Ok(count == 0)
 }
 
-pub fn clear_all(conn: &mut Connection) -> Result<()> {
+/// 清空工作区/注意力表，但保留独立的只读资料库。用于整库工作区迁移、首次导入；
+/// 资料库不是项目快照的一部分，不能因导入一个项目包而被静默抹掉。
+pub fn clear_workspace_data(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     for table in [
         "turns",
@@ -1062,6 +1146,26 @@ pub fn clear_all(conn: &mut Connection) -> Result<()> {
     ] {
         tx.execute(&format!("DELETE FROM {table}"), [])?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+/// 设置页的“清除本地数据”走这个完整版本：工作区、注意力实验、Vault 索引和资料
+/// 库都清空。FTS 虚表没有外键，必须显式清掉。
+pub fn clear_all(conn: &mut Connection) -> Result<()> {
+    clear_workspace_data(conn)?;
+    let tx = conn.transaction()?;
+    for table in [
+        "project_note_libraries",
+        "note_chunks",
+        "note_documents",
+        "note_libraries",
+        "vault_index",
+        "sync_state",
+    ] {
+        tx.execute(&format!("DELETE FROM {table}"), [])?;
+    }
+    tx.execute("DELETE FROM note_chunks_fts", [])?;
     tx.commit()?;
     Ok(())
 }
@@ -1265,6 +1369,9 @@ mod tests {
                 error: None,
                 model: None,
                 favorite: None,
+                agent_run: None,
+                citations: None,
+                agent_phase: None,
             },
         }
     }
@@ -1324,6 +1431,87 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, USER_VERSION);
+    }
+
+    #[test]
+    fn v7_migration_adds_harness_transport_and_fts_without_rebuilding_turns() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 模拟真用户 v5 的 turns：表已存在，所以 schema.sql 的 IF NOT EXISTS 不会替
+        // 它补列，迁移必须显式 ALTER。
+        conn.execute_batch(
+            "CREATE TABLE turns (
+                id TEXT PRIMARY KEY, card_id TEXT NOT NULL, role TEXT NOT NULL,
+                content TEXT NOT NULL, created_at INTEGER NOT NULL, streaming INTEGER,
+                status TEXT, error TEXT, model TEXT, favorite INTEGER
+             ); PRAGMA user_version = 5;",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        assert!(has_column(&conn, "turns", "agent_run").unwrap());
+        assert!(has_column(&conn, "turns", "citations").unwrap());
+        assert!(has_column(&conn, "turns", "agent_phase").unwrap());
+        let fts: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'note_chunks_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(fts.contains("fts5"));
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+    }
+
+    #[test]
+    fn latest_version_repairs_a_missing_rebuildable_fts_index() {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch("DROP TABLE note_chunks_fts").unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version = {USER_VERSION}"))
+            .unwrap();
+        migrate(&conn).unwrap();
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'note_chunks_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
+    }
+
+    #[test]
+    fn turn_trace_and_citations_round_trip_as_json_without_hidden_reasoning() {
+        let mut conn = seeded();
+        let mut update = WorkspaceUpsert::default();
+        update.turns.upserts = vec![TurnRecord {
+            card_id: "c".into(),
+            turn: Turn {
+                id: "t".into(),
+                role: "ai".into(),
+                content: "有来源的正文".into(),
+                created_at: 2,
+                streaming: Some(false),
+                status: Some("complete".into()),
+                error: None,
+                model: Some("m".into()),
+                favorite: None,
+                agent_run: Some(json!({"mode":"two-stage","readChunkIds":["chunk-1"]})),
+                citations: Some(json!([{"chunkId":"chunk-1","excerpt":"证据"}])),
+                agent_phase: Some("reading".into()),
+            },
+        }];
+        apply_changes(&mut conn, &update).unwrap();
+        let turn = read_turns(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.turn.id == "t")
+            .unwrap()
+            .turn;
+        assert_eq!(turn.agent_run.unwrap()["mode"], "two-stage");
+        assert_eq!(turn.citations.unwrap()[0]["chunkId"], "chunk-1");
+        assert_eq!(turn.agent_phase.as_deref(), Some("reading"));
     }
 
     /// 移植过来最容易在第一天炸的地方：Dexie 侧刻意把 turns 写在 cards 之前（那边

@@ -23,11 +23,12 @@ import {
 } from "lucide-react";
 import { useStore } from "../store";
 import { EDGE_META } from "../types";
-import type { Card, Turn } from "../types";
 import { incomingEdge, pathToRoot } from "../lib/graph";
 import { Markdown } from "../lib/markdown";
+import type { Card, NoteCitation, Turn } from "../types";
 import type { TempCard } from "./ConceptPreview";
 import { TempCardLayer } from "./TempCardLayer";
+import { NoteSourcePreview } from "./NoteSourcePreview";
 
 const spring = {
   type: "spring" as const,
@@ -73,6 +74,7 @@ export function CardStage() {
     lastCreated,
     streamingTurnId,
     showToast,
+    boundNoteLibraryIds,
   } = useStore();
 
   const card = cards.find((c) => c.id === currentCardId);
@@ -100,6 +102,7 @@ export function CardStage() {
   const [flashTurn, setFlashTurn] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
+  const [noteSource, setNoteSource] = useState<NoteCitation | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const prevCard = useRef(currentCardId);
   const dwellRecordRef = useRef(recordCardDwell);
@@ -158,6 +161,7 @@ export function CardStage() {
     updateTempCards([]);
     setTempFlashId(null);
     setTempShakeId(null);
+    setNoteSource(null);
   }, [activeProjectId, updateTempCards]);
 
   useEffect(() => {
@@ -801,6 +805,7 @@ export function CardStage() {
                       }
                     }}
                     onRetry={retryLast}
+                    onCitation={setNoteSource}
                     copied={copied === turn.id}
                   />
                 ))}
@@ -1018,6 +1023,14 @@ export function CardStage() {
         onRestore={focusTempCard}
         onClose={closeTempCard}
       />
+      {noteSource && (
+        <NoteSourcePreview
+          citation={noteSource}
+          projectId={activeProjectId}
+          libraryIds={boundNoteLibraryIds}
+          onClose={() => setNoteSource(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1039,6 +1052,7 @@ function TurnBlock({
   onCopy,
   onEditQuestion,
   onRetry,
+  onCitation,
   copied,
 }: {
   turn: Turn;
@@ -1055,6 +1069,7 @@ function TurnBlock({
   onCopy: () => void;
   onEditQuestion: (text: string) => void;
   onRetry: () => void;
+  onCitation: (citation: NoteCitation) => void;
   copied: boolean;
 }) {
   const [more, setMore] = useState(false);
@@ -1196,7 +1211,11 @@ function TurnBlock({
       {streaming && turn.content.length === 0 && (
         <div className="thinking" role="status" aria-live="polite">
           <span className="dot-pulse" />
-          正在生成回答…
+          {turn.agentPhase === "searching"
+            ? "正在检索笔记…"
+            : turn.agentPhase === "reading"
+              ? "正在阅读来源…"
+              : "正在组织回答…"}
         </div>
       )}
 
@@ -1232,6 +1251,21 @@ function TurnBlock({
         />
         {streaming && turn.content.length > 0 && <span className="caret" />}
       </div>
+      {turn.citations && turn.citations.length > 0 && (
+        <div className="note-citation-row" aria-label="笔记引用">
+          {turn.citations.map((citation) => (
+            <button
+              className="note-citation-chip"
+              key={citation.chunkId}
+              onClick={() => onCitation(citation)}
+              title={`查看只读来源：${citation.relativePath}`}
+            >
+              <Quote size={11} />
+              {citation.title}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

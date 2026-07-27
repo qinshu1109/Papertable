@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import JSZip from "jszip";
-import { formatAdapters, projectBundle } from "./formats";
+import { cardMarkdown, formatAdapters, projectBundle } from "./formats";
 import type { PortableProject } from "../types";
 
 const project = (): PortableProject => ({
@@ -43,6 +43,25 @@ const project = (): PortableProject => ({
           content: "答案",
           createdAt: 2,
           status: "complete",
+          citations: [
+            {
+              chunkId: "chunk-quantum",
+              libraryId: "library",
+              documentId: "doc",
+              title: "量子笔记",
+              relativePath: "notes/quantum.md",
+              documentHash: "frozen-hash",
+              excerpt: "此处是冻结的来源片段。",
+            },
+          ],
+          agentRun: {
+            mode: "two-stage",
+            startedAt: 1,
+            finishedAt: 2,
+            searchQueries: ["量子"],
+            hitCount: 1,
+            readChunkIds: ["chunk-quantum"],
+          },
         },
       ],
     },
@@ -90,6 +109,30 @@ test("native project package preserves graph, snapshots and cards", async () => 
   assert.equal(restored.snapshots[0].sourceText, "问题");
   assert.equal(restored.cards[0].answerMode, "sources-only");
   assert.equal(restored.cards[1].answerMode, "general");
+  assert.equal(
+    restored.cards[1].turns[0].citations?.[0].chunkId,
+    "chunk-quantum",
+  );
+  assert.equal(restored.cards[1].turns[0].agentRun?.mode, "two-stage");
+});
+
+test("Markdown 和 Canvas 导出给人可读的笔记引用，但不公开 answerMode frontmatter", async () => {
+  const portable = project();
+  const markdown = cardMarkdown(portable, portable.cards[1]);
+  const frontmatter = markdown.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
+  assert.doesNotMatch(frontmatter, /answerMode/);
+  assert.match(markdown, /### 本轮引用的笔记/);
+  assert.match(markdown, /\*\*量子笔记\*\*/);
+  assert.match(markdown, /`notes\/quantum\.md`/);
+  assert.match(markdown, /此处是冻结的来源片段/);
+
+  const [canvas] = await formatAdapters.canvas.export(portable);
+  const zip = await JSZip.loadAsync(await canvas.blob.arrayBuffer());
+  const child = Object.values(zip.files).find((file) =>
+    file.name.includes("子卡-child.md"),
+  );
+  assert.ok(child);
+  assert.match(await child!.async("text"), /### 本轮引用的笔记/);
 });
 
 test("normal exports exclude experimental attention events and ghost proposals", async () => {

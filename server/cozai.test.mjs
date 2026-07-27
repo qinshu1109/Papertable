@@ -3,10 +3,12 @@ import test from "node:test";
 import {
   extractDelta,
   extractMessage,
+  extractToolCallDeltas,
+  extractToolCalls,
   friendlyProviderError,
   relayOpenAiStream,
 } from "./cozai.mjs";
-import { fakeCompletion } from "./fake-provider.mjs";
+import { fakeCompletion, fakeToolCalls } from "./fake-provider.mjs";
 
 /** 把若干条上游 SSE 帧喂给中继，返回它写出的全部文本。 */
 async function relay(frames) {
@@ -104,6 +106,64 @@ test("extractDelta separates the two fields, extractMessage keeps content only",
   );
 });
 
+test("tool call deltas are normalized and never mistaken for visible text", async () => {
+  const frame = deltaFrame({
+    reasoning_content: "private draft",
+    tool_calls: [
+      {
+        index: 0,
+        id: "call_1",
+        type: "function",
+        function: { name: "search_notes", arguments: '{"query":"量子"}' },
+      },
+    ],
+  });
+  assert.deepEqual(extractToolCallDeltas(frame), [
+    {
+      index: 0,
+      id: "call_1",
+      name: "search_notes",
+      arguments: '{"query":"量子"}',
+    },
+  ]);
+  const output = await relay([frame]);
+  assert.match(output, /event: tool-call-delta/);
+  assert.match(output, /search_notes/);
+  assert.doesNotMatch(output, /private draft/);
+  assert.doesNotMatch(output, /没有返回可显示的文本/);
+});
+
+test("completed non-streaming tool calls normalize OpenAI fields", () => {
+  assert.deepEqual(
+    extractToolCalls({
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              {
+                id: "call_2",
+                type: "function",
+                function: {
+                  name: "read_notes",
+                  arguments: '{"chunkIds":["a"]}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    }),
+    [
+      {
+        id: "call_2",
+        name: "read_notes",
+        arguments: '{"chunkIds":["a"]}',
+      },
+    ],
+  );
+});
+
 test("test-only provider is explicit and produces a streamable answer", () => {
   const answer = fakeCompletion({
     task: "chat",
@@ -111,4 +171,24 @@ test("test-only provider is explicit and produces a streamable answer", () => {
   });
   assert.match(answer, /本地验收用的流式回答/);
   assert.match(answer, /上下文隔离/);
+});
+
+test("test-only provider emits a deterministic tool request before a tool result", () => {
+  const calls = fakeToolCalls({
+    task: "chat",
+    messages: [{ role: "user", content: "找量子笔记" }],
+    tools: [
+      {
+        type: "function",
+        function: { name: "search_notes", parameters: { type: "object" } },
+      },
+    ],
+  });
+  assert.deepEqual(calls, [
+    {
+      id: "fake-tool-call-1",
+      name: "search_notes",
+      arguments: '{"query":"找量子笔记","limit":3}',
+    },
+  ]);
 });

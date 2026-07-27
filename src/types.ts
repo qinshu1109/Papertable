@@ -61,6 +61,87 @@ export interface LlmMessage {
   content: string;
 }
 
+/**
+ * OpenAI-compatible tool request.  It deliberately contains no host path,
+ * library id, project id, or scope.  Those are frozen by Papertable before a
+ * model turn starts and can never be widened by model output.
+ */
+export interface ToolCall {
+  id: string;
+  name: "search_notes" | "read_notes" | "papertable_probe";
+  arguments: string;
+}
+
+/**
+ * Provider-wire message used by the Harness.  `LlmMessage` remains the
+ * compact, text-only context contract returned by buildContext(); this union
+ * only exists at the provider boundary once an agent loop has begun.
+ */
+export type ProviderMessage =
+  | LlmMessage
+  | {
+      role: "assistant";
+      content: string | null;
+      toolCalls: ToolCall[];
+    }
+  | {
+      role: "tool";
+      toolCallId: string;
+      content: string;
+    };
+
+export type OutputChannel = "unknown" | "final";
+
+export type ProviderStreamEvent =
+  | { type: "token"; text: string; channel: OutputChannel }
+  | {
+      type: "tool-call-delta";
+      index: number;
+      id?: string;
+      name?: string;
+      arguments?: string;
+    }
+  | { type: "done"; finishReason?: string }
+  | { type: "error"; message: string };
+
+export type AgentExecutionMode = "native-tools" | "two-stage";
+
+/** Safe capability cache key is base URL + model; never contains a secret. */
+export interface ProviderCapability {
+  baseUrl: string;
+  model: string;
+  mode: AgentExecutionMode;
+  streamingToolCalls: boolean;
+  toolResultAccepted: boolean;
+  testedAt: number;
+}
+
+export interface NoteCitation {
+  /** Stable internal chunk id.  The renderer only accepts ids actually read. */
+  chunkId: string;
+  libraryId: string;
+  documentId: string;
+  title: string;
+  relativePath: string;
+  /** Frozen evidence lets an old answer remain inspectable after source edits. */
+  documentHash: string;
+  excerpt: string;
+}
+
+export interface AgentRunTrace {
+  mode: AgentExecutionMode;
+  startedAt: number;
+  finishedAt: number;
+  searchQueries: string[];
+  hitCount: number;
+  readChunkIds: string[];
+  /** True when tool/call budgets cut a run short. */
+  truncated?: boolean;
+  errors?: string[];
+  /** Explicitly records a strict source-only refusal instead of hiding it. */
+  retrievalUnavailable?: boolean;
+}
+
 export interface BuiltContext {
   /** 当前请求的回答依据；由当前卡片决定。 */
   answerMode: AnswerMode;
@@ -83,6 +164,12 @@ export interface Turn {
   error?: string;
   model?: string;
   favorite?: boolean;
+  /** Harness operational trace.  Never contains hidden reasoning. */
+  agentRun?: AgentRunTrace;
+  /** Only chunks actually read in this run can appear here. */
+  citations?: NoteCitation[];
+  /** Transient, user-visible Harness phase; persisted only to survive refresh. */
+  agentPhase?: "searching" | "reading" | "answering";
 }
 
 export interface ConceptPreviewCacheEntry {
@@ -196,6 +283,8 @@ export interface AppSettings {
    * 并且拒绝绝对路径、`..` 和以 `.` 开头的分量。
    */
   vaultSubtree?: string;
+  /** Safe, local capability cache. It is invalidated whenever endpoint/model changes. */
+  providerCapabilities?: ProviderCapability[];
 }
 
 /**

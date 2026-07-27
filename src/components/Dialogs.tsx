@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Check,
+  BookOpen,
   FileJson,
   FileText,
   FolderTree,
@@ -24,6 +25,12 @@ import { useStore } from "../store";
 import type { ImportInput } from "../types";
 
 const IMPORT_FORMATS = [
+  {
+    id: "note-library",
+    icon: BookOpen,
+    name: "建立只读资料库",
+    desc: "只建立可检索材料，不导入卡片、不改变关系图；会绑定到当前项目。",
+  },
   {
     id: "md-file",
     icon: FileText,
@@ -49,6 +56,8 @@ const IMPORT_FORMATS = [
     desc: "恢复卡片、关系、快照、引用和阅读位置。",
   },
 ] as const;
+
+type ImportSelection = ImportInput["format"] | "note-library";
 
 const EXPORT_FORMATS = [
   {
@@ -122,18 +131,21 @@ function Shell({
 }
 
 export function ImportDialog({ onClose }: { onClose: () => void }) {
-  const { importFiles, showToast } = useStore();
-  const [selection, setSelection] = useState<ImportInput["format"]>("md-dir");
+  const { importFiles, importNoteLibrary, showToast } = useStore();
+  const [selection, setSelection] = useState<ImportSelection>("md-dir");
   const [files, setFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
   const selected = IMPORT_FORMATS.find((item) => item.id === selection)!;
   const triggerChooser = () => fileRef.current?.click();
+  const triggerFolderChooser = () => folderRef.current?.click();
   const importSelected = async () => {
     if (!files.length) return triggerChooser();
     setBusy(true);
     try {
-      await importFiles(selection, files);
+      if (selection === "note-library") await importNoteLibrary(files);
+      else await importFiles(selection, files);
       onClose();
     } catch (error) {
       showToast({
@@ -185,6 +197,20 @@ export function ImportDialog({ onClose }: { onClose: () => void }) {
           : {})}
         onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
       />
+      {selection === "note-library" && (
+        <input
+          ref={folderRef}
+          type="file"
+          className="sr-only"
+          multiple
+          accept=".md,.markdown,text/markdown"
+          {...({ webkitdirectory: "", directory: "" } as Record<
+            string,
+            string
+          >)}
+          onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
+        />
+      )}
       {IMPORT_FORMATS.map((item) => (
         <button
           key={item.id}
@@ -215,6 +241,15 @@ export function ImportDialog({ onClose }: { onClose: () => void }) {
           ? `已选择 ${files.length} 个文件 · 重新选择`
           : `选择${selected.name}`}
       </button>
+      {selection === "note-library" && !files.length && (
+        <button
+          className="btn"
+          style={{ marginTop: 8 }}
+          onClick={triggerFolderChooser}
+        >
+          选择资料文件夹
+        </button>
+      )}
       <p className="note-line">
         全部采用开放格式，兼容 Obsidian 等使用 Markdown 或 JSON Canvas
         的笔记工具。导入会先校验，失败时不会留下半个项目。
@@ -291,6 +326,7 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const {
     provider,
+    agentMode,
     refreshProvider,
     exportAllBackup,
     exportLibraryBackup,
@@ -308,6 +344,11 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     vaultPath,
     vaultSyncedProjects,
     projects,
+    activeProjectId,
+    noteLibraries,
+    boundNoteLibraryIds,
+    setProjectNoteLibraries,
+    removeNoteLibrary,
   } = useStore();
   const [testing, setTesting] = useState(false);
   const [savingConnection, setSavingConnection] = useState(false);
@@ -489,6 +530,69 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           密钥不会回显、不进 IndexedDB、不打包进导出文件。接口地址仅接受 HTTPS
           或本机 HTTP。
         </p>
+        <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
+          只读资料库
+        </div>
+        <p className="note-line" style={{ marginTop: 0 }}>
+          当前项目只能检索你在这里明确绑定的资料库。模型不能看到文件路径、资料库范围，也没有写入权限。
+          当前协议：{agentMode === "native-tools" ? "原生工具" : "双阶段检索"}。
+        </p>
+        {noteLibraries.length === 0 ? (
+          <p className="note-line">
+            还没有资料库。用左侧“导入笔记”选择“建立只读资料库”。
+          </p>
+        ) : (
+          noteLibraries.map((library) => {
+            const bound = boundNoteLibraryIds.includes(library.id);
+            return (
+              <div
+                className="fmt-option"
+                key={library.id}
+                style={{ cursor: "default" }}
+              >
+                <span className="fmt-icon">
+                  <BookOpen size={15} />
+                </span>
+                <span style={{ minWidth: 0, flex: 1 }}>
+                  <span className="fmt-name">{library.name}</span>
+                  <span className="fmt-desc">
+                    {library.kind === "vault"
+                      ? "桌面 Vault · 只读索引"
+                      : "网页导入 · 只读副本"}
+                  </span>
+                </span>
+                <button
+                  className={`btn${bound ? " primary" : ""}`}
+                  style={{ padding: "5px 8px", fontSize: 11 }}
+                  onClick={() =>
+                    void setProjectNoteLibraries(
+                      bound
+                        ? boundNoteLibraryIds.filter((id) => id !== library.id)
+                        : [...boundNoteLibraryIds, library.id],
+                    )
+                  }
+                  aria-pressed={bound}
+                >
+                  {bound ? "当前项目已绑定" : "绑定到当前项目"}
+                </button>
+                <button
+                  className="icon-btn"
+                  onClick={() => void removeNoteLibrary(library.id)}
+                  title="移除资料库（不会删除原始笔记或项目卡片）"
+                  aria-label={`移除资料库：${library.name}`}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            );
+          })
+        )}
+        {activeProjectId && noteLibraries.length > 0 && (
+          <p className="note-line">
+            当前已绑定 {boundNoteLibraryIds.length} / {noteLibraries.length}{" "}
+            个资料库。
+          </p>
+        )}
         <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
           注意力观察
         </div>
