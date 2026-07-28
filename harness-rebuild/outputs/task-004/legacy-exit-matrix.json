@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "task": "TASK-004",
+  "paths": {
+    "A": [{ "result": "completed", "reason": "none" }],
+    "B": [{ "result": "refused", "reason": "insufficient_evidence" }],
+    "C": [{ "result": "completed", "reason": "none" }],
+    "D": [{ "result": "refused", "reason": "insufficient_evidence" }],
+    "E": [{ "result": "completed", "reason": "none" }],
+    "F": [{ "result": "completed", "reason": "none" }],
+    "G": [{ "result": "refused", "reason": "insufficient_evidence" }],
+    "H": [{ "result": "completed", "reason": "none" }],
+    "I": [{ "result": "completed", "reason": "none" }],
+    "J": [{ "result": "partial", "reason": "calls_exhausted" }],
+    "K": [{ "result": "partial", "reason": "rounds_exhausted" }],
+    "L": [
+      { "result": "aborted", "reason": "user_abort" },
+      { "result": "failed", "reason": "none" }
+    ],
+    "M": [{ "result": "failed", "reason": "none" }],
+    "N": [{ "result": "failed", "reason": "protocol_error" }],
+    "O": [{ "result": "completed", "reason": "none" }],
+    "P": [{ "result": "failed", "reason": "protocol_error" }],
+    "Q": [{ "result": "refused", "reason": "insufficient_evidence" }]
+  }
+}

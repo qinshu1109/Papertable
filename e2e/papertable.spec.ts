@@ -1096,7 +1096,9 @@ test("an unterminated thinking tag is reported, not partially shown", async ({
 }) => {
   await askInNewProject(page, "思考未闭合：解释量子退相干");
   await expect(
-    page.getByRole("article").getByText("模型没有返回可显示的最终文本"),
+    page
+      .getByRole("article")
+      .getByText("模型回答已结束，但没有可显示的最终文本"),
   ).toBeVisible();
   await expect(page.locator("body")).not.toContainText("<think");
   await expect(page.locator("body")).not.toContainText("internal plan");

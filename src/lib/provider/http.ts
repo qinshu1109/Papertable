@@ -6,6 +6,7 @@ import type {
   ToolCall,
 } from "../../types";
 import type { OutputChannel } from "../modelOutput";
+import { agentTerminalErrorMessage } from "../agentTerminal";
 
 export interface ProviderHealth {
   configured: boolean;
@@ -39,7 +40,7 @@ export function providerErrorMessage(code: ProviderErrorCode): string {
     case "disconnected":
       return "连接意外中断，请重试。";
     case "empty-response":
-      return "模型没有返回文本，请重试。";
+      return agentTerminalErrorMessage("provider-empty-response");
     case "invalid-response":
       return "模型服务返回了无法处理的响应，请重试。";
     case "service-unavailable":

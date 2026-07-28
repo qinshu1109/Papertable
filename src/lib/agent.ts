@@ -8,8 +8,15 @@ import type {
   ToolCall,
 } from "../types";
 import { completeModel, streamModel, type ProviderTool } from "./provider";
+import { ProviderError } from "./provider/http";
 import { readProjectNotes, searchProjectNotes } from "./notes/scoped";
 import type { NoteChunk, NoteHit } from "./notes/types";
+import {
+  createAgentTerminalState,
+  agentTerminalErrorMessage,
+  type AgentTerminalErrorCode,
+  type AgentTerminalState,
+} from "./agentTerminal";
 
 const MAX_TOOL_ROUNDS = 4;
 const MAX_TOOL_CALLS = 8;
@@ -17,10 +24,40 @@ const MAX_READS = 4;
 const MAX_SEARCH = 8;
 const MAX_WALL_MS = 120_000;
 
+/**
+ * The legacy A–Q inventory is kept as an executable migration contract.
+ * L has two distinct causes that the old combined catch obscured; both map to
+ * legal states. O is the successful run exit after the tool-level fuse result
+ * has been returned to and acknowledged by the model.
+ */
+export const LEGACY_EXIT_TERMINAL_MATRIX = {
+  A: [createAgentTerminalState("completed", "none")],
+  B: [createAgentTerminalState("refused", "insufficient_evidence")],
+  C: [createAgentTerminalState("completed", "none")],
+  D: [createAgentTerminalState("refused", "insufficient_evidence")],
+  E: [createAgentTerminalState("completed", "none")],
+  F: [createAgentTerminalState("completed", "none")],
+  G: [createAgentTerminalState("refused", "insufficient_evidence")],
+  H: [createAgentTerminalState("completed", "none")],
+  I: [createAgentTerminalState("completed", "none")],
+  J: [createAgentTerminalState("partial", "calls_exhausted")],
+  K: [createAgentTerminalState("partial", "rounds_exhausted")],
+  L: [
+    createAgentTerminalState("aborted", "user_abort"),
+    createAgentTerminalState("failed", "none"),
+  ],
+  M: [createAgentTerminalState("failed", "none")],
+  N: [createAgentTerminalState("failed", "protocol_error")],
+  O: [createAgentTerminalState("completed", "none")],
+  P: [createAgentTerminalState("failed", "protocol_error")],
+  Q: [createAgentTerminalState("refused", "insufficient_evidence")],
+} as const;
+
 export type AgentPhase = "searching" | "reading" | "answering";
 
 export interface AgentOutcome {
   trace: AgentRunTrace;
+  terminal: AgentTerminalState;
   readChunks: NoteChunk[];
   /** Safe search metadata for audit / UI only; never a file-system scope. */
   searchHits?: NoteHit[];
@@ -31,11 +68,29 @@ export interface AgentOutcome {
 /** Carries the safe operational trace onto an AI turn that finishes in error. */
 export class AgentRunFailure extends Error {
   trace: AgentRunTrace;
+  terminal: AgentTerminalState;
+  readChunks: NoteChunk[];
+  searchHits: NoteHit[];
+  errorCode?: AgentTerminalErrorCode;
 
-  constructor(message: string, trace: AgentRunTrace, cause?: unknown) {
+  constructor(
+    message: string,
+    trace: AgentRunTrace,
+    terminal: AgentTerminalState,
+    cause?: unknown,
+    evidence: {
+      readChunks?: NoteChunk[];
+      searchHits?: NoteHit[];
+      errorCode?: AgentTerminalErrorCode;
+    } = {},
+  ) {
     super(message);
     this.name = "AgentRunFailure";
-    this.trace = trace;
+    this.trace = { ...trace, terminal };
+    this.terminal = terminal;
+    this.readChunks = evidence.readChunks ?? [];
+    this.searchHits = evidence.searchHits ?? [];
+    this.errorCode = evidence.errorCode;
     (this as Error & { cause?: unknown }).cause = cause;
   }
 }
@@ -351,8 +406,12 @@ async function streamRound(input: {
       };
   onToken: AgentTurnInput["onToken"];
   runtime: AgentRuntime;
+  /** Native final synthesis buffers until the complete round is validated. */
+  emitTokens?: boolean;
 }): Promise<{
   toolCalls: ToolCall[];
+  tokens: Extract<ProviderStreamEvent, { type: "token" }>[];
+  finishReason?: string;
   /**
    * Tool rounds buffer prose until the host has decided it is safe to show.
    * In particular, a sources-only run with no evidence must never flash an
@@ -373,18 +432,26 @@ async function streamRound(input: {
       : {}),
   })) {
     events.push(event);
-    if (event.type === "token" && !input.withTools) input.onToken(event);
+    if (
+      event.type === "token" &&
+      !input.withTools &&
+      input.emitTokens !== false
+    )
+      input.onToken(event);
   }
   const toolCalls = collectStreamCalls(events);
+  const tokens = events.filter(
+    (event): event is Extract<ProviderStreamEvent, { type: "token" }> =>
+      event.type === "token",
+  );
+  const finishReason = [...events]
+    .reverse()
+    .find((event) => event.type === "done")?.finishReason;
   return {
     toolCalls,
-    deferredTokens:
-      input.withTools && !toolCalls.length
-        ? events.filter(
-            (event): event is Extract<ProviderStreamEvent, { type: "token" }> =>
-              event.type === "token",
-          )
-        : [],
+    tokens,
+    ...(finishReason ? { finishReason } : {}),
+    deferredTokens: input.withTools && !toolCalls.length ? tokens : [],
   };
 }
 
@@ -396,6 +463,24 @@ function hasFrozenSourceMaterial(input: AgentTurnInput): boolean {
       item.kind === "branch-history" ||
       item.kind === "reference",
   );
+}
+
+function terminalOutcome(
+  trace: AgentRunTrace,
+  terminal: AgentTerminalState,
+  readChunks: NoteChunk[],
+  options: {
+    searchHits?: NoteHit[];
+    directAnswer?: string;
+  } = {},
+): AgentOutcome {
+  return {
+    trace: finish(trace, terminal),
+    terminal,
+    readChunks,
+    ...(options.searchHits ? { searchHits: options.searchHits } : {}),
+    ...(options.directAnswer ? { directAnswer: options.directAnswer } : {}),
+  };
 }
 
 function strictNoEvidenceOutcome(
@@ -415,11 +500,15 @@ function strictNoEvidenceOutcome(
   const evidenceScope = input.libraryIds.length
     ? "在已绑定的只读资料库中"
     : "在当前卡片的来源片段、显式引用和只读资料库中";
-  return {
-    trace: finish(trace),
+  return terminalOutcome(
+    trace,
+    createAgentTerminalState("refused", "insufficient_evidence"),
     readChunks,
-    directAnswer: `${evidenceScope}没有找到足够证据，因此我不会在“仅依据材料”模式下补充无来源结论。`,
-  };
+    {
+      searchHits,
+      directAnswer: `${evidenceScope}没有找到足够证据，因此我不会在“仅依据材料”模式下补充无来源结论。`,
+    },
+  );
 }
 
 async function executeToolCalls(input: {
@@ -443,6 +532,7 @@ async function executeToolCalls(input: {
         role: "tool",
         toolCallId: call.id,
         content: toolResult({
+          isError: true,
           error: "同一工具参数已连续失败两次，已拒绝重复执行。",
         }),
       });
@@ -528,7 +618,7 @@ async function executeToolCalls(input: {
       toolMessages.push({
         role: "tool",
         toolCallId: call.id,
-        content: toolResult({ error: message }),
+        content: toolResult({ isError: true, error: message }),
       });
     }
   }
@@ -570,24 +660,28 @@ async function runTwoStage(
           onToken: input.onToken,
           runtime,
         });
-        return {
-          trace: finish(trace),
-          readChunks: fallback.chunks,
-          searchHits: fallback.hits,
-        };
+        return terminalOutcome(
+          trace,
+          createAgentTerminalState("completed", "none"),
+          fallback.chunks,
+          { searchHits: fallback.hits },
+        );
       }
     } catch (cause) {
       trace.errors?.push(errorMessage(cause));
     }
     trace.retrievalUnavailable = true;
     if (input.built.answerMode === "sources-only")
-      return {
-        trace: finish(trace),
-        readChunks: [],
-        searchHits: [],
-        directAnswer:
-          "无法完成可靠的笔记检索，因此我不会在“仅依据材料”模式下补充无来源结论。请调整问题或检查已绑定的资料库。",
-      };
+      return terminalOutcome(
+        trace,
+        createAgentTerminalState("refused", "insufficient_evidence"),
+        [],
+        {
+          searchHits: [],
+          directAnswer:
+            "无法完成可靠的笔记检索，因此我不会在“仅依据材料”模式下补充无来源结论。请调整问题或检查已绑定的资料库。",
+        },
+      );
     input.onPhase("answering");
     await streamRound({
       messages: [
@@ -599,7 +693,12 @@ async function runTwoStage(
       onToken: input.onToken,
       runtime,
     });
-    return { trace: finish(trace), readChunks: [], searchHits: [] };
+    return terminalOutcome(
+      trace,
+      createAgentTerminalState("completed", "none"),
+      [],
+      { searchHits: [] },
+    );
   }
   let chunks: NoteChunk[] = [];
   let hits: NoteHit[] = [];
@@ -618,13 +717,16 @@ async function runTwoStage(
   }
   if (!chunks.length && input.built.answerMode === "sources-only") {
     trace.retrievalUnavailable = true;
-    return {
-      trace: finish(trace),
-      readChunks: [],
-      searchHits: hits,
-      directAnswer:
-        "在已绑定的只读资料库中没有找到足够证据，因此我不会在“仅依据材料”模式下补充无来源结论。",
-    };
+    return terminalOutcome(
+      trace,
+      createAgentTerminalState("refused", "insufficient_evidence"),
+      [],
+      {
+        searchHits: hits,
+        directAnswer:
+          "在已绑定的只读资料库中没有找到足够证据，因此我不会在“仅依据材料”模式下补充无来源结论。",
+      },
+    );
   }
   input.onPhase("answering");
   const messages = appendAgentSystem(input.built.messages, input.libraryScopes);
@@ -642,10 +744,75 @@ async function runTwoStage(
     onToken: input.onToken,
     runtime,
   });
-  return { trace: finish(trace), readChunks: chunks, searchHits: hits };
+  return terminalOutcome(
+    trace,
+    createAgentTerminalState("completed", "none"),
+    chunks,
+    { searchHits: hits },
+  );
 }
 
-async function runNative(
+type NativeRoundOutput = Awaited<ReturnType<typeof streamRound>>;
+
+type NativeAgentState =
+  | { kind: "requesting-model"; round: number }
+  | { kind: "handling-round"; round: number; output: NativeRoundOutput }
+  | { kind: "executing-tools"; round: number; calls: ToolCall[] }
+  | {
+      kind: "synthesizing";
+      terminalOnSuccess: AgentTerminalState;
+      repairAttempt: 0 | 1;
+    };
+
+const FINAL_SYNTHESIS_REPAIR_INSTRUCTION = [
+  "协议修复：上一次最终综合没有返回一份完整、可显示的最终文本。",
+  "保持完全相同的证据边界，只重新发送一份完整的最终回答；不得新增来源、猜测内容或调用工具。",
+].join("\n");
+
+function providerEmptyFailure(
+  trace: AgentRunTrace,
+  readChunks: NoteChunk[],
+  searchHits: NoteHit[],
+  cause?: unknown,
+): AgentRunFailure {
+  const errorCode = "provider-empty-response";
+  const message = agentTerminalErrorMessage(errorCode);
+  trace.errors?.push(message);
+  const terminal = createAgentTerminalState("failed", "protocol_error");
+  return new AgentRunFailure(
+    message,
+    finish(trace, terminal),
+    terminal,
+    cause,
+    { readChunks, searchHits, errorCode },
+  );
+}
+
+function finalSynthesisFailure(
+  trace: AgentRunTrace,
+  readChunks: NoteChunk[],
+  searchHits: NoteHit[],
+  cause: unknown,
+): AgentRunFailure {
+  if (cause instanceof ProviderError && cause.code === "empty-response")
+    return providerEmptyFailure(trace, readChunks, searchHits, cause);
+  const message = errorMessage(cause);
+  trace.errors?.push(message);
+  const terminal = createAgentTerminalState("failed", "none");
+  return new AgentRunFailure(
+    message,
+    finish(trace, terminal),
+    terminal,
+    cause,
+    { readChunks, searchHits },
+  );
+}
+
+/**
+ * Native-only explicit state machine. The legacy two-stage implementation
+ * remains separately callable through runAgentTurn's capability branch.
+ */
+async function runNativeStateMachine(
   input: AgentTurnInput,
   trace: AgentRunTrace,
   runtime: AgentRuntime,
@@ -656,114 +823,265 @@ async function runNative(
   const searchHits: NoteHit[] = [];
   const failures = new Map<string, number>();
   let toolCalls = 0;
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-    input.onPhase("searching");
-    const output = await streamRound({
-      messages,
-      signal: input.signal,
-      withTools: true,
-      toolChoice:
-        trace.searchQueries.length === 0
-          ? {
-              type: "function",
-              function: { name: "search_notes" },
-            }
-          : "auto",
-      onToken: input.onToken,
-      runtime,
-    });
-    if (!output.toolCalls.length) {
-      // A few OpenAI-compatible gateways accept tools but ignore forced
-      // tool_choice and answer in prose. Bound material must still be searched:
-      // use a host-owned lexical fallback before accepting that prose.
-      if (trace.searchQueries.length === 0 && readChunks.length === 0) {
-        const question = latestQuestion(input.built.messages);
+  let state: NativeAgentState = { kind: "requesting-model", round: 0 };
+
+  while (true) {
+    switch (state.kind) {
+      case "requesting-model": {
+        if (state.round >= MAX_TOOL_ROUNDS) {
+          // K: the loop condition itself is a budget exit, so it must be
+          // visible in the trace before the forced no-tools synthesis.
+          trace.truncated = true;
+          state = {
+            kind: "synthesizing",
+            terminalOnSuccess: createAgentTerminalState(
+              "partial",
+              "rounds_exhausted",
+            ),
+            repairAttempt: 0,
+          };
+          break;
+        }
         input.onPhase("searching");
-        const fallbackHits = await runtime.search({
+        const output = await streamRound({
+          messages,
+          signal: input.signal,
+          withTools: true,
+          toolChoice:
+            trace.searchQueries.length === 0
+              ? {
+                  type: "function",
+                  function: { name: "search_notes" },
+                }
+              : "auto",
+          onToken: input.onToken,
+          runtime,
+        });
+        if (output.finishReason === "length") {
+          // Pi invariant: a length-truncated tool batch is wholly invalid.
+          // None of its calls or prose may enter the transcript or execute.
+          trace.truncated = true;
+          state = {
+            kind: "synthesizing",
+            terminalOnSuccess: createAgentTerminalState(
+              "partial",
+              "tokens_exhausted",
+            ),
+            repairAttempt: 0,
+          };
+          break;
+        }
+        if (
+          output.finishReason === "tool_calls" &&
+          output.toolCalls.length === 0
+        )
+          throw providerEmptyFailure(trace, readChunks, searchHits);
+        state = { kind: "handling-round", round: state.round, output };
+        break;
+      }
+
+      case "handling-round": {
+        if (state.output.toolCalls.length) {
+          const calls: ToolCall[] = state.output.toolCalls.slice(
+            0,
+            MAX_TOOL_CALLS - toolCalls,
+          );
+          if (!calls.length) {
+            trace.truncated = true;
+            state = {
+              kind: "synthesizing",
+              terminalOnSuccess: createAgentTerminalState(
+                "partial",
+                "calls_exhausted",
+              ),
+              repairAttempt: 0,
+            };
+            break;
+          }
+          state = { kind: "executing-tools", round: state.round, calls };
+          break;
+        }
+
+        // A few OpenAI-compatible gateways accept tools but ignore forced
+        // tool_choice and answer in prose. Bound material must still be
+        // searched before accepting that prose.
+        if (trace.searchQueries.length === 0 && readChunks.length === 0) {
+          const question = latestQuestion(input.built.messages);
+          const fallbackQuery = isInventoryQuestion(question) ? "*" : question;
+          input.onPhase("searching");
+          const fallbackHits = await runtime.search({
+            projectId: input.projectId,
+            libraryIds: input.libraryIds,
+            query: fallbackQuery,
+            limit: MAX_SEARCH,
+          });
+          trace.searchQueries.push(fallbackQuery);
+          trace.hitCount += fallbackHits.length;
+          fallbackHits.slice(0, MAX_SEARCH).forEach((hit) => {
+            readableIds.add(hit.chunk.id);
+            if (
+              !searchHits.some((current) => current.chunk.id === hit.chunk.id)
+            )
+              searchHits.push(hit);
+          });
+          if (searchHits.length) {
+            messages.splice(1, 0, {
+              role: "system",
+              content: searchMetadataContext(searchHits),
+            });
+            state = {
+              kind: "synthesizing",
+              terminalOnSuccess: createAgentTerminalState("completed", "none"),
+              repairAttempt: 0,
+            };
+            break;
+          }
+        }
+
+        const strict = strictNoEvidenceOutcome(
+          input,
+          trace,
+          readChunks,
+          searchHits,
+        );
+        if (strict) return strict;
+        if (state.output.deferredTokens.some((event) => event.text.trim())) {
+          state.output.deferredTokens.forEach(input.onToken);
+          return terminalOutcome(
+            trace,
+            createAgentTerminalState("completed", "none"),
+            readChunks,
+            { searchHits },
+          );
+        }
+        state = {
+          kind: "synthesizing",
+          terminalOnSuccess: createAgentTerminalState("completed", "none"),
+          repairAttempt: 0,
+        };
+        break;
+      }
+
+      case "executing-tools": {
+        toolCalls += state.calls.length;
+        const toolMessages = await executeToolCalls({
+          calls: state.calls,
           projectId: input.projectId,
           libraryIds: input.libraryIds,
-          query: isInventoryQuestion(question) ? "*" : question,
-          limit: MAX_SEARCH,
+          readableIds,
+          readChunks,
+          searchHits,
+          trace,
+          onPhase: input.onPhase,
+          failures,
+          runtime,
         });
-        trace.searchQueries.push(
-          isInventoryQuestion(question) ? "*" : question,
+        messages = [
+          ...messages,
+          { role: "assistant", content: null, toolCalls: state.calls },
+          ...toolMessages,
+        ];
+        if (toolCalls >= MAX_TOOL_CALLS) {
+          trace.truncated = true;
+          state = {
+            kind: "synthesizing",
+            terminalOnSuccess: createAgentTerminalState(
+              "partial",
+              "calls_exhausted",
+            ),
+            repairAttempt: 0,
+          };
+          break;
+        }
+        state = { kind: "requesting-model", round: state.round + 1 };
+        break;
+      }
+
+      case "synthesizing": {
+        const strict = strictNoEvidenceOutcome(
+          input,
+          trace,
+          readChunks,
+          searchHits,
         );
-        trace.hitCount += fallbackHits.length;
-        fallbackHits.slice(0, MAX_SEARCH).forEach((hit) => {
-          readableIds.add(hit.chunk.id);
-          if (!searchHits.some((current) => current.chunk.id === hit.chunk.id))
-            searchHits.push(hit);
-        });
-        if (searchHits.length) {
-          messages.splice(1, 0, {
-            role: "system",
-            content: searchMetadataContext(searchHits),
-          });
-          input.onPhase("answering");
-          await streamRound({
-            messages,
+        if (strict) return strict;
+        input.onPhase("answering");
+        const synthesisMessages =
+          state.repairAttempt === 0
+            ? messages
+            : [
+                ...messages,
+                {
+                  role: "system" as const,
+                  content: FINAL_SYNTHESIS_REPAIR_INSTRUCTION,
+                },
+              ];
+        try {
+          const output = await streamRound({
+            messages: synthesisMessages,
             signal: input.signal,
             withTools: false,
             onToken: input.onToken,
             runtime,
+            emitTokens: false,
           });
-          return { trace: finish(trace), readChunks: [], searchHits };
+          const completeText = output.tokens
+            .map((event) => event.text)
+            .join("")
+            .trim();
+          if (output.finishReason === "length" || !completeText) {
+            trace.errors?.push(
+              output.finishReason === "length"
+                ? "最终综合被模型长度上限截断。"
+                : agentTerminalErrorMessage("provider-empty-response"),
+            );
+            if (state.repairAttempt === 0) {
+              state = {
+                kind: "synthesizing",
+                terminalOnSuccess: state.terminalOnSuccess,
+                repairAttempt: 1,
+              };
+              break;
+            }
+            throw providerEmptyFailure(trace, readChunks, searchHits);
+          }
+          output.tokens.forEach(input.onToken);
+          return terminalOutcome(trace, state.terminalOnSuccess, readChunks, {
+            searchHits,
+          });
+        } catch (cause) {
+          if (
+            state.repairAttempt === 0 &&
+            cause instanceof ProviderError &&
+            cause.code === "empty-response"
+          ) {
+            trace.errors?.push(
+              agentTerminalErrorMessage("provider-empty-response"),
+            );
+            state = {
+              kind: "synthesizing",
+              terminalOnSuccess: state.terminalOnSuccess,
+              repairAttempt: 1,
+            };
+            break;
+          }
+          if (cause instanceof AgentRunFailure) throw cause;
+          throw finalSynthesisFailure(trace, readChunks, searchHits, cause);
         }
       }
-      const strict = strictNoEvidenceOutcome(
-        input,
-        trace,
-        readChunks,
-        searchHits,
-      );
-      if (strict) return strict;
-      output.deferredTokens.forEach(input.onToken);
-      return { trace: finish(trace), readChunks, searchHits };
-    }
-    const calls = output.toolCalls.slice(0, MAX_TOOL_CALLS - toolCalls);
-    if (!calls.length) {
-      trace.truncated = true;
-      break;
-    }
-    toolCalls += calls.length;
-    messages = [
-      ...messages,
-      { role: "assistant", content: null, toolCalls: calls },
-      ...(await executeToolCalls({
-        calls,
-        projectId: input.projectId,
-        libraryIds: input.libraryIds,
-        readableIds,
-        readChunks,
-        searchHits,
-        trace,
-        onPhase: input.onPhase,
-        failures,
-        runtime,
-      })),
-    ];
-    if (toolCalls >= MAX_TOOL_CALLS) {
-      trace.truncated = true;
-      break;
     }
   }
-  const strict = strictNoEvidenceOutcome(input, trace, readChunks, searchHits);
-  if (strict) return strict;
-  // Fifth call, deliberately without tools, is reserved for completing a
-  // bounded run rather than letting the provider spiral.
-  input.onPhase("answering");
-  await streamRound({
-    messages,
-    signal: input.signal,
-    withTools: false,
-    onToken: input.onToken,
-    runtime,
-  });
-  return { trace: finish(trace), readChunks, searchHits };
 }
 
-function finish(trace: AgentRunTrace): AgentRunTrace {
-  return { ...trace, finishedAt: Date.now() };
+function finish(
+  trace: AgentRunTrace,
+  terminal?: AgentTerminalState,
+): AgentRunTrace {
+  return {
+    ...trace,
+    ...(terminal ? { terminal } : {}),
+    finishedAt: Date.now(),
+  };
 }
 
 /**
@@ -809,21 +1127,42 @@ export async function runAgentTurn(
         onToken: input.onToken,
         runtime,
       });
-      return { trace: finish(trace), readChunks: [] };
+      return terminalOutcome(
+        trace,
+        createAgentTerminalState("completed", "none"),
+        [],
+      );
     }
     if (
       input.capability?.mode === "native-tools" &&
       input.capability.streamingToolCalls &&
       input.capability.toolResultAccepted
     )
-      return await runNative(nested, trace, runtime);
+      return await runNativeStateMachine(nested, trace, runtime);
     return await runTwoStage(nested, trace, runtime);
   } catch (cause) {
+    if (cause instanceof AgentRunFailure) throw cause;
     const message = controller.signal.aborted
       ? "资料库探索已停止或超时。"
-      : errorMessage(cause);
+      : cause instanceof ProviderError && cause.code === "empty-response"
+        ? agentTerminalErrorMessage("provider-empty-response")
+        : errorMessage(cause);
     trace.errors?.push(message);
-    throw new AgentRunFailure(message, finish(trace), cause);
+    const terminal =
+      controller.signal.aborted && input.signal.aborted
+        ? createAgentTerminalState("aborted", "user_abort")
+        : cause instanceof ProviderError && cause.code === "empty-response"
+          ? createAgentTerminalState("failed", "protocol_error")
+          : createAgentTerminalState("failed", "none");
+    throw new AgentRunFailure(
+      message,
+      finish(trace, terminal),
+      terminal,
+      cause,
+      cause instanceof ProviderError && cause.code === "empty-response"
+        ? { errorCode: "provider-empty-response" }
+        : {},
+    );
   } finally {
     globalThis.clearTimeout(timeout);
     input.signal.removeEventListener("abort", relayAbort);

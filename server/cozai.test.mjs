@@ -103,7 +103,7 @@ test("content without any reasoning delta stays unlabelled", async () => {
 
 test("a reasoning-only response still reports no displayable text", async () => {
   const output = await relay([deltaFrame({ reasoning_content: "draft only" })]);
-  assert.match(output, /模型没有返回文本/);
+  assert.match(output, /模型服务没有返回可处理的内容/);
   assert.match(output, /"code":"empty-response"/);
   assert.ok(!output.includes("draft only"));
 });

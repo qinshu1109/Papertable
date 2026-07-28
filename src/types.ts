@@ -3,6 +3,8 @@
  * 三种卡片关系统一用 CardEdge 表达，UI 不硬编码关系语义。
  */
 
+import type { AgentTerminalState } from "./lib/agentTerminal";
+
 export type EdgeType = "child" | "divergent" | "branch";
 
 /** 上下文继承策略：决定 buildContext 未来如何拼装 */
@@ -173,6 +175,8 @@ export interface AgentRunTrace {
   readChunkIds: string[];
   /** True when tool/call budgets cut a run short. */
   truncated?: boolean;
+  /** Validated result × stop-reason terminal for this run. */
+  terminal?: AgentTerminalState;
   errors?: string[];
   /** Explicitly records a strict source-only refusal instead of hiding it. */
   retrievalUnavailable?: boolean;
