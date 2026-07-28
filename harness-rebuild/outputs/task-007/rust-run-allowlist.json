@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "scenario": "rust-current-run-search-authority",
+  "runId": "run-p",
+  "projectId": "p",
+  "rustSearchAllowlist": ["allowed-chunk"],
+  "requests": [
+    { "chunkIds": ["allowed-chunk"], "result": "allowed" },
+    { "chunkIds": ["frontend-readable-only"], "result": "rejected" },
+    { "chunkIds": ["other-run-chunk"], "result": "rejected" },
+    {
+      "runId": "run-p",
+      "projectId": "other",
+      "chunkIds": ["allowed-chunk"],
+      "result": "rejected"
+    }
+  ],
+  "assert": {
+    "frontendReadableIdsTrusted": false,
+    "modelScopeTrusted": false,
+    "projectOrLibraryOrPathCreatesAuthority": false,
+    "sourceDataMutated": false,
+    "reopenPreservesAllowlist": true
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "scenario": "ambiguous-tool-call-same-model-resend-success",
+  "providerEvents": [
+    {
+      "type": "tool-call-delta",
+      "index": 0,
+      "id": "bad-call",
+      "name": "",
+      "arguments": "{\"query\":\"证据\"}"
+    }
+  ],
+  "events": [
+    {
+      "kind": "protocol-repaired",
+      "issue": "tool_call 工具名为空。",
+      "action": "ambiguous-payload-requires-same-model-resend",
+      "deterministic": false
+    },
+    {
+      "kind": "protocol-repaired",
+      "issue": "tool_call 工具名为空。",
+      "action": "same-model-native-tools-resend-requested",
+      "deterministic": false
+    },
+    {
+      "kind": "protocol-repaired",
+      "issue": "tool_call 工具名为空。",
+      "action": "same-model-resend-produced-complete-legal-call",
+      "deterministic": false
+    },
+    { "kind": "search-requested", "query": "证据", "callId": "resent-search" },
+    {
+      "kind": "search-completed",
+      "query": "证据",
+      "callId": "resent-search",
+      "hitCount": 0,
+      "hitChunkIds": []
+    }
+  ],
+  "assert": {
+    "sameModel": true,
+    "sameNativeToolsProtocol": true,
+    "guessedToolName": false,
+    "inventedTokens": false,
+    "toolExecutedOnlyAfterLegalResend": true
+  }
+}

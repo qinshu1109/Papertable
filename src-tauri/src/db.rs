@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 8;
+const USER_VERSION: i64 = 9;
 const AGENT_EVENT_SCHEMA_VERSION: i64 = 1;
 const AGENT_EVENT_TYPES: &[&str] = &[
     "exploration-started",
@@ -1915,7 +1915,7 @@ mod tests {
     }
 
     #[test]
-    fn v8_migration_adds_harness_transport_and_fts_without_rebuilding_turns() {
+    fn v9_migration_adds_harness_transport_allowlist_and_fts_without_rebuilding_turns() {
         let conn = Connection::open_in_memory().unwrap();
         // 模拟真用户 v5 的 turns：表已存在，所以 schema.sql 的 IF NOT EXISTS 不会替
         // 它补列，迁移必须显式 ALTER。
@@ -1942,7 +1942,17 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
+        let allowlist: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'agent_note_search_allowlist'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(allowlist.contains("run_id"));
+        assert!(allowlist.contains("chunk_id"));
     }
 
     #[test]
@@ -1983,7 +1993,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         let run_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM agent_runs", [], |row| row.get(0))
             .unwrap();

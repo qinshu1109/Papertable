@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "scenario": "repair-audit-close-reopen",
+  "events": [
+    { "sequence": 1, "eventType": "exploration-started" },
+    {
+      "sequence": 2,
+      "eventType": "retry",
+      "message": {
+        "kind": "retry",
+        "attempt": 1,
+        "reason": "rate-limited",
+        "delayMs": 250
+      }
+    },
+    {
+      "sequence": 3,
+      "eventType": "protocol-repaired",
+      "message": {
+        "kind": "protocol-repaired",
+        "action": "same-model-native-tools-resend-requested"
+      }
+    },
+    {
+      "sequence": 4,
+      "eventType": "protocol-repaired",
+      "message": {
+        "kind": "protocol-repaired",
+        "action": "只能读取当前 run 的 Rust search allowlist 已返回的片段。"
+      }
+    },
+    {
+      "sequence": 5,
+      "eventType": "protocol-repaired",
+      "message": {
+        "kind": "protocol-repaired",
+        "action": "matching-capability-cache-invalidated-and-reprobe-started"
+      }
+    },
+    {
+      "sequence": 6,
+      "eventType": "terminal",
+      "message": {
+        "kind": "terminal",
+        "terminal": { "result": "failed", "reason": "protocol_error" }
+      }
+    }
+  ],
+  "checkpoint": {
+    "phase": "terminal",
+    "terminal": { "result": "failed", "reason": "protocol_error" }
+  },
+  "assert": {
+    "eventSchemaVersionUnchanged": 1,
+    "eventsAppendOnly": true,
+    "checkpointAdvancedTransactionally": true,
+    "lastSequence": 6,
+    "reopenPreservesEventsAndCheckpoint": true
+  }
+}

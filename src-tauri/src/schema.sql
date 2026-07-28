@@ -1,4 +1,4 @@
--- Papertable · SQLite schema (user_version = 8)
+-- Papertable · SQLite schema (user_version = 9)
 --
 -- 列的取舍只有一条判据：当且仅当字段是 (a) 外键、(b) ORDER BY 键、
 -- (c) 按项目删除的 WHERE 键、(d) Rust 侧 vault 写入器需要解释的字段，
@@ -84,6 +84,18 @@ BEFORE UPDATE ON agent_events
 BEGIN
   SELECT RAISE(ABORT, 'agent_events are append-only');
 END;
+
+-- v9：Rust 数据层自己记录每个 Agent run 的 search 命中。read_notes 只接受这张
+-- allowlist 中的 chunk；前端 readableIds、模型 scope、project/library/path 参数都
+-- 不能为陌生 chunk 授权。源笔记仍然只读；这里只保存短生命周期的授权索引。
+CREATE TABLE IF NOT EXISTS agent_note_search_allowlist (
+  run_id     TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  chunk_id   TEXT NOT NULL REFERENCES note_chunks(id) ON DELETE CASCADE,
+  PRIMARY KEY(run_id, chunk_id)
+);
+CREATE INDEX IF NOT EXISTS agent_note_search_allowlist_project
+  ON agent_note_search_allowlist(project_id, run_id);
 
 CREATE TABLE IF NOT EXISTS edges (
   id              TEXT PRIMARY KEY,
