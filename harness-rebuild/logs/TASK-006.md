@@ -2,7 +2,7 @@
 
 - Branch: `task/TASK-006-no-progress`
 - Started: `2026-07-28T12:10:38+08:00`
-- Status: `in_progress`
+- Status: `done`
 - WenzMark task ID: `f1159295-d149-478f-9972-569bf6dfe4d9`
 
 ## Checkpoints
@@ -51,4 +51,4 @@
 
 ## Acceptance
 
-Supervisor technical acceptance passed. PR/CI/merge closure is pending.
+Supervisor technical acceptance passed. PR #8 passed `verify` and `rust`, then squash-merged to the integration branch as `6632d76`. WenzMark, Git, task card, and progress state were closed together.
