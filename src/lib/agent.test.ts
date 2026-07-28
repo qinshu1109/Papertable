@@ -210,6 +210,65 @@ test("ordinary no-library chat remains a single deterministic provider stream", 
   assert.equal(reads, 0);
 });
 
+test("desktop library runs record usage past legacy limits and stop on the minimum sufficient path", async () => {
+  const requests: Parameters<AgentRuntime["stream"]>[0][] = [];
+  const searches: string[] = [];
+  const visible: string[] = [];
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    libraryScopes: [{ id: "library-a", name: "测试资料库" }],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => visible.push(event.text),
+    runtime: baseRuntime({
+      target: "desktop",
+      stream: (input) => {
+        requests.push(input);
+        const request = requests.length;
+        if (request <= 9)
+          return events([
+            {
+              type: "tool-call-delta",
+              index: 0,
+              id: `desktop-search-${request}`,
+              name: "search_notes",
+              arguments: `{"query":"独立检索 ${request}"}`,
+            },
+            { type: "done", finishReason: "tool_calls" },
+          ]);
+        return events([
+          {
+            type: "token",
+            text: "证据已足够，立即给出最终正文。",
+            channel: "final",
+          },
+          { type: "done", finishReason: "stop" },
+        ]);
+      },
+      search: async (input) => {
+        searches.push(input.query);
+        return [];
+      },
+    }),
+  });
+
+  assert.deepEqual(outcome.terminal, { result: "completed", reason: "none" });
+  assert.deepEqual(visible, ["证据已足够，立即给出最终正文。"]);
+  assert.equal(requests.length, 10);
+  assert.equal(searches.length, 9);
+  assert.equal(outcome.trace.budget?.used.rounds, 10);
+  assert.equal(outcome.trace.budget?.used.calls, 9);
+  assert.equal(outcome.trace.budget?.exhaustionReason, undefined);
+  assert.equal(outcome.trace.truncated, undefined);
+  assert.match(
+    JSON.stringify(requests[0]?.messages),
+    /遵循最小充分路径.*证据足够时立即停止调用工具并输出最终正文/,
+  );
+});
+
 test("desktop ordinary chat retries a pre-token disconnect in the same turn", async () => {
   let streams = 0;
   const visible: string[] = [];
