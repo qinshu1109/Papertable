@@ -1743,7 +1743,7 @@ function TurnBlock({
       {streaming && turn.agentRun && (
         <div className="thinking" role="status" aria-live="polite">
           <span className="dot-pulse" />
-          正在继续深挖同一轮…
+          {IS_DESKTOP_BUILD ? "正在继续完成本轮…" : "正在继续深挖同一轮…"}
         </div>
       )}
 
@@ -1755,14 +1755,16 @@ function TurnBlock({
           style={{ color: "var(--ink-2)", alignItems: "center" }}
         >
           {resumableBudgetExit
-            ? "本轮达到预算边界，完整历史已保存。"
+            ? IS_DESKTOP_BUILD
+              ? "这轮回答尚未完成，当前进度已保存。"
+              : "本轮达到预算边界，完整历史已保存。"
             : "本轮在完整步骤边界中断，检查点已保存。"}
           <button
             className="chip-btn"
             onClick={onContinue}
             style={{ marginLeft: 8 }}
           >
-            继续深挖
+            {IS_DESKTOP_BUILD ? "继续完成" : "继续深挖"}
           </button>
         </div>
       )}

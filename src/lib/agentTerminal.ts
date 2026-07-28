@@ -1,5 +1,5 @@
 /**
- * Terminal state contract for the bounded Agent run.
+ * Terminal state contract for an Agent run.
  *
  * Result and reason are deliberately separate axes, but they are not freely
  * combinable. This table is the single source of truth for ADR-002's legal
