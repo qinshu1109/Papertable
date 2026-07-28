@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "scenario": "reported-token-usage-exhausted-then-unreported-synthesis",
+  "ledger": {
+    "limits": { "rounds": 5, "calls": 8, "wallMs": 120000, "tokens": 10 },
+    "used": { "rounds": 1, "calls": 0, "wallMs": 0, "tokens": null },
+    "remaining": { "rounds": 4, "calls": 8, "wallMs": 120000, "tokens": null },
+    "tokenReporting": {
+      "state": "partial",
+      "reportedTokens": 10,
+      "reportedRequests": 1,
+      "unreportedRequests": 1
+    },
+    "exhaustionReason": "tokens_exhausted"
+  },
+  "terminal": { "result": "partial", "reason": "tokens_exhausted" },
+  "assert": {
+    "providerReportedExhaustingUsage": 10,
+    "unknownTotalPreserved": true,
+    "fabricatedTokenCount": false
+  }
+}

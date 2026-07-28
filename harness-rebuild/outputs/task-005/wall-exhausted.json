@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "scenario": "wall-exhausted-between-complete-steps",
+  "ledger": {
+    "limits": { "rounds": 5, "calls": 8, "wallMs": 10000, "tokens": 32000 },
+    "used": { "rounds": 1, "calls": 0, "wallMs": 12000, "tokens": null },
+    "remaining": { "rounds": 4, "calls": 8, "wallMs": 0, "tokens": null },
+    "exhaustionReason": "wall_exhausted"
+  },
+  "terminal": { "result": "partial", "reason": "wall_exhausted" },
+  "assert": { "successfulSynthesis": true, "remainingClampedAtZero": true }
+}

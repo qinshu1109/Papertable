@@ -17,12 +17,27 @@ import {
   type AgentTerminalErrorCode,
   type AgentTerminalState,
 } from "./agentTerminal";
+import {
+  assertAgentBudgetInvariants,
+  consumeAgentBudget,
+  createAgentBudgetLedger,
+  markAgentBudgetExhausted,
+  recordProviderUsage,
+  type AgentBudgetDimension,
+  type AgentBudgetExhaustionReason,
+  type AgentBudgetLedger,
+  type AgentBudgetLimits,
+  type AgentBudgetRecord,
+  type ProviderUsage,
+} from "./agentBudget";
+import {
+  appendAgentBudgetRecord,
+  appendAgentBudgetStart,
+  type AgentAuditPersistence,
+} from "./agentBudgetAudit";
 
-const MAX_TOOL_ROUNDS = 4;
-const MAX_TOOL_CALLS = 8;
 const MAX_READS = 4;
 const MAX_SEARCH = 8;
-const MAX_WALL_MS = 120_000;
 
 /**
  * The legacy A–Q inventory is kept as an executable migration contract.
@@ -113,6 +128,9 @@ export interface AgentTurnInput {
    * it possible to prove that a guessed chunk id never reaches `read`.
    */
   runtime?: Partial<AgentRuntime>;
+  budgetLimits?: Partial<AgentBudgetLimits>;
+  /** Host persistence boundary; secrets and filesystem scope never enter it. */
+  audit?: AgentAuditPersistence;
 }
 
 export interface AgentRuntime {
@@ -121,6 +139,79 @@ export interface AgentRuntime {
   search: typeof searchProjectNotes;
   read: typeof readProjectNotes;
   now: () => number;
+}
+
+interface AgentBudgetController {
+  ledger: AgentBudgetLedger;
+  consume(
+    dimension: Exclude<AgentBudgetDimension, "tokens">,
+    amount: number,
+    stage?: AgentBudgetRecord["stage"],
+  ): Promise<AgentBudgetRecord>;
+  provider(
+    usage: ProviderUsage | undefined,
+    stage: AgentBudgetRecord["stage"],
+  ): Promise<AgentBudgetRecord>;
+  wall(stage?: AgentBudgetRecord["stage"]): Promise<AgentBudgetRecord | null>;
+  mark(
+    reason: AgentBudgetExhaustionReason,
+    stage?: AgentBudgetRecord["stage"],
+  ): Promise<AgentBudgetRecord>;
+}
+
+function budgetController(input: {
+  turn: AgentTurnInput;
+  trace: AgentRunTrace;
+  runtime: AgentRuntime;
+  ledger: AgentBudgetLedger;
+}): AgentBudgetController {
+  let lastWallAt = input.trace.startedAt;
+  const persist = async (record: AgentBudgetRecord) => {
+    assertAgentBudgetInvariants(input.ledger);
+    if (input.turn.audit)
+      await appendAgentBudgetRecord(
+        input.turn.audit,
+        input.trace,
+        input.ledger,
+        record,
+      );
+    return record;
+  };
+  return {
+    ledger: input.ledger,
+    consume: (dimension, amount, stage = "exploration") =>
+      persist(
+        consumeAgentBudget(
+          input.ledger,
+          dimension,
+          amount,
+          input.runtime.now(),
+          stage,
+        ),
+      ),
+    provider: (usage, stage) =>
+      persist(
+        recordProviderUsage(input.ledger, usage, input.runtime.now(), stage),
+      ),
+    wall: async (stage = "exploration") => {
+      const current = input.runtime.now();
+      const elapsed = Math.max(0, current - lastWallAt);
+      lastWallAt = Math.max(lastWallAt, current);
+      if (!elapsed) return null;
+      return persist(
+        consumeAgentBudget(input.ledger, "wallMs", elapsed, current, stage),
+      );
+    },
+    mark: (reason, stage = "exploration") =>
+      persist(
+        markAgentBudgetExhausted(
+          input.ledger,
+          reason,
+          input.runtime.now(),
+          stage,
+        ),
+      ),
+  };
 }
 
 function runtimeFor(input: AgentTurnInput): AgentRuntime {
@@ -292,6 +383,7 @@ function queriesFromPlanner(content: string): string[] | null {
 async function planQueries(
   input: AgentTurnInput,
   runtime: AgentRuntime,
+  budget: AgentBudgetController,
 ): Promise<string[] | null> {
   const question = latestQuestion(input.built.messages);
   const messages: ProviderMessage[] = [
@@ -303,8 +395,9 @@ async function planQueries(
     { role: "user", content: question },
   ];
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    let result: Awaited<ReturnType<AgentRuntime["complete"]>>;
     try {
-      const result = await runtime.complete({
+      result = await runtime.complete({
         task: "agent",
         messages: attempt
           ? [
@@ -317,12 +410,16 @@ async function planQueries(
           : messages,
         temperature: 0,
       });
-      const queries = queriesFromPlanner(result.content);
-      if (queries) return queries;
     } catch {
+      await budget.provider(undefined, "exploration");
+      await budget.wall("exploration");
       // The caller records a concise error and chooses its answer-mode fallback.
       return null;
     }
+    await budget.provider(result.usage, "exploration");
+    await budget.wall("exploration");
+    const queries = queriesFromPlanner(result.content);
+    if (queries) return queries;
   }
   return null;
 }
@@ -408,10 +505,12 @@ async function streamRound(input: {
   runtime: AgentRuntime;
   /** Native final synthesis buffers until the complete round is validated. */
   emitTokens?: boolean;
+  onUsage?: (usage: ProviderUsage | undefined) => Promise<unknown>;
 }): Promise<{
   toolCalls: ToolCall[];
   tokens: Extract<ProviderStreamEvent, { type: "token" }>[];
   finishReason?: string;
+  usage?: ProviderUsage;
   /**
    * Tool rounds buffer prose until the host has decided it is safe to show.
    * In particular, a sources-only run with no evidence must never flash an
@@ -420,24 +519,34 @@ async function streamRound(input: {
   deferredTokens: Extract<ProviderStreamEvent, { type: "token" }>[];
 }> {
   const events: ProviderStreamEvent[] = [];
-  for await (const event of input.runtime.stream({
-    task: "agent",
-    messages: input.messages,
-    signal: input.signal,
-    ...(input.withTools
-      ? {
-          tools: toolDefinitions,
-          toolChoice: input.toolChoice ?? ("auto" as const),
-        }
-      : {}),
-  })) {
-    events.push(event);
-    if (
-      event.type === "token" &&
-      !input.withTools &&
-      input.emitTokens !== false
-    )
-      input.onToken(event);
+  let usageRecorded = false;
+  try {
+    for await (const event of input.runtime.stream({
+      task: "agent",
+      messages: input.messages,
+      signal: input.signal,
+      ...(input.withTools
+        ? {
+            tools: toolDefinitions,
+            toolChoice: input.toolChoice ?? ("auto" as const),
+          }
+        : {}),
+    })) {
+      events.push(event);
+      if (
+        event.type === "token" &&
+        !input.withTools &&
+        input.emitTokens !== false
+      )
+        input.onToken(event);
+    }
+    const usage = [...events]
+      .reverse()
+      .find((event) => event.type === "done")?.usage;
+    usageRecorded = true;
+    await input.onUsage?.(usage);
+  } finally {
+    if (!usageRecorded) await input.onUsage?.(undefined);
   }
   const toolCalls = collectStreamCalls(events);
   const tokens = events.filter(
@@ -447,10 +556,14 @@ async function streamRound(input: {
   const finishReason = [...events]
     .reverse()
     .find((event) => event.type === "done")?.finishReason;
+  const usage = [...events]
+    .reverse()
+    .find((event) => event.type === "done")?.usage;
   return {
     toolCalls,
     tokens,
     ...(finishReason ? { finishReason } : {}),
+    ...(usage ? { usage } : {}),
     deferredTokens: input.withTools && !toolCalls.length ? tokens : [],
   };
 }
@@ -629,8 +742,9 @@ async function runTwoStage(
   input: AgentTurnInput,
   trace: AgentRunTrace,
   runtime: AgentRuntime,
+  budget: AgentBudgetController,
 ): Promise<AgentOutcome> {
-  const queries = await planQueries(input, runtime);
+  const queries = await planQueries(input, runtime, budget);
   if (!queries) {
     trace.errors?.push("笔记检索词生成失败。");
     const question = latestQuestion(input.built.messages);
@@ -659,7 +773,9 @@ async function runTwoStage(
           withTools: false,
           onToken: input.onToken,
           runtime,
+          onUsage: (usage) => budget.provider(usage, "synthesis"),
         });
+        await budget.wall("synthesis");
         return terminalOutcome(
           trace,
           createAgentTerminalState("completed", "none"),
@@ -692,7 +808,9 @@ async function runTwoStage(
       withTools: false,
       onToken: input.onToken,
       runtime,
+      onUsage: (usage) => budget.provider(usage, "synthesis"),
     });
+    await budget.wall("synthesis");
     return terminalOutcome(
       trace,
       createAgentTerminalState("completed", "none"),
@@ -743,7 +861,9 @@ async function runTwoStage(
     withTools: false,
     onToken: input.onToken,
     runtime,
+    onUsage: (usage) => budget.provider(usage, "synthesis"),
   });
+  await budget.wall("synthesis");
   return terminalOutcome(
     trace,
     createAgentTerminalState("completed", "none"),
@@ -816,19 +936,34 @@ async function runNativeStateMachine(
   input: AgentTurnInput,
   trace: AgentRunTrace,
   runtime: AgentRuntime,
+  budget: AgentBudgetController,
 ): Promise<AgentOutcome> {
   let messages = appendAgentSystem(input.built.messages, input.libraryScopes);
   const readableIds = new Set<string>();
   const readChunks: NoteChunk[] = [];
   const searchHits: NoteHit[] = [];
   const failures = new Map<string, number>();
-  let toolCalls = 0;
   let state: NativeAgentState = { kind: "requesting-model", round: 0 };
 
   while (true) {
     switch (state.kind) {
       case "requesting-model": {
-        if (state.round >= MAX_TOOL_ROUNDS) {
+        await budget.wall("exploration");
+        if (budget.ledger.remaining.wallMs <= 0) {
+          await budget.mark("wall_exhausted");
+          trace.truncated = true;
+          state = {
+            kind: "synthesizing",
+            terminalOnSuccess: createAgentTerminalState(
+              "partial",
+              "wall_exhausted",
+            ),
+            repairAttempt: 0,
+          };
+          break;
+        }
+        if (budget.ledger.remaining.rounds <= 0) {
+          await budget.mark("rounds_exhausted");
           // K: the loop condition itself is a budget exit, so it must be
           // visible in the trace before the forced no-tools synthesis.
           trace.truncated = true;
@@ -856,16 +991,50 @@ async function runNativeStateMachine(
               : "auto",
           onToken: input.onToken,
           runtime,
+          onUsage: (usage) => budget.provider(usage, "exploration"),
         });
+        await budget.consume("rounds", 1);
+        await budget.wall("exploration");
         if (output.finishReason === "length") {
           // Pi invariant: a length-truncated tool batch is wholly invalid.
           // None of its calls or prose may enter the transcript or execute.
+          trace.truncated = true;
+          if (budget.ledger.exhaustionReason !== "tokens_exhausted")
+            await budget.mark("tokens_exhausted");
+          state = {
+            kind: "synthesizing",
+            terminalOnSuccess: createAgentTerminalState(
+              "partial",
+              "tokens_exhausted",
+            ),
+            repairAttempt: 0,
+          };
+          break;
+        }
+        if (
+          budget.ledger.remaining.tokens !== null &&
+          budget.ledger.remaining.tokens <= 0
+        ) {
+          await budget.mark("tokens_exhausted");
           trace.truncated = true;
           state = {
             kind: "synthesizing",
             terminalOnSuccess: createAgentTerminalState(
               "partial",
               "tokens_exhausted",
+            ),
+            repairAttempt: 0,
+          };
+          break;
+        }
+        if (budget.ledger.remaining.wallMs <= 0) {
+          await budget.mark("wall_exhausted");
+          trace.truncated = true;
+          state = {
+            kind: "synthesizing",
+            terminalOnSuccess: createAgentTerminalState(
+              "partial",
+              "wall_exhausted",
             ),
             repairAttempt: 0,
           };
@@ -884,7 +1053,7 @@ async function runNativeStateMachine(
         if (state.output.toolCalls.length) {
           const calls: ToolCall[] = state.output.toolCalls.slice(
             0,
-            MAX_TOOL_CALLS - toolCalls,
+            budget.ledger.remaining.calls,
           );
           if (!calls.length) {
             trace.truncated = true;
@@ -963,7 +1132,7 @@ async function runNativeStateMachine(
       }
 
       case "executing-tools": {
-        toolCalls += state.calls.length;
+        await budget.consume("calls", state.calls.length);
         const toolMessages = await executeToolCalls({
           calls: state.calls,
           projectId: input.projectId,
@@ -981,7 +1150,22 @@ async function runNativeStateMachine(
           { role: "assistant", content: null, toolCalls: state.calls },
           ...toolMessages,
         ];
-        if (toolCalls >= MAX_TOOL_CALLS) {
+        await budget.wall("exploration");
+        if (budget.ledger.remaining.wallMs <= 0) {
+          await budget.mark("wall_exhausted");
+          trace.truncated = true;
+          state = {
+            kind: "synthesizing",
+            terminalOnSuccess: createAgentTerminalState(
+              "partial",
+              "wall_exhausted",
+            ),
+            repairAttempt: 0,
+          };
+          break;
+        }
+        if (budget.ledger.remaining.calls <= 0) {
+          await budget.mark("calls_exhausted");
           trace.truncated = true;
           state = {
             kind: "synthesizing",
@@ -1024,7 +1208,9 @@ async function runNativeStateMachine(
             onToken: input.onToken,
             runtime,
             emitTokens: false,
+            onUsage: (usage) => budget.provider(usage, "synthesis"),
           });
+          await budget.wall("synthesis");
           const completeText = output.tokens
             .map((event) => event.text)
             .join("")
@@ -1104,6 +1290,10 @@ export async function runAgentTurn(
     readChunkIds: [],
     errors: [],
   };
+  const ledger = createAgentBudgetLedger(input.budgetLimits);
+  trace.budget = ledger;
+  const budget = budgetController({ turn: input, trace, runtime, ledger });
+  if (input.audit) await appendAgentBudgetStart(input.audit, trace, ledger);
   const controller = new AbortController();
   const relayAbort = () => controller.abort(input.signal.reason);
   input.signal.addEventListener("abort", relayAbort, { once: true });
@@ -1112,7 +1302,7 @@ export async function runAgentTurn(
   // without changing production cancellation behavior.
   const timeout = globalThis.setTimeout(
     () => controller.abort("Harness timed out"),
-    MAX_WALL_MS,
+    ledger.limits.wallMs,
   );
   const nested: AgentTurnInput = { ...input, signal: controller.signal };
   try {
@@ -1126,7 +1316,9 @@ export async function runAgentTurn(
         withTools: false,
         onToken: input.onToken,
         runtime,
+        onUsage: (usage) => budget.provider(usage, "synthesis"),
       });
+      await budget.wall("synthesis");
       return terminalOutcome(
         trace,
         createAgentTerminalState("completed", "none"),
@@ -1138,10 +1330,20 @@ export async function runAgentTurn(
       input.capability.streamingToolCalls &&
       input.capability.toolResultAccepted
     )
-      return await runNativeStateMachine(nested, trace, runtime);
-    return await runTwoStage(nested, trace, runtime);
+      return await runNativeStateMachine(nested, trace, runtime, budget);
+    return await runTwoStage(nested, trace, runtime, budget);
   } catch (cause) {
-    if (cause instanceof AgentRunFailure) throw cause;
+    await budget.wall("synthesis");
+    if (
+      controller.signal.aborted &&
+      !input.signal.aborted &&
+      !ledger.exhaustionReason
+    )
+      await budget.mark("wall_exhausted", "synthesis");
+    if (cause instanceof AgentRunFailure) {
+      cause.trace.budget = ledger;
+      throw cause;
+    }
     const message = controller.signal.aborted
       ? "资料库探索已停止或超时。"
       : cause instanceof ProviderError && cause.code === "empty-response"
@@ -1164,6 +1366,7 @@ export async function runAgentTurn(
         : {},
     );
   } finally {
+    assertAgentBudgetInvariants(ledger);
     globalThis.clearTimeout(timeout);
     input.signal.removeEventListener("abort", relayAbort);
   }

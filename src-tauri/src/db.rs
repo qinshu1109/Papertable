@@ -1836,6 +1836,18 @@ mod tests {
             _ => panic!("unknown test event"),
         };
         let at = 101 + index as i64;
+        let budget = json!({
+            "schemaVersion": 1,
+            "limits": {"rounds":4,"calls":8,"wallMs":120000,"tokens":32000},
+            "used": {"rounds":1,"calls":1,"wallMs":25,"tokens":null},
+            "remaining": {"rounds":3,"calls":7,"wallMs":119975,"tokens":null},
+            "tokenReporting": {
+                "state":"unreported","reportedTokens":0,
+                "reportedRequests":0,"unreportedRequests":1
+            },
+            "records": [{"sequence":1,"occurredAt":at,"dimension":"tokens",
+                         "amount":null,"source":"provider-unreported","stage":"exploration"}]
+        });
         AppendAgentStepInput {
             run_id: "run-1".into(),
             turn_id: "agent-turn".into(),
@@ -1851,6 +1863,7 @@ mod tests {
                 "confirmedCitationChunkIds": [],
                 "unresolvedQuestions": [],
                 "addedBudget": {},
+                "budget": budget,
                 "lastCompleteKind": kind,
                 "step": index,
             }),
@@ -2092,6 +2105,7 @@ mod tests {
             assert_eq!(events.len(), index + 1);
             assert_eq!(run.last_sequence, index as i64 + 1);
             assert_eq!(run.checkpoint["lastCompleteKind"], json!(kind));
+            assert_eq!(run.checkpoint["budget"]["remaining"]["calls"], json!(7));
             assert_eq!(events.last().unwrap().event_type, *kind);
             assert_eq!(
                 events

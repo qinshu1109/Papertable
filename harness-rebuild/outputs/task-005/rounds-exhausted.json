@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "scenario": "rounds-exhausted-successful-synthesis",
+  "ledger": {
+    "limits": { "rounds": 4, "calls": 8, "wallMs": 120000, "tokens": 32000 },
+    "used": { "rounds": 4, "calls": 4, "wallMs": 0, "tokens": null },
+    "remaining": { "rounds": 0, "calls": 4, "wallMs": 120000, "tokens": null },
+    "exhaustionReason": "rounds_exhausted"
+  },
+  "terminal": { "result": "partial", "reason": "rounds_exhausted" },
+  "assert": { "successfulSynthesis": true, "fabricatedAnswer": false }
+}

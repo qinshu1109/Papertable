@@ -4,6 +4,7 @@
  */
 
 import type { AgentTerminalState } from "./lib/agentTerminal";
+import type { AgentBudgetLedger, ProviderUsage } from "./lib/agentBudget";
 
 export type EdgeType = "child" | "divergent" | "branch";
 
@@ -126,7 +127,7 @@ export type ProviderStreamEvent =
       name?: string;
       arguments?: string;
     }
-  | { type: "done"; finishReason?: string }
+  | { type: "done"; finishReason?: string; usage?: ProviderUsage }
   | { type: "error"; message: string; code?: ProviderErrorCode };
 
 export type AgentExecutionMode = "native-tools" | "two-stage";
@@ -182,6 +183,8 @@ export interface AgentRunTrace {
   retrievalUnavailable?: boolean;
   /** At most eight safe historical tool audit records, populated on success. */
   retrievalEvidence?: HistoricalRetrievalEvidence[];
+  /** Persisted four-dimensional per-run budget ledger. */
+  budget?: AgentBudgetLedger;
 }
 
 export interface BuiltContext {

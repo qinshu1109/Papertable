@@ -5,6 +5,7 @@ import {
   extractMessage,
   extractToolCallDeltas,
   extractToolCalls,
+  extractUsage,
   friendlyProviderError,
   providerErrorCode,
   providerErrorMessage,
@@ -74,6 +75,31 @@ test("stream relay emits normalized token and done events", async () => {
   assert.match(chunks.join(""), /event: token/);
   assert.match(chunks.join(""), /你好/);
   assert.match(chunks.join(""), /event: done/);
+});
+
+test("provider usage is transported only when the upstream reports it", async () => {
+  assert.deepEqual(
+    extractUsage({
+      usage: {
+        prompt_tokens: 7,
+        completion_tokens: 3,
+        total_tokens: 10,
+      },
+    }),
+    { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+  );
+  assert.equal(extractUsage({ choices: [] }), undefined);
+  const output = await relay([
+    deltaFrame({ content: "正文" }),
+    {
+      choices: [],
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+    },
+  ]);
+  assert.match(
+    output,
+    /"usage":\{"inputTokens":4,"outputTokens":2,"totalTokens":6\}/,
+  );
 });
 
 test("reasoning deltas never reach the browser", async () => {

@@ -161,6 +161,18 @@ pub struct Completion {
     pub content: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ProviderUsage>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    pub total_tokens: u64,
 }
 
 #[derive(Serialize, Debug)]
@@ -197,6 +209,8 @@ pub enum StreamEvent {
         stopped: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         finish_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<ProviderUsage>,
     },
 }
 
@@ -598,6 +612,9 @@ fn body_for(config: &ProviderConfig, request: &ChatRequest, stream: bool) -> Val
     let mut body = serde_json::Map::new();
     body.insert("model".into(), Value::String(config.model.clone()));
     body.insert("stream".into(), Value::Bool(stream));
+    if stream && request.task == "agent" {
+        body.insert("stream_options".into(), json!({ "include_usage": true }));
+    }
     body.insert(
         "messages".into(),
         Value::Array(request.messages.iter().map(wire_message).collect()),
@@ -736,6 +753,31 @@ pub fn extract_finish_reason(payload: &Value) -> Option<String> {
         .map(|reason| reason.chars().take(80).collect())
 }
 
+pub fn extract_usage(payload: &Value) -> Option<ProviderUsage> {
+    let usage = payload.get("usage")?;
+    let input_tokens = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(Value::as_u64);
+    let output_tokens = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(Value::as_u64);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            input_tokens
+                .zip(output_tokens)
+                .map(|(input, output)| input + output)
+        })?;
+    Some(ProviderUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    })
+}
+
 /// 诊断:上游 SSE 原始帧转存。
 ///
 /// 存在 `<app_data>/DEBUG_SSE` 这个标记文件时，把每一行 `data:` 原样追加到
@@ -856,6 +898,7 @@ fn complete_with_probe_permission(
             let completion = Completion {
                 content: extract_message(&value),
                 tool_calls: extract_tool_calls(&value),
+                usage: extract_usage(&value),
             };
             if completion.content.is_empty() && completion.tool_calls.is_empty() {
                 Err(provider_error_message("empty-response").into())
@@ -907,6 +950,7 @@ pub fn stream(
         let _ = channel.send(StreamEvent::Done {
             stopped: false,
             finish_reason: None,
+            usage: None,
         });
         return Ok(());
     }
@@ -918,6 +962,7 @@ pub fn stream(
         let _ = channel.send(StreamEvent::Done {
             stopped: false,
             finish_reason: None,
+            usage: None,
         });
         return Ok(());
     }
@@ -925,6 +970,7 @@ pub fn stream(
         let _ = channel.send(StreamEvent::Done {
             stopped: true,
             finish_reason: None,
+            usage: None,
         });
         return Ok(());
     }
@@ -946,6 +992,7 @@ pub fn stream(
             let _ = channel.send(StreamEvent::Done {
                 stopped: false,
                 finish_reason: None,
+                usage: None,
             });
             return Ok(());
         }
@@ -958,6 +1005,7 @@ pub fn stream(
             let _ = channel.send(StreamEvent::Done {
                 stopped: false,
                 finish_reason: None,
+                usage: None,
             });
             return Ok(());
         }
@@ -966,6 +1014,7 @@ pub fn stream(
     let mut emitted = false;
     let mut emitted_tool_call = false;
     let mut finish_reason = None;
+    let mut usage = None;
     let mut stopped = cancelled.load(Ordering::Relaxed);
     let mut reader = BufReader::new(reader);
     let mut stream_error = false;
@@ -1025,6 +1074,9 @@ pub fn stream(
         if finish_reason.is_none() {
             finish_reason = extract_finish_reason(&payload);
         }
+        if usage.is_none() {
+            usage = extract_usage(&payload);
+        }
     }
 
     if !emitted && !emitted_tool_call && !stopped && !stream_error {
@@ -1036,6 +1088,7 @@ pub fn stream(
     let _ = channel.send(StreamEvent::Done {
         stopped,
         finish_reason,
+        usage,
     });
     Ok(())
 }
@@ -1399,6 +1452,55 @@ mod tests {
             extract_finish_reason(&payload).as_deref(),
             Some("tool_calls")
         );
+    }
+
+    #[test]
+    fn provider_usage_is_normalized_without_inventing_missing_counts() {
+        assert_eq!(
+            extract_usage(&json!({"usage":{
+                "prompt_tokens":7,"completion_tokens":3,"total_tokens":10
+            }})),
+            Some(ProviderUsage {
+                input_tokens: Some(7),
+                output_tokens: Some(3),
+                total_tokens: 10,
+            })
+        );
+        assert_eq!(extract_usage(&json!({"choices":[]})), None);
+        let event = StreamEvent::Done {
+            stopped: false,
+            finish_reason: Some("stop".into()),
+            usage: Some(ProviderUsage {
+                input_tokens: Some(4),
+                output_tokens: Some(2),
+                total_tokens: 6,
+            }),
+        };
+        let wire = serde_json::to_value(event).unwrap();
+        assert_eq!(wire["usage"]["totalTokens"], 6);
+    }
+
+    #[test]
+    fn streaming_requests_ask_for_real_usage_transport() {
+        let request = ChatRequest {
+            task: "agent".into(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: Some("x".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            }],
+            temperature: None,
+            tools: vec![],
+            tool_choice: None,
+        };
+        assert_eq!(
+            body_for(&ProviderConfig::default(), &request, true)["stream_options"]["include_usage"],
+            true
+        );
+        assert!(body_for(&ProviderConfig::default(), &request, false)
+            .get("stream_options")
+            .is_none());
     }
 
     #[test]

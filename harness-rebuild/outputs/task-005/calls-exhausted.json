@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "scenario": "calls-exhausted-successful-synthesis",
+  "ledger": {
+    "limits": { "rounds": 5, "calls": 1, "wallMs": 120000, "tokens": 32000 },
+    "used": { "rounds": 1, "calls": 1, "wallMs": 0, "tokens": null },
+    "remaining": { "rounds": 4, "calls": 0, "wallMs": 120000, "tokens": null },
+    "exhaustionReason": "calls_exhausted"
+  },
+  "terminal": { "result": "partial", "reason": "calls_exhausted" },
+  "assert": { "executedAllowedCall": true, "successfulSynthesis": true }
+}

@@ -5,6 +5,7 @@ import type {
   ProviderMessage,
 } from "../types";
 import type { AgentTerminalState, StopReason } from "./agentTerminal";
+import type { AgentBudgetLedger, AgentBudgetRecord } from "./agentBudget";
 
 export const AGENT_EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -108,7 +109,11 @@ export type AgentMessage =
     }
   | {
       kind: "budget-added";
-      added: AgentBudgetDelta;
+      /** TASK-005 usage append; the event name stays stable for schema v1. */
+      record?: AgentBudgetRecord;
+      ledger?: AgentBudgetLedger;
+      /** Backward-compatible explicit budget extension for TASK-008. */
+      added?: AgentBudgetDelta;
       reason?: string;
     }
   | {
@@ -138,6 +143,8 @@ export interface AgentRunCheckpoint {
   confirmedCitationChunkIds: string[];
   unresolvedQuestions: string[];
   addedBudget: AgentBudgetDelta;
+  /** TASK-005 persisted per-run ledger; absent only on pre-TASK-005 rows. */
+  budget?: AgentBudgetLedger;
   stopReason?: StopReason;
   terminal?: AgentTerminalState;
 }

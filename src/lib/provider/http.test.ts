@@ -101,3 +101,35 @@ test("provider empty-response uses the TASK-002 provider-empty copy", () => {
     "模型服务没有返回可处理的内容，请重试。",
   );
 });
+
+test("web stream preserves normalized provider usage on done", async () => {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode(
+          'event: done\ndata: {"stopped":false,"finishReason":"stop","usage":{"inputTokens":5,"outputTokens":2,"totalTokens":7}}\n\n',
+        ),
+      );
+      controller.close();
+    },
+  });
+  await withFetch(
+    async () => new Response(body, { status: 200 }),
+    async () => {
+      const received = [];
+      for await (const event of streamModel({
+        task: "agent",
+        messages: [{ role: "user", content: "测试" }],
+        signal: new AbortController().signal,
+      }))
+        received.push(event);
+      assert.deepEqual(received, [
+        {
+          type: "done",
+          finishReason: "stop",
+          usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 },
+        },
+      ]);
+    },
+  );
+});

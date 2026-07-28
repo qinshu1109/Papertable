@@ -110,6 +110,28 @@ export function extractFinishReason(payload) {
     : undefined;
 }
 
+/** Normalize only real provider usage fields; absent/invalid usage stays absent. */
+export function extractUsage(payload) {
+  const usage = payload?.usage;
+  if (!usage || typeof usage !== "object") return undefined;
+  const finite = (value) =>
+    Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+  const inputTokens = finite(usage.input_tokens ?? usage.prompt_tokens);
+  const outputTokens = finite(usage.output_tokens ?? usage.completion_tokens);
+  const explicitTotal = finite(usage.total_tokens);
+  const totalTokens =
+    explicitTotal ??
+    (inputTokens !== undefined && outputTokens !== undefined
+      ? inputTokens + outputTokens
+      : undefined);
+  if (totalTokens === undefined) return undefined;
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    totalTokens,
+  };
+}
+
 export function sseEvent(event, payload) {
   return encoder.encode(
     `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`,
@@ -140,6 +162,7 @@ export async function relayOpenAiStream({
   let emittedText = false;
   let emittedToolCall = false;
   let finishReason;
+  let usage;
 
   try {
     while (!signal?.aborted) {
@@ -170,6 +193,7 @@ export async function relayOpenAiStream({
             write(sseEvent("tool-call-delta", toolCall));
           }
           finishReason ??= extractFinishReason(payload);
+          usage ??= extractUsage(payload);
         } catch {
           // Keep the UI stream alive if a non-JSON provider heartbeat arrives.
         }
@@ -207,6 +231,7 @@ export async function relayOpenAiStream({
     sseEvent("done", {
       stopped: Boolean(signal?.aborted),
       ...(finishReason ? { finishReason } : {}),
+      ...(usage ? { usage } : {}),
     }),
   );
 }
