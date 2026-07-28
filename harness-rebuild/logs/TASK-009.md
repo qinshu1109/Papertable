@@ -2,7 +2,7 @@
 
 - Branch: `task/TASK-009-event-timeline`
 - Started: `2026-07-28T13:58:35+08:00`
-- Status: `in_progress`
+- Status: `done`
 - WenzMark task ID: `13f96c73-ec38-4f26-81c9-963b59e30bfb`
 
 ## Checkpoints
@@ -12,6 +12,7 @@
 - `2026-07-28T14:14:39+08:00` — Completed the schema-v1 event projection, live persisted-event consumer, terminal/reason/budget presentation, safe source expansion, trajectory promotion, deterministic fixtures, browser evidence, and scope audit. Left the card `in_progress` for supervisor acceptance.
 - `2026-07-28T14:16:50+08:00` — Cross-checked the finished UI directly against TASK-005's accepted card, execution log, and all five replay fixtures: the four persisted axes, zero-clamped remaining values, exhaustion reasons, and explicit unreported/partial token semantics match.
 - `2026-07-28T14:20:00+08:00` — Supervisor independently confirmed WenzMark `awaitingAcceptance` with exit code 0, reviewed the Git scope and screenshot evidence, reran the focused authority/terminal tests, the complete repository gate, and all 32 Playwright cases. All passed; accepted for PR.
+- `2026-07-28T14:22:50+08:00` — PR #11 passed Rust and verify CI, then squash-merged into `feat/readonly-note-harness-alpha` as `7e54dd1`. WenzMark and task status were closed as `completed` / `done`.
 
 ## Tests
 
@@ -62,4 +63,4 @@
 
 ## Acceptance
 
-Supervisor technical acceptance: PASS. TASK-009 remains `in_progress` until its PR and CI are merged.
+Supervisor technical acceptance: PASS. PR #11 passed CI and merged as `7e54dd1`; WenzMark closed as `completed`.
