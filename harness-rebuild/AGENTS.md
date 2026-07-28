@@ -3,10 +3,12 @@
 ## 每次运行
 
 1. 先读 CONTEXT.md → CURRENT.md → 本卡 → 本卡 depends_on 各卡的"预期输出"与实际产物 → 本卡引用的 ADR。
-2. 只执行当前一张任务卡。卡外的问题记入卡内"发现"小节或 memories/candidates/，不顺手修。
-3. 实现与测试同卡交付；verify 判据全部满足才能把 status 改为 done。
-4. 完成后更新：本卡 status、CURRENT.md（三行以内）、若有新经验写 memories/candidates/。
-5. 每卡一个分支与 PR，commit message 引用 TASK-id。
+2. 确认本卡已解锁，从最新已验收的 `feat/readonly-note-harness-alpha` 建立专用分支；TASK-012 必须使用独立 worktree。
+3. 启动时由执行 Agent 把本卡改为 `in_progress`，并写 `logs/TASK-xxx.md` 的 WenzMark ID、分支和开始时间。
+4. 只执行当前一张任务卡。卡外问题记入卡内"发现"或 memories/candidates/，不顺手修。
+5. 实现与测试同卡交付；verify 全绿后记录候选完成结果，但执行 Agent 不得自行把本卡改为 `done`。
+6. Codex 监督者独立验收、提交、推送、审查和合并；合入后才把任务改为 `done`，并统一回写 CURRENT 与日志。
+7. 每卡一个 WenzMark 会话、分支和 PR；commit message 引用 TASK-id。
 
 ## 硬约束（违反即返工）
 
@@ -20,4 +22,11 @@
 
 - 不要加载全部历史。研究报告按需查阅对应小节。
 - 发给模型的续跑工作集构成以 ADR-006 为准。
-- WenzMark 仅作任务启动器，不把进程退出码当作 verify 或人工验收。
+- 前置上下文由工作区文件和依赖卡产物承载，不依赖跨卡聊天记忆。
+- WenzMark 仅作任务启动器；其状态、自述或退出码都不能替代 verify 和监督验收。
+
+## 状态与写入归属
+
+- 任务卡：`pending → in_progress → done | blocked`；WenzMark 的 `awaitingAcceptance` 只记录在对应日志。
+- 执行 Agent 只写本卡、隔离产物和本卡日志；共享 CURRENT、验收结论与 `done` 由监督者单写。
+- 卡外共享文件冲突、耗时超过预估两倍或需要扩大权限时停止，并在日志标明阻塞原因。
