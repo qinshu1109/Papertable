@@ -7,6 +7,7 @@
 
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -1334,28 +1335,37 @@ pub fn project_library_ids(conn: &Connection, project_id: &str) -> Result<Vec<St
     Ok(ids)
 }
 
-pub fn search_project(
+#[cfg(test)]
+fn search_project(
     conn: &Connection,
     project_id: &str,
     query: &str,
     requested_limit: Option<usize>,
 ) -> Result<Vec<NoteHit>> {
     let scope = resolve_project_scope(conn, project_id)?;
-    let library_ids = scope.available_library_ids;
+    search_libraries(conn, &scope.available_library_ids, query, requested_limit)
+}
+
+fn search_libraries(
+    conn: &Connection,
+    library_ids: &[String],
+    query: &str,
+    requested_limit: Option<usize>,
+) -> Result<Vec<NoteHit>> {
     let limit = requested_limit.unwrap_or(5).clamp(1, 8);
     if library_ids.is_empty() || query.trim().is_empty() {
         return Ok(vec![]);
     }
     if query.trim() == "*" {
-        return list_project_documents(conn, &library_ids, limit);
+        return list_project_documents(conn, library_ids, limit);
     }
     let fts_query = safe_fts_query(query);
     let hits = fts_query
         .as_deref()
-        .and_then(|query| search_fts(conn, &library_ids, query, limit).ok());
+        .and_then(|query| search_fts(conn, library_ids, query, limit).ok());
     match hits {
         Some(hits) if !hits.is_empty() => Ok(hits),
-        _ => search_like(conn, &library_ids, query.trim(), limit),
+        _ => search_like(conn, library_ids, query.trim(), limit),
     }
 }
 
@@ -1385,6 +1395,35 @@ fn assert_active_agent_run_project(
     }
 }
 
+fn frozen_agent_run_library_ids(
+    conn: &Connection,
+    run_id: &str,
+    project_id: &str,
+) -> Result<Vec<String>> {
+    assert_active_agent_run_project(conn, run_id, project_id)?;
+    let checkpoint: String = conn.query_row(
+        "SELECT checkpoint FROM agent_runs WHERE id = ?1",
+        params![run_id],
+        |row| row.get(0),
+    )?;
+    let checkpoint: Value = serde_json::from_str(&checkpoint)?;
+    let frozen = checkpoint
+        .get("hostScope")
+        .and_then(|scope| scope.get("libraryIds"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error("Agent run 缺少宿主冻结资料库作用域。".into()))?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let available = resolve_project_scope(conn, project_id)?
+        .available_library_ids
+        .into_iter()
+        .filter(|id| frozen.contains(id))
+        .collect::<Vec<_>>();
+    Ok(available)
+}
+
 /// Desktop Agent search path. The Rust data layer, not the WebView, owns the
 /// resulting per-run chunk allowlist. Reopen is fail-safe because the rows are
 /// persisted with the run and removed by foreign-key cascades.
@@ -1396,8 +1435,8 @@ pub fn search_project_for_run(
     requested_limit: Option<usize>,
 ) -> Result<Vec<NoteHit>> {
     let tx = conn.transaction()?;
-    assert_active_agent_run_project(&tx, run_id, project_id)?;
-    let hits = search_project(&tx, project_id, query, requested_limit)?;
+    let library_ids = frozen_agent_run_library_ids(&tx, run_id, project_id)?;
+    let hits = search_libraries(&tx, &library_ids, query, requested_limit)?;
     for hit in &hits {
         tx.execute(
             "INSERT OR IGNORE INTO agent_note_search_allowlist (run_id, project_id, chunk_id)
@@ -1849,8 +1888,15 @@ mod tests {
             "INSERT INTO agent_runs (
                id, turn_id, schema_version, phase, started_at, updated_at,
                last_sequence, checkpoint
-             ) VALUES (?1, ?2, 1, 'exploring', 1, 1, 0, '{}')",
-            params![run_id, turn_id],
+             ) VALUES (?1, ?2, 1, 'exploring', 1, 1, 0, ?3)",
+            params![
+                run_id,
+                turn_id,
+                json!({
+                    "hostScope": {"projectId": project_id, "libraryIds": ["lib"]}
+                })
+                .to_string()
+            ],
         )
         .unwrap();
     }
@@ -2012,6 +2058,52 @@ mod tests {
         .unwrap();
         assert!(
             read_project_for_run(&conn, "run-p", "p", std::slice::from_ref(&allowed_id)).is_err()
+        );
+    }
+
+    #[test]
+    fn rust_run_search_keeps_the_original_frozen_library_scope() {
+        let mut conn = database();
+        seed_agent_run(&conn, "p", "run-frozen");
+        import_files(
+            &conn,
+            &NoteImportInput {
+                id: "lib".into(),
+                name: "原始范围".into(),
+                files: vec![NoteImportFile {
+                    path: "original.md".into(),
+                    content: "原始冻结范围编号 ORIGINAL-42。".into(),
+                }],
+                now: Some(1),
+            },
+        )
+        .unwrap();
+        import_files(
+            &conn,
+            &NoteImportInput {
+                id: "lib-new".into(),
+                name: "后来新增".into(),
+                files: vec![NoteImportFile {
+                    path: "new.md".into(),
+                    content: "新增资料库编号 WIDEN-99。".into(),
+                }],
+                now: Some(2),
+            },
+        )
+        .unwrap();
+        bind_project(&conn, "p", &["lib".into(), "lib-new".into()]).unwrap();
+
+        assert_eq!(
+            search_project_for_run(&mut conn, "run-frozen", "p", "ORIGINAL-42", Some(3),)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            search_project_for_run(&mut conn, "run-frozen", "p", "WIDEN-99", Some(3))
+                .unwrap()
+                .is_empty(),
+            "a library bound after run start must not widen the resumed run"
         );
     }
 

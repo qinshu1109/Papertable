@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "scenario": "bounded-partial-same-run-continuation",
+  "identity": {
+    "runIdBefore": "run-resume",
+    "runIdAfter": "run-resume",
+    "turnIdBefore": "turn-resume",
+    "turnIdAfter": "turn-resume"
+  },
+  "transitions": [
+    {
+      "sequence": 6,
+      "eventType": "terminal",
+      "checkpointPhase": "terminal",
+      "terminal": {
+        "result": "partial",
+        "reason": "rounds_exhausted"
+      }
+    },
+    {
+      "sequence": 7,
+      "eventType": "budget-added",
+      "added": {
+        "rounds": 4,
+        "calls": 8,
+        "wallMs": 120000,
+        "tokens": 32000
+      },
+      "checkpointPhase": "exploring",
+      "expectedLastSequence": 6
+    },
+    {
+      "sequence": 8,
+      "eventType": "duplicate-call-detected",
+      "checkpointPhase": "repairing",
+      "effect": "prior completed search reused without host execution"
+    },
+    {
+      "sequence": 9,
+      "eventType": "terminal",
+      "checkpointPhase": "terminal",
+      "terminal": {
+        "result": "completed",
+        "reason": "none"
+      }
+    }
+  ],
+  "ledger": {
+    "usageReset": false,
+    "limitsExtended": true,
+    "remainingDerivedFromLimitsAndUsage": true
+  },
+  "assert": {
+    "newRunCreated": false,
+    "newTurnCreated": false,
+    "newQuestionCreated": false,
+    "completedToolsReplayed": false,
+    "partialToolBatchReplayed": false,
+    "eventsAppendOnly": true,
+    "checkpointAdvancedWithEvent": true
+  }
+}

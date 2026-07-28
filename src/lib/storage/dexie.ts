@@ -302,8 +302,33 @@ const AGENT_RUN_PHASES: readonly AgentRunPhase[] = [
   "repairing",
   "retrying",
   "synthesizing",
+  "interrupted",
   "terminal",
 ];
+
+const RESUMABLE_TERMINAL_REASONS = [
+  "rounds_exhausted",
+  "calls_exhausted",
+  "wall_exhausted",
+  "tokens_exhausted",
+] as const;
+
+function isLegalContinuationClaim(
+  existing: AgentRunRecord,
+  input: AppendAgentStepInput,
+): boolean {
+  const terminal = existing.checkpoint.terminal;
+  return (
+    input.event.message.kind === "budget-added" &&
+    Boolean(input.event.message.added) &&
+    input.checkpoint.phase === "exploring" &&
+    input.expectedLastSequence === existing.lastSequence &&
+    terminal?.result === "partial" &&
+    RESUMABLE_TERMINAL_REASONS.includes(
+      terminal.reason as (typeof RESUMABLE_TERMINAL_REASONS)[number],
+    )
+  );
+}
 
 function validateAgentStep(input: AppendAgentStepInput): void {
   if (
@@ -348,11 +373,21 @@ async function appendAgentStepInternal(
           existing.startedAt !== input.startedAt
         )
           throw new Error("Agent run identity does not match existing row");
-        if (existing.phase === "terminal")
+        if (
+          input.expectedLastSequence !== undefined &&
+          input.expectedLastSequence !== existing.lastSequence
+        )
+          throw new Error("Agent run cursor changed before continuation claim");
+        if (
+          existing.phase === "terminal" &&
+          !isLegalContinuationClaim(existing, input)
+        )
           throw new Error("Terminal Agent run cannot accept another event");
         if (input.updatedAt < existing.updatedAt)
           throw new Error("Agent run updatedAt cannot move backwards");
       } else {
+        if (input.expectedLastSequence !== undefined)
+          throw new Error("Agent continuation references a missing run");
         await db.agentRuns.add({
           id: input.runId,
           turnId: input.turnId,

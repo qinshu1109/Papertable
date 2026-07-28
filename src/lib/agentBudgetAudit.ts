@@ -9,11 +9,19 @@ import {
 import type { AgentTerminalState } from "./agentTerminal";
 import type { AgentBudgetLedger, AgentBudgetRecord } from "./agentBudget";
 import type { StopReason } from "./agentTerminal";
+import type { AgentBudgetDelta } from "./agentEvents";
 
 export interface AgentAuditPersistence {
   runId: string;
   turnId: string;
   appendStep(input: AppendAgentStepInput): Promise<unknown>;
+  hostScope?: {
+    projectId: string;
+    libraryIds: string[];
+  };
+  /** Prevents event-id collisions when one persisted run has several exits. */
+  eventIdSuffix?: string;
+  objective?: string;
 }
 
 function cloneLedger(ledger: AgentBudgetLedger): AgentBudgetLedger {
@@ -28,6 +36,8 @@ function checkpoint(
   options: {
     stopReason?: StopReason;
     unresolvedQuestions?: string[];
+    addedBudget?: AgentBudgetDelta;
+    confirmedCitationChunkIds?: string[];
   } = {},
 ): AgentRunCheckpoint {
   const stopReason =
@@ -39,15 +49,21 @@ function checkpoint(
     objective: "回答用户问题",
     executedSearches: [...trace.searchQueries],
     readChunkIds: [...trace.readChunkIds],
-    confirmedCitationChunkIds: [],
+    confirmedCitationChunkIds: options.confirmedCitationChunkIds ?? [],
     unresolvedQuestions:
       options.unresolvedQuestions ??
       (ledger.exhaustionReason ? [`预算耗尽：${ledger.exhaustionReason}`] : []),
-    addedBudget: {},
+    addedBudget: options.addedBudget ?? {},
     budget: cloneLedger(ledger),
     ...(stopReason ? { stopReason } : {}),
     ...(terminal ? { terminal } : {}),
   };
+}
+
+function eventId(persistence: AgentAuditPersistence, base: string): string {
+  return persistence.eventIdSuffix
+    ? `${base}-${persistence.eventIdSuffix}`
+    : base;
 }
 
 async function append(
@@ -62,8 +78,18 @@ async function append(
   options: {
     stopReason?: StopReason;
     unresolvedQuestions?: string[];
+    addedBudget?: AgentBudgetDelta;
+    confirmedCitationChunkIds?: string[];
+    expectedLastSequence?: number;
   } = {},
 ): Promise<void> {
+  const nextCheckpoint = checkpoint(trace, ledger, phase, terminal, options);
+  if (persistence.objective) nextCheckpoint.objective = persistence.objective;
+  if (persistence.hostScope)
+    nextCheckpoint.hostScope = {
+      projectId: persistence.hostScope.projectId,
+      libraryIds: [...persistence.hostScope.libraryIds],
+    };
   await persistence.appendStep({
     runId: persistence.runId,
     turnId: persistence.turnId,
@@ -71,9 +97,12 @@ async function append(
     startedAt: trace.startedAt,
     updatedAt: occurredAt,
     ...(terminal ? { finishedAt: occurredAt } : {}),
-    checkpoint: checkpoint(trace, ledger, phase, terminal, options),
+    ...(options.expectedLastSequence === undefined
+      ? {}
+      : { expectedLastSequence: options.expectedLastSequence }),
+    checkpoint: nextCheckpoint,
     event: {
-      id,
+      id: eventId(persistence, id),
       schemaVersion: AGENT_EVENT_SCHEMA_VERSION,
       occurredAt,
       message,
@@ -304,7 +333,7 @@ export async function appendAgentBudgetStart(
     trace.startedAt,
     {
       kind: "exploration-started",
-      objective: "回答用户问题",
+      objective: persistence.objective ?? "回答用户问题",
       mode: trace.mode,
       budget: { ...ledger.limits },
     },
@@ -366,6 +395,109 @@ export async function appendAgentBudgetTerminal(
     },
     "terminal",
     terminal,
-    { unresolvedQuestions },
+    {
+      unresolvedQuestions,
+      confirmedCitationChunkIds: (options.citations ?? []).map(
+        (citation) => citation.chunkId,
+      ),
+    },
+  );
+}
+
+/**
+ * Atomically claims a bounded continuation: the schema-v1 budget-added event
+ * and the reopened checkpoint either both commit or neither does.
+ */
+export async function appendAgentBudgetContinuation(
+  persistence: AgentAuditPersistence,
+  trace: AgentRunTrace,
+  ledger: AgentBudgetLedger,
+  added: AgentBudgetDelta,
+  expectedLastSequence: number,
+  occurredAt: number,
+): Promise<void> {
+  await append(
+    persistence,
+    trace,
+    ledger,
+    `${persistence.runId}-continuation-${expectedLastSequence}`,
+    occurredAt,
+    {
+      kind: "budget-added",
+      added: { ...added },
+      ledger: cloneLedger(ledger),
+      reason: "user-requested same-run continuation",
+    },
+    "exploring",
+    undefined,
+    {
+      addedBudget: { ...added },
+      unresolvedQuestions: [],
+      expectedLastSequence,
+    },
+  );
+}
+
+/** Settle a killed in-flight run at its last committed step without ending it. */
+export async function appendAgentInterruptedCheckpoint(
+  persistence: AgentAuditPersistence,
+  trace: AgentRunTrace,
+  ledger: AgentBudgetLedger,
+  expectedLastSequence: number,
+  occurredAt: number,
+  addedBudget: AgentBudgetDelta = {},
+): Promise<void> {
+  await append(
+    persistence,
+    trace,
+    ledger,
+    `${persistence.runId}-interrupted-${expectedLastSequence}`,
+    occurredAt,
+    {
+      kind: "retry",
+      attempt: 0,
+      reason: "interrupted-recovery",
+    },
+    "interrupted",
+    undefined,
+    {
+      addedBudget: { ...addedBudget },
+      unresolvedQuestions: ["运行在完整步骤边界后中断，可从该检查点继续。"],
+      expectedLastSequence,
+    },
+  );
+}
+
+/**
+ * Reclaims an interrupted continuation whose budget was already committed.
+ * This cursor-only event prevents crash/reopen from charging the same
+ * continuation twice.
+ */
+export async function appendAgentInterruptedContinuationClaim(
+  persistence: AgentAuditPersistence,
+  trace: AgentRunTrace,
+  ledger: AgentBudgetLedger,
+  addedBudget: AgentBudgetDelta,
+  expectedLastSequence: number,
+  occurredAt: number,
+): Promise<void> {
+  await append(
+    persistence,
+    trace,
+    ledger,
+    `${persistence.runId}-continuation-recovered-${expectedLastSequence}`,
+    occurredAt,
+    {
+      kind: "retry",
+      attempt: 0,
+      reason: "interrupted-continuation-resumed",
+    },
+    "exploring",
+    undefined,
+    {
+      addedBudget: { ...addedBudget },
+      unresolvedQuestions: [],
+      expectedLastSequence,
+    },
   );
 }

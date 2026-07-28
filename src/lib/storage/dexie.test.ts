@@ -32,6 +32,7 @@ import {
   markAgentBudgetExhausted,
 } from "../agentBudget";
 import {
+  appendAgentBudgetRecord,
   appendAgentBudgetStart,
   appendAgentBudgetTerminal,
   appendAgentDuplicateCall,
@@ -40,6 +41,10 @@ import {
 } from "../agentBudgetAudit";
 import { createAgentTerminalState } from "../agentTerminal";
 import type { AgentRunTrace } from "../../types";
+import {
+  claimAgentContinuation,
+  settleInterruptedAgentAudit,
+} from "../agentResume";
 
 const snapshot = (): WorkspaceSnapshot => ({
   projects: [{ id: "p", name: "测试项目", pinned: false, updatedAt: 1 }],
@@ -549,6 +554,280 @@ test("TASK-007 retry, repair, capability invalidation and rejection survive clos
           "matching-capability-cache-invalidated-and-reprobe-started",
     ),
   );
+});
+
+async function seedResumableTerminalRun() {
+  await freshDb();
+  await saveWorkspace(snapshot());
+  const ledger = createAgentBudgetLedger({ rounds: 1, calls: 2 });
+  const trace: AgentRunTrace = {
+    mode: "native-tools",
+    startedAt: 10,
+    finishedAt: 10,
+    searchQueries: ["已完成搜索"],
+    hitCount: 1,
+    readChunkIds: [],
+    budget: ledger,
+  };
+  const persistence = {
+    runId: "run-resume",
+    turnId: "t",
+    appendStep: appendAgentStep,
+    hostScope: {
+      projectId: "p",
+      libraryIds: ["library-original"],
+    },
+    objective: "继续完成同一目标",
+  };
+  await appendAgentBudgetStart(persistence, trace, ledger);
+  consumeAgentBudget(ledger, "rounds", 1, 11);
+  const record = markAgentBudgetExhausted(ledger, "rounds_exhausted", 12);
+  await appendAgentBudgetRecord(persistence, trace, ledger, record);
+  await appendAgentBudgetTerminal(
+    persistence,
+    trace,
+    createAgentTerminalState("partial", "rounds_exhausted"),
+    13,
+    { answer: "有界部分结果" },
+  );
+  const audit = await loadAgentAudit("t");
+  assert.equal(audit?.kind, "event-sourced");
+  if (audit?.kind !== "event-sourced")
+    throw new Error("resumable audit was not created");
+  return audit;
+}
+
+test("terminal budget extension and checkpoint reopen commit atomically on the same run", async () => {
+  const audit = await seedResumableTerminalRun();
+  const beforeSequence = audit.run.lastSequence;
+  const resume = await claimAgentContinuation({
+    audit,
+    persistence: {
+      runId: audit.run.id,
+      turnId: audit.run.turnId,
+      appendStep: appendAgentStep,
+    },
+    projectId: "p",
+    addedBudget: { rounds: 2, calls: 3, wallMs: 10, tokens: 20 },
+    occurredAt: 14,
+  });
+  assert.equal(resume.trace.startedAt, 10);
+
+  db.close();
+  await db.open();
+  const reopened = await loadAgentAudit("t");
+  assert.equal(reopened?.kind, "event-sourced");
+  if (reopened?.kind !== "event-sourced") return;
+  assert.equal(reopened.run.id, "run-resume");
+  assert.equal(reopened.run.turnId, "t");
+  assert.equal(reopened.run.phase, "exploring");
+  assert.equal(reopened.run.finishedAt, undefined);
+  assert.equal(reopened.run.lastSequence, beforeSequence + 1);
+  assert.equal(
+    reopened.events[reopened.events.length - 1]?.eventType,
+    "budget-added",
+  );
+  assert.equal(reopened.run.checkpoint.budget?.used.rounds, 1);
+  assert.equal(reopened.run.checkpoint.budget?.limits.rounds, 3);
+  assert.equal(reopened.run.checkpoint.budget?.remaining.rounds, 2);
+  assert.deepEqual(reopened.run.checkpoint.hostScope, {
+    projectId: "p",
+    libraryIds: ["library-original"],
+  });
+});
+
+test("concurrent double resume has one atomic winner and no duplicate budget event", async () => {
+  const audit = await seedResumableTerminalRun();
+  const attempt = () =>
+    claimAgentContinuation({
+      audit,
+      persistence: {
+        runId: audit.run.id,
+        turnId: audit.run.turnId,
+        appendStep: appendAgentStep,
+      },
+      projectId: "p",
+      occurredAt: 14,
+    });
+  const results = await Promise.allSettled([attempt(), attempt()]);
+  assert.deepEqual(results.map((result) => result.status).sort(), [
+    "fulfilled",
+    "rejected",
+  ]);
+  const reopened = await loadAgentAudit("t");
+  assert.equal(reopened?.kind, "event-sourced");
+  if (reopened?.kind !== "event-sourced") return;
+  assert.equal(
+    reopened.events.filter(
+      (event) =>
+        event.message.kind === "budget-added" && Boolean(event.message.added),
+    ).length,
+    1,
+  );
+});
+
+test("crash during continuation claim preserves the terminal event and checkpoint", async () => {
+  for (const failurePoint of [
+    "after-run-ensured",
+    "after-event-inserted",
+    "after-run-state-changed",
+  ] as const) {
+    const audit = await seedResumableTerminalRun();
+    await assert.rejects(
+      claimAgentContinuation({
+        audit,
+        persistence: {
+          runId: audit.run.id,
+          turnId: audit.run.turnId,
+          appendStep: (step) =>
+            appendAgentStepWithFailureForTest(step, failurePoint),
+        },
+        projectId: "p",
+        occurredAt: 14,
+      }),
+      /injected crash/,
+    );
+    db.close();
+    await db.open();
+    const reopened = await loadAgentAudit("t");
+    assert.equal(reopened?.kind, "event-sourced");
+    if (reopened?.kind !== "event-sourced") continue;
+    assert.equal(reopened.run.phase, "terminal");
+    assert.deepEqual(reopened.run.checkpoint.terminal, {
+      result: "partial",
+      reason: "rounds_exhausted",
+    });
+    assert.equal(
+      reopened.events.filter(
+        (event) =>
+          event.message.kind === "budget-added" && Boolean(event.message.added),
+      ).length,
+      0,
+    );
+  }
+});
+
+test("interrupted run settles at the committed checkpoint and resumes after reopen", async () => {
+  await freshDb();
+  await saveWorkspace(snapshot());
+  const ledger = createAgentBudgetLedger({ rounds: 2 });
+  const trace: AgentRunTrace = {
+    mode: "native-tools",
+    startedAt: 10,
+    finishedAt: 10,
+    searchQueries: [],
+    hitCount: 0,
+    readChunkIds: [],
+    budget: ledger,
+  };
+  const persistence = {
+    runId: "run-interrupted",
+    turnId: "t",
+    appendStep: appendAgentStep,
+    hostScope: { projectId: "p", libraryIds: ["library-original"] },
+    objective: "中断后继续",
+  };
+  await appendAgentBudgetStart(persistence, trace, ledger);
+  const before = await loadAgentAudit("t");
+  assert.ok(before);
+  assert.equal(
+    await settleInterruptedAgentAudit({
+      audit: before!,
+      persistence,
+      occurredAt: 12,
+    }),
+    true,
+  );
+  db.close();
+  await db.open();
+  const interrupted = await loadAgentAudit("t");
+  assert.equal(interrupted?.kind, "event-sourced");
+  if (interrupted?.kind !== "event-sourced") return;
+  assert.equal(interrupted.run.phase, "interrupted");
+  assert.equal(interrupted.run.checkpoint.phase, "interrupted");
+  assert.equal(
+    interrupted.events[interrupted.events.length - 1]?.message.kind,
+    "retry",
+  );
+
+  await claimAgentContinuation({
+    audit: interrupted,
+    persistence: {
+      runId: interrupted.run.id,
+      turnId: interrupted.run.turnId,
+      appendStep: appendAgentStep,
+    },
+    projectId: "p",
+    addedBudget: { rounds: 1 },
+    occurredAt: 13,
+  });
+  const resumed = await loadAgentAudit("t");
+  assert.equal(
+    resumed?.kind === "event-sourced" ? resumed.run.phase : "",
+    "exploring",
+  );
+});
+
+test("crash after a committed budget extension resumes without charging it twice", async () => {
+  const terminal = await seedResumableTerminalRun();
+  const persistence = {
+    runId: terminal.run.id,
+    turnId: terminal.run.turnId,
+    appendStep: appendAgentStep,
+  };
+  await claimAgentContinuation({
+    audit: terminal,
+    persistence,
+    projectId: "p",
+    addedBudget: { rounds: 2, calls: 3 },
+    occurredAt: 14,
+  });
+  const claimed = await loadAgentAudit("t");
+  assert.equal(claimed?.kind, "event-sourced");
+  if (claimed?.kind !== "event-sourced") return;
+  const limitsAfterClaim = structuredClone(
+    claimed.run.checkpoint.budget?.limits,
+  );
+  await settleInterruptedAgentAudit({
+    audit: claimed,
+    persistence,
+    occurredAt: 15,
+  });
+
+  db.close();
+  await db.open();
+  const interrupted = await loadAgentAudit("t");
+  assert.equal(interrupted?.kind, "event-sourced");
+  if (interrupted?.kind !== "event-sourced") return;
+  assert.equal(interrupted.run.phase, "interrupted");
+  assert.deepEqual(interrupted.run.checkpoint.addedBudget, {
+    rounds: 2,
+    calls: 3,
+  });
+  await claimAgentContinuation({
+    audit: interrupted,
+    persistence,
+    projectId: "p",
+    // A new UI default must be ignored: this is recovery of the already
+    // purchased continuation, not a second user continuation.
+    addedBudget: { rounds: 99 },
+    occurredAt: 16,
+  });
+  const recovered = await loadAgentAudit("t");
+  assert.equal(recovered?.kind, "event-sourced");
+  if (recovered?.kind !== "event-sourced") return;
+  assert.deepEqual(recovered.run.checkpoint.budget?.limits, limitsAfterClaim);
+  assert.equal(
+    recovered.events.filter(
+      (event) =>
+        event.message.kind === "budget-added" && Boolean(event.message.added),
+    ).length,
+    1,
+  );
+  const lastEvent = recovered.events[recovered.events.length - 1];
+  assert.equal(lastEvent?.message.kind, "retry");
+  if (lastEvent?.message.kind === "retry")
+    assert.equal(lastEvent.message.reason, "interrupted-continuation-resumed");
 });
 
 test("incremental saves leave untouched rows in place", async () => {
