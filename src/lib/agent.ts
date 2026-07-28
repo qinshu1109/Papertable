@@ -137,6 +137,7 @@ export interface AgentRuntime {
   stream: typeof streamModel;
   search: typeof searchProjectNotes;
   read: typeof readProjectNotes;
+  target?: "web" | "desktop";
   now: () => number;
   sleep: (delayMs: number, signal: AbortSignal) => Promise<void>;
 }
@@ -222,6 +223,11 @@ function runtimeFor(input: AgentTurnInput): AgentRuntime {
     stream: input.runtime?.stream ?? streamModel,
     search: input.runtime?.search ?? searchProjectNotes,
     read: input.runtime?.read ?? readProjectNotes,
+    target:
+      input.runtime?.target ??
+      (typeof __PAPERTABLE_TARGET__ === "undefined"
+        ? "web"
+        : __PAPERTABLE_TARGET__),
     now: input.runtime?.now ?? Date.now,
     sleep:
       input.runtime?.sleep ??
@@ -1797,14 +1803,41 @@ export async function runAgentTurn(
       const strictOutcome = strictNoEvidenceOutcome(input, trace, []);
       if (strictOutcome) return strictOutcome;
       input.onPhase("answering");
-      await streamRound({
-        messages: input.built.messages,
-        signal: controller.signal,
-        withTools: false,
-        onToken: input.onToken,
-        runtime,
-        onUsage: (usage) => budget.provider(usage, "synthesis"),
-      });
+      const directRequest = () => {
+        let emitted = false;
+        return streamRound({
+          messages: input.built.messages,
+          signal: controller.signal,
+          withTools: false,
+          onToken: (event) => {
+            emitted = true;
+            input.onToken(event);
+          },
+          runtime,
+          onUsage: (usage) => budget.provider(usage, "synthesis"),
+        }).catch((cause) => {
+          // Retrying after visible output would duplicate or splice prose from
+          // two requests. Only a pre-token desktop disconnect is safe to replay.
+          if (emitted && cause instanceof ProviderError)
+            throw new Error(cause.message);
+          throw cause;
+        });
+      };
+      if (runtime.target === "desktop")
+        await classifiedProviderRequest({
+          request: directRequest,
+          signal: controller.signal,
+          runtime,
+          budget,
+          stage: "synthesis",
+          audit: input.audit,
+          trace,
+          nextAuditSequence: (() => {
+            let sequence = 0;
+            return () => ++sequence;
+          })(),
+        });
+      else await directRequest();
       await budget.wall("synthesis");
       return terminalOutcome(
         trace,

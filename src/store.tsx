@@ -475,7 +475,7 @@ interface Ctx {
   setActiveProject: (id: string) => void;
   renameProject: (id: string, name: string) => void;
   togglePinProject: (id: string) => void;
-  createProject: () => void;
+  createProject: (name?: string) => void;
   /** Creates a root only when the active project has no live cards. */
   createRootCard: () => string | null;
   deleteProject: (id: string) => void;
@@ -3134,13 +3134,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       ),
     [],
   );
-  const createProject = useCallback(() => {
+  const createProject = useCallback((name?: string) => {
     const projectId = uid("project");
     const rootId = uid("card");
+    const projectName =
+      name?.normalize("NFC").replace(/\s+/gu, " ").trim() || "未命名项目";
     setProjects((current) => [
       {
         id: projectId,
-        name: "未命名项目",
+        name: projectName,
         pinned: false,
         updatedAt: Date.now(),
       },

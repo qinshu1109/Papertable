@@ -14,6 +14,7 @@ import type {
   ProviderStreamEvent,
 } from "../types";
 import type { NoteChunk, NoteHit } from "./notes/types";
+import { ProviderError, providerErrorMessage } from "./provider/http";
 
 const capability = (mode: ProviderCapability["mode"]): ProviderCapability => ({
   schemaVersion: 1,
@@ -207,6 +208,72 @@ test("ordinary no-library chat remains a single deterministic provider stream", 
   assert.equal(completions, 0);
   assert.equal(searches, 0);
   assert.equal(reads, 0);
+});
+
+test("desktop ordinary chat retries a pre-token disconnect in the same turn", async () => {
+  let streams = 0;
+  const visible: string[] = [];
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: [],
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => visible.push(event.text),
+    runtime: baseRuntime({
+      target: "desktop",
+      stream: async function* () {
+        streams += 1;
+        if (streams === 1)
+          throw new ProviderError(
+            providerErrorMessage("disconnected"),
+            "disconnected",
+          );
+        yield { type: "token", text: "自动重连后的回答。", channel: "final" };
+        yield { type: "done", finishReason: "stop" };
+      },
+    }),
+  });
+
+  assert.equal(streams, 2);
+  assert.deepEqual(visible, ["自动重连后的回答。"]);
+  assert.deepEqual(outcome.terminal, { result: "completed", reason: "none" });
+});
+
+test("desktop ordinary chat never retries after visible tokens were emitted", async () => {
+  let streams = 0;
+  const visible: string[] = [];
+
+  await assert.rejects(
+    () =>
+      runAgentTurn({
+        built: built("general"),
+        projectId: "project-a",
+        libraryIds: [],
+        signal: new AbortController().signal,
+        onPhase: () => undefined,
+        onToken: (event) => visible.push(event.text),
+        runtime: baseRuntime({
+          target: "desktop",
+          stream: async function* () {
+            streams += 1;
+            yield { type: "token", text: "不完整正文", channel: "final" };
+            throw new ProviderError(
+              providerErrorMessage("disconnected"),
+              "disconnected",
+            );
+          },
+        }),
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentRunFailure);
+      assert.equal(error.message, providerErrorMessage("disconnected"));
+      return true;
+    },
+  );
+
+  assert.equal(streams, 1);
+  assert.deepEqual(visible, ["不完整正文"]);
 });
 
 test("unknown capability cannot execute any library workflow", async () => {
