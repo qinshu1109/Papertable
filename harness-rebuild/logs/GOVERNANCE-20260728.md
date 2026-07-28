@@ -3,6 +3,7 @@
 - Source: [Papertable Harness 13 卡持续执行计划](../sources/INPUT-20260728-002.md)
 - Branch: `governance/harness-orchestration-v2`
 - Integration target: `feat/readonly-note-harness-alpha`
+- PR: [#3](https://github.com/qinshu1109/Papertable/pull/3)
 - Status: implementation complete; waiting for ADR user gate
 
 ## Changes
