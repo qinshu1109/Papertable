@@ -11,6 +11,7 @@
 - `2026-07-28T10:54:17+08:00` — Read the required workspace context, TASK-003 card, accepted ADR-006, and TASK-002 dependency evidence in the prescribed order.
 - `2026-07-28T11:06:50+08:00` — Added SQLite schema v8 and Dexie schema v6, versioned `AgentMessage`/working-set boundary types, insert-only event APIs, legacy audit reads, and deterministic transaction crash/reopen coverage.
 - `2026-07-28T11:06:50+08:00` — Completed repository gates, workspace validation, migration checks, formatting, and scope audit. The card remains `in_progress` for supervisor acceptance.
+- `2026-07-28T11:12:09+08:00` — PR #5 Rust CI exposed two Rust 1.97 Clippy-only warnings (`type_complexity` and common enum prefixes) not covered by the local `pnpm verify` gate. Supervisor replaced the row tuple annotation with a named alias and shortened the test-only crash-point variants without changing behavior.
 
 ## Tests
 
@@ -28,6 +29,7 @@
 - `git diff --check` — PASS.
 - `git diff --exit-code -- src/lib/agent.ts src/store.tsx src/lib/context.ts src/lib/provider/http.ts src/lib/provider/tauri.ts src-tauri/src/llm.rs` — PASS; no runtime-loop, context, provider, or LLM wiring changed.
 - `rg -n "appendAgentStep|loadAgentAudit" src/lib/agent.ts src/store.tsx src-tauri/src/llm.rs` — no matches.
+- PR #5 first Rust CI — FAIL on two Clippy warnings only; targeted fix applied and local `cargo clippy --all-targets -- -D warnings` rerun before push.
 
 ## Verify matrix
 

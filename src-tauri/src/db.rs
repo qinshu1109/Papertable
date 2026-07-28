@@ -546,18 +546,20 @@ fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
     Ok(output)
 }
 
+type AgentRunRow = (
+    String,
+    String,
+    i64,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    i64,
+    String,
+);
+
 fn read_agent_run_by_turn(conn: &Connection, turn_id: &str) -> Result<Option<AgentRunRecord>> {
-    let row: Option<(
-        String,
-        String,
-        i64,
-        String,
-        i64,
-        i64,
-        Option<i64>,
-        i64,
-        String,
-    )> = conn
+    let row: Option<AgentRunRow> = conn
         .query_row(
             "SELECT id, turn_id, schema_version, phase, started_at, updated_at, finished_at,
                     last_sequence, checkpoint
@@ -845,9 +847,9 @@ fn str_field(value: &Value, key: &str) -> Option<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 enum AgentAppendCrashPoint {
-    AfterRunEnsured,
-    AfterEventInserted,
-    AfterRunStateChanged,
+    RunEnsured,
+    EventInserted,
+    RunStateChanged,
 }
 
 fn validate_agent_step(input: &AppendAgentStepInput) -> Result<(String, String)> {
@@ -969,7 +971,7 @@ fn append_agent_step_inner(
             0
         }
     };
-    maybe_inject_agent_crash(crash, AgentAppendCrashPoint::AfterRunEnsured)?;
+    maybe_inject_agent_crash(crash, AgentAppendCrashPoint::RunEnsured)?;
 
     let sequence = last_sequence + 1;
     tx.execute(
@@ -986,7 +988,7 @@ fn append_agent_step_inner(
             serde_json::to_string(&input.event.message)?,
         ],
     )?;
-    maybe_inject_agent_crash(crash, AgentAppendCrashPoint::AfterEventInserted)?;
+    maybe_inject_agent_crash(crash, AgentAppendCrashPoint::EventInserted)?;
 
     let changed = tx.execute(
         "UPDATE agent_runs SET
@@ -1005,7 +1007,7 @@ fn append_agent_step_inner(
     if changed != 1 {
         return Err(Error("Agent run 游标发生并发变化".into()));
     }
-    maybe_inject_agent_crash(crash, AgentAppendCrashPoint::AfterRunStateChanged)?;
+    maybe_inject_agent_crash(crash, AgentAppendCrashPoint::RunStateChanged)?;
 
     tx.commit()?;
     Ok(AgentEventRecord {
@@ -2047,9 +2049,9 @@ mod tests {
         for (index, kind) in AGENT_EVENT_TYPES.iter().enumerate() {
             let input = agent_step(kind, index);
             for crash in [
-                AgentAppendCrashPoint::AfterRunEnsured,
-                AgentAppendCrashPoint::AfterEventInserted,
-                AgentAppendCrashPoint::AfterRunStateChanged,
+                AgentAppendCrashPoint::RunEnsured,
+                AgentAppendCrashPoint::EventInserted,
+                AgentAppendCrashPoint::RunStateChanged,
             ] {
                 {
                     let mut conn = open(&path).unwrap();
