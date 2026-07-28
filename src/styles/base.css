@@ -836,6 +836,9 @@ textarea {
 .turn.selection-active .turn-toolbar {
   display: none;
 }
+.turn-toolbar.desktop-hidden {
+  display: none;
+}
 .tt-btn {
   display: inline-flex;
   align-items: center;
@@ -2314,6 +2317,12 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--sh-pop);
+}
+.desktop-turn-context-menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 194px;
+  max-width: calc(100vw - 16px);
 }
 
 /* 临时概念卡片：它们是内存草稿纸，不属于主卡片栈。 */

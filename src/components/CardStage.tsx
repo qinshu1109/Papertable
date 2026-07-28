@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowDownRight,
@@ -49,6 +50,7 @@ const spring = {
 const TURN_PREVIEW_LIMIT = 6_000;
 const TURN_PAGE_LIMIT = 4_000;
 const CARD_TITLE_LIMIT = 80;
+const IS_DESKTOP_BUILD = __PAPERTABLE_TARGET__ === "desktop";
 
 /** `Array.from` avoids slicing a surrogate pair in the middle. */
 function unicodeLength(value: string) {
@@ -84,11 +86,59 @@ function splitLongTurn(content: string, pageSize = TURN_PAGE_LIMIT) {
 }
 
 interface SelState {
+  scope: "selection" | "turn";
   x: number;
   y: number;
   text: string;
   blockText: string;
   turnId: string;
+}
+
+interface SelectionSnapshot {
+  text: string;
+  blockText: string;
+  turnId: string;
+  rects: Array<Pick<DOMRect, "bottom" | "left" | "right" | "top">>;
+}
+
+function selectionHost(node: Node | null) {
+  return (
+    node instanceof Element ? node : node?.parentElement
+  )?.closest<HTMLElement>("[data-turn-ai]");
+}
+
+function rangeContainsPoint(range: Range, x: number, y: number) {
+  return rectsContainPoint(Array.from(range.getClientRects()), x, y);
+}
+
+function rectsContainPoint(
+  rects: Array<Pick<DOMRect, "bottom" | "left" | "right" | "top">>,
+  x: number,
+  y: number,
+) {
+  return rects.some(
+    (rect) =>
+      x >= rect.left - 2 &&
+      x <= rect.right + 2 &&
+      y >= rect.top - 2 &&
+      y <= rect.bottom + 2,
+  );
+}
+
+function desktopMenuPosition(x: number, y: number, scope: SelState["scope"]) {
+  const gap = 8;
+  const estimatedWidth = 210;
+  const estimatedHeight = scope === "selection" ? 122 : 86;
+  return {
+    x: Math.max(
+      gap,
+      Math.min(x + gap, window.innerWidth - estimatedWidth - gap),
+    ),
+    y: Math.max(
+      gap,
+      Math.min(y + gap, window.innerHeight - estimatedHeight - gap),
+    ),
+  };
 }
 
 function sourceRevision(turn: Turn) {
@@ -137,6 +187,8 @@ export function CardStage() {
   const ancestors = path.slice(0, -1).slice(-3).reverse();
 
   const bodyRef = useRef<HTMLDivElement>(null);
+  const selectionMenuRef = useRef<HTMLDivElement>(null);
+  const desktopSelectionRef = useRef<SelectionSnapshot | null>(null);
   const followStreamingTail = useRef(true);
   const previousStreamingTurn = useRef<string | null>(null);
   const [sel, setSel] = useState<SelState | null>(null);
@@ -212,6 +264,8 @@ export function CardStage() {
     if (tempProjectRef.current === activeProjectId) return;
     tempProjectRef.current = activeProjectId;
     updateTempCards([]);
+    setSel(null);
+    desktopSelectionRef.current = null;
     setTempFlashId(null);
     setTempShakeId(null);
     setNoteSource(null);
@@ -220,6 +274,8 @@ export function CardStage() {
 
   useEffect(() => {
     setLongTurnId(null);
+    setSel(null);
+    desktopSelectionRef.current = null;
   }, [currentCardId]);
 
   useEffect(() => {
@@ -288,6 +344,7 @@ export function CardStage() {
     (id: string) => {
       rememberScroll();
       setSel(null);
+      desktopSelectionRef.current = null;
       setCurrentCard(id);
     },
     [currentCardId, setCurrentCard],
@@ -318,6 +375,7 @@ export function CardStage() {
 
   /* ---------- 真实浏览器文本选择 ---------- */
   useEffect(() => {
+    if (IS_DESKTOP_BUILD) return;
     const handler = () => {
       const s = window.getSelection();
       if (!s || s.isCollapsed) {
@@ -339,6 +397,7 @@ export function CardStage() {
       }
       const rect = s.getRangeAt(0).getBoundingClientRect();
       setSel({
+        scope: "selection",
         x: Math.max(
           10,
           Math.min(rect.left + rect.width / 2 - 96, window.innerWidth - 210),
@@ -360,6 +419,156 @@ export function CardStage() {
       document.removeEventListener("selectionchange", clearWhenCollapsed);
     };
   }, []);
+
+  /* 桌面右键可能先让系统选区失焦，因此静默保存最近一次真实选区。 */
+  useEffect(() => {
+    if (!IS_DESKTOP_BUILD) return;
+    const clearBeforeNewSelection = (event: PointerEvent) => {
+      if (event.button === 0) desktopSelectionRef.current = null;
+    };
+    const captureSelection = (event: MouseEvent) => {
+      if (event.button !== 0) return;
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+        desktopSelectionRef.current = null;
+        return;
+      }
+      const text = selection.toString().trim();
+      const anchorHost = selectionHost(selection.anchorNode);
+      const focusHost = selectionHost(selection.focusNode);
+      if (!text || !anchorHost || anchorHost !== focusHost) {
+        desktopSelectionRef.current = null;
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      const target = event.target instanceof Element ? event.target : null;
+      const block = target?.closest<HTMLElement>(
+        "p, li, blockquote, pre, h1, h2, h3, h4, h5, h6",
+      );
+      desktopSelectionRef.current = {
+        text,
+        blockText: (block?.innerText ?? anchorHost.innerText).slice(0, 260),
+        turnId: anchorHost.dataset.turnAi ?? "",
+        rects: Array.from(range.getClientRects(), (rect) => ({
+          bottom: rect.bottom,
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+        })),
+      };
+    };
+    document.addEventListener("pointerdown", clearBeforeNewSelection, true);
+    document.addEventListener("mouseup", captureSelection);
+    return () => {
+      document.removeEventListener(
+        "pointerdown",
+        clearBeforeNewSelection,
+        true,
+      );
+      document.removeEventListener("mouseup", captureSelection);
+    };
+  }, []);
+
+  const openDesktopTurnMenu = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (!IS_DESKTOP_BUILD || !card) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const host = target?.closest<HTMLElement>("[data-turn-ai]");
+      if (!host) return;
+      const turnId = host.dataset.turnAi;
+      const turn = card.turns.find(
+        (candidate) => candidate.id === turnId && candidate.role === "ai",
+      );
+      if (!turn) return;
+
+      event.preventDefault();
+      const selection = window.getSelection();
+      const range =
+        selection && !selection.isCollapsed && selection.rangeCount > 0
+          ? selection.getRangeAt(0)
+          : null;
+      const currentSelectedText = selection?.toString().trim() ?? "";
+      const currentSelectionIsHere =
+        Boolean(range && currentSelectedText) &&
+        selectionHost(selection?.anchorNode ?? null) === host &&
+        selectionHost(selection?.focusNode ?? null) === host &&
+        range !== null &&
+        rangeContainsPoint(range, event.clientX, event.clientY);
+      const savedSelection = desktopSelectionRef.current;
+      const savedSelectionIsHere =
+        savedSelection?.turnId === turn.id &&
+        rectsContainPoint(savedSelection.rects, event.clientX, event.clientY);
+      const selectionIsHere =
+        currentSelectionIsHere || Boolean(savedSelectionIsHere);
+      if (!selectionIsHere) desktopSelectionRef.current = null;
+      const selectedText = currentSelectionIsHere
+        ? currentSelectedText
+        : (savedSelection?.text ?? "");
+      const scope: SelState["scope"] = selectionIsHere ? "selection" : "turn";
+      const block = target?.closest<HTMLElement>(
+        "p, li, blockquote, pre, h1, h2, h3, h4, h5, h6",
+      );
+      const position = desktopMenuPosition(event.clientX, event.clientY, scope);
+
+      setMenuOpen(false);
+      setSpawn(null);
+      setSel({
+        scope,
+        ...position,
+        text: selectionIsHere ? selectedText : turn.content,
+        blockText:
+          (selectionIsHere
+            ? currentSelectionIsHere
+              ? block?.innerText
+              : savedSelection?.blockText
+            : turn.content
+          )?.slice(0, 260) ?? "",
+        turnId: turn.id,
+      });
+    },
+    [card],
+  );
+
+  useEffect(() => {
+    if (!IS_DESKTOP_BUILD || !sel) return;
+    const close = () => {
+      setSel(null);
+      desktopSelectionRef.current = null;
+    };
+    const closeFromOutside = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        selectionMenuRef.current?.contains(event.target)
+      ) {
+        return;
+      }
+      close();
+    };
+    document.addEventListener("pointerdown", closeFromOutside, true);
+    document.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("pointerdown", closeFromOutside, true);
+      document.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [sel]);
+
+  useLayoutEffect(() => {
+    if (!IS_DESKTOP_BUILD || !sel || !selectionMenuRef.current) return;
+    const rect = selectionMenuRef.current.getBoundingClientRect();
+    const gap = 8;
+    const x = Math.max(
+      gap,
+      Math.min(sel.x, window.innerWidth - rect.width - gap),
+    );
+    const y = Math.max(
+      gap,
+      Math.min(sel.y, window.innerHeight - rect.height - gap),
+    );
+    if (x === sel.x && y === sel.y) return;
+    setSel((current) => (current ? { ...current, x, y } : current));
+  }, [sel]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -514,6 +723,7 @@ export function CardStage() {
       ],
     });
     setSel(null);
+    desktopSelectionRef.current = null;
     window.getSelection()?.removeAllRanges();
     return id;
   };
@@ -573,8 +783,7 @@ export function CardStage() {
     lastCreated?.cardId === card.id
       ? EDGE_META[lastCreated.type].enterFrom
       : { x: 0, y: 18, rotate: 0 };
-  const desktopBuild = __PAPERTABLE_TARGET__ === "desktop";
-  const displayedTurns = desktopBuild
+  const displayedTurns = IS_DESKTOP_BUILD
     ? desktopTurnsForDisplay(card.turns)
     : card.turns;
   const aiTurns = displayedTurns.filter((t) => t.role === "ai");
@@ -598,6 +807,9 @@ export function CardStage() {
   };
   const longTurn = longTurnId
     ? card.turns.find((turn) => turn.id === longTurnId)
+    : undefined;
+  const actionTurn = sel
+    ? card.turns.find((turn) => turn.id === sel.turnId && turn.role === "ai")
     : undefined;
 
   return (
@@ -834,14 +1046,16 @@ export function CardStage() {
                     </>
                   )}
                 </div>
-                <button
-                  className="deep-btn"
-                  onClick={() => spawnChild()}
-                  title="以当前卡片为来源创建深挖卡片"
-                >
-                  <ArrowDownRight size={14} />
-                  深挖
-                </button>
+                {!IS_DESKTOP_BUILD && (
+                  <button
+                    className="deep-btn"
+                    onClick={() => spawnChild()}
+                    title="以当前卡片为来源创建深挖卡片"
+                  >
+                    <ArrowDownRight size={14} />
+                    深挖
+                  </button>
+                )}
               </div>
             </header>
 
@@ -849,6 +1063,7 @@ export function CardStage() {
               className="card-body scroll-y"
               ref={bodyRef}
               onScroll={rememberScroll}
+              onContextMenu={openDesktopTurnMenu}
             >
               <div className="card-body-inner">
                 {card.turns.length === 0 && (
@@ -873,7 +1088,11 @@ export function CardStage() {
                     index={aiTurns.findIndex((t) => t.id === turn.id) + 1}
                     isBranchPoint={flashTurn === turn.id}
                     streaming={streamingTurnId === turn.id}
-                    selectionActive={sel?.turnId === turn.id}
+                    selectionActive={
+                      !IS_DESKTOP_BUILD &&
+                      sel?.scope === "selection" &&
+                      sel.turnId === turn.id
+                    }
                     onConcept={(term, blockText, el) => {
                       recordConceptPreviewOpened({
                         cardId: card.id,
@@ -1097,8 +1316,8 @@ export function CardStage() {
         </AnimatePresence>
       </div>
 
-      {/* 文本选择工具栏 */}
-      {sel && (
+      {/* Web 保留原有的即时选区工具栏。 */}
+      {!IS_DESKTOP_BUILD && sel?.scope === "selection" && (
         <div
           className="sel-toolbar"
           style={{ left: sel.x, top: sel.y }}
@@ -1147,6 +1366,109 @@ export function CardStage() {
             <Copy size={13} />
             复制选区
           </button>
+        </div>
+      )}
+
+      {/* 桌面端只在回答正文右键时显示；路径导航仍由卡片底部负责。 */}
+      {IS_DESKTOP_BUILD && sel && actionTurn && (
+        <div
+          ref={selectionMenuRef}
+          className="menu desktop-turn-context-menu"
+          style={{ left: sel.x, top: sel.y }}
+          role="menu"
+          aria-label={
+            sel.scope === "selection" ? "选中文字操作" : "本轮回答操作"
+          }
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          {sel.scope === "selection" ? (
+            <>
+              <button
+                className="menu-item"
+                role="menuitem"
+                onClick={() =>
+                  spawnChild({
+                    turnId: sel.turnId,
+                    text: sel.text,
+                    blockText: sel.blockText,
+                  })
+                }
+              >
+                <CornerDownRight size={14} />
+                用选区创建卡片
+              </button>
+              <button
+                className="menu-item"
+                role="menuitem"
+                onClick={() => {
+                  addReference(
+                    {
+                      cardId: card.id,
+                      turnId: sel.turnId,
+                      text: sel.text,
+                      blockText: sel.blockText,
+                    },
+                    card.title,
+                  );
+                  setSel(null);
+                  desktopSelectionRef.current = null;
+                  window.getSelection()?.removeAllRanges();
+                }}
+              >
+                <Quote size={14} />
+                引用选中内容
+              </button>
+              <button
+                className="menu-item"
+                role="menuitem"
+                onClick={() => {
+                  copy(sel.text, "sel");
+                  setSel(null);
+                  desktopSelectionRef.current = null;
+                  window.getSelection()?.removeAllRanges();
+                }}
+              >
+                <Copy size={14} />
+                复制选中内容
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                className="menu-item"
+                role="menuitem"
+                onClick={() => {
+                  addReference(
+                    {
+                      cardId: card.id,
+                      turnId: actionTurn.id,
+                      text: actionTurn.content
+                        .replace(/[#*`>|-]/g, "")
+                        .trim()
+                        .slice(0, 70),
+                      blockText: actionTurn.content.slice(0, 200),
+                    },
+                    card.title,
+                  );
+                  setSel(null);
+                }}
+              >
+                <Quote size={14} />
+                引用本轮回答
+              </button>
+              <button
+                className="menu-item"
+                role="menuitem"
+                onClick={() => {
+                  copy(actionTurn.content, actionTurn.id);
+                  setSel(null);
+                }}
+              >
+                <Copy size={14} />
+                复制本轮回答
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -1300,7 +1622,7 @@ function TurnBlock({
       id={`turn-${turn.id}`}
     >
       <div
-        className="turn-toolbar"
+        className={`turn-toolbar${IS_DESKTOP_BUILD ? " desktop-hidden" : ""}`}
         role="toolbar"
         aria-label={`第 ${index} 轮操作`}
       >
