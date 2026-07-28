@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "scenario": "repair-retry-no-progress-and-interruption-visibility",
+  "events": [
+    {
+      "kind": "protocol-repaired",
+      "issue": "deterministic-tool-protocol-cleanup",
+      "action": "NFKC normalization",
+      "deterministic": true,
+      "expectedLabel": "确定性协议修复"
+    },
+    {
+      "kind": "protocol-repaired",
+      "issue": "ambiguous tool payload",
+      "action": "ambiguous-payload-requires-same-model-resend",
+      "deterministic": false,
+      "expectedLabel": "模型重发修复"
+    },
+    {
+      "kind": "retry",
+      "attempt": 1,
+      "reason": "rate-limited",
+      "delayMs": 250
+    },
+    {
+      "kind": "duplicate-call-detected",
+      "occurrences": 3,
+      "expectedStopReason": "no_progress"
+    },
+    {
+      "kind": "retry",
+      "attempt": 0,
+      "reason": "interrupted-recovery",
+      "expectedRunPhase": "interrupted"
+    }
+  ],
+  "assert": {
+    "deterministicAndModelResendAreDistinct": true,
+    "protocolPayloadNotPromoted": true,
+    "noProgressIsNotTruncation": true,
+    "interruptedCheckpointIsNotFabricatedTerminal": true,
+    "continueDeepIntegrationPreserved": true
+  }
+}

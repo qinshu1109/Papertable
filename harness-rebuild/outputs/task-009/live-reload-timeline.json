@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "scenario": "persisted-event-live-consumption-and-reload",
+  "appendOrder": [
+    "exploration-started",
+    "search-requested",
+    "search-completed",
+    "read-requested",
+    "read-completed",
+    "budget-added",
+    "final-synthesis",
+    "terminal"
+  ],
+  "liveAssertions": {
+    "source": "agent_events schema-v1 rows",
+    "pollsPersistedAudit": true,
+    "searchHitCountVisible": true,
+    "readSourcesExpandable": true,
+    "continuationBudgetVisibleBeforeTerminal": true
+  },
+  "reloadAssertions": {
+    "sameRunId": true,
+    "sameSequenceOrder": true,
+    "sameNodeCount": true,
+    "sameTerminal": true,
+    "sameBudgetLedger": true
+  }
+}

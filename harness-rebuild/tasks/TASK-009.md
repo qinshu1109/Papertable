@@ -1,7 +1,7 @@
 ---
 id: TASK-009
 title: 前端过程时间线与终态展示
-status: pending
+status: in_progress
 depends_on: [TASK-004, TASK-008]
 parallelizable: true
 isolation: outputs/task-009/

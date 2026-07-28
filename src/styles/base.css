@@ -1107,6 +1107,267 @@ textarea {
   padding: 4px 0;
 }
 
+.agent-presentation {
+  margin: 8px 0 13px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--raised) 74%, transparent);
+  color: var(--ink-2);
+  font-size: 11.5px;
+}
+.agent-terminal-banner {
+  display: grid;
+  grid-template-columns: max-content max-content 1fr;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--accent-soft);
+}
+.agent-terminal-banner.partial,
+.agent-terminal-banner.interrupted {
+  background: var(--branch-soft);
+}
+.agent-terminal-banner.failed,
+.agent-terminal-banner.aborted {
+  background: color-mix(in srgb, var(--danger) 9%, var(--card));
+}
+.agent-terminal-banner.refused {
+  background: color-mix(in srgb, var(--ctx) 10%, var(--card));
+}
+.agent-terminal-axis {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--card) 78%, transparent);
+  white-space: nowrap;
+}
+.agent-terminal-axis span {
+  color: var(--ink-3);
+  font-size: 9.5px;
+}
+.agent-terminal-axis b {
+  color: var(--ink);
+  font-size: 10.5px;
+}
+.agent-terminal-banner > p {
+  min-width: 0;
+  margin: 0;
+  line-height: 1.55;
+}
+.agent-terminal-flags {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.agent-terminal-flags span,
+.agent-repair-mode {
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--card) 78%, transparent);
+  color: var(--ink-2);
+  font-size: 9.5px;
+}
+.agent-budget-grid {
+  display: grid;
+  grid-template-columns: minmax(42px, 0.8fr) repeat(3, minmax(50px, 1fr));
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-3);
+  font-size: 9.5px;
+  text-align: right;
+}
+.agent-budget-grid > span {
+  padding: 2px 4px 4px;
+}
+.agent-budget-grid .agent-budget-heading {
+  color: var(--ink-2);
+  font-weight: 700;
+  text-align: left;
+}
+.agent-budget-row {
+  display: contents;
+}
+.agent-budget-row > * {
+  padding: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--line-soft) 72%, transparent);
+}
+.agent-budget-row b {
+  color: var(--ink-2);
+  text-align: left;
+}
+.agent-timeline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+}
+.agent-timeline-head > span,
+.agent-timeline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.agent-timeline-head > span {
+  color: var(--ink-3);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+.agent-timeline-toggle,
+.agent-timeline-node-toggle,
+.agent-timeline-promote {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.agent-timeline-toggle {
+  min-width: 0;
+  padding: 2px;
+  color: var(--ink-2);
+  font-weight: 650;
+  text-align: left;
+}
+.agent-timeline-list {
+  margin: 0;
+  padding: 0 9px 9px 21px;
+  list-style: none;
+}
+.agent-timeline-node {
+  position: relative;
+  padding: 0 0 7px 9px;
+  border-left: 1px solid var(--line);
+}
+.agent-timeline-node:last-child {
+  padding-bottom: 0;
+  border-left-color: transparent;
+}
+.agent-timeline-marker {
+  position: absolute;
+  top: 11px;
+  left: -4px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--card);
+  border-radius: 50%;
+  background: var(--ink-3);
+  box-shadow: 0 0 0 1px var(--line);
+}
+.agent-timeline-node.read-completed .agent-timeline-marker,
+.agent-timeline-node.terminal .agent-timeline-marker {
+  background: var(--accent);
+}
+.agent-timeline-node.protocol-repaired .agent-timeline-marker,
+.agent-timeline-node.retry .agent-timeline-marker {
+  background: var(--branch);
+}
+.agent-timeline-node-main {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--card);
+}
+.agent-timeline-node-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 6px;
+}
+.agent-timeline-node-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 1px;
+  text-align: left;
+}
+.agent-timeline-node-toggle > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+.agent-timeline-node-toggle b {
+  color: var(--ink-2);
+  font-size: 10.5px;
+}
+.agent-timeline-node-toggle small {
+  overflow: hidden;
+  color: var(--ink-3);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-timeline-promote {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  color: var(--ink-3);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+.agent-timeline-promote:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.agent-timeline-detail {
+  padding: 0 9px 8px 22px;
+  color: var(--ink-3);
+}
+.agent-timeline-detail > p {
+  margin: 3px 0;
+  line-height: 1.5;
+}
+.agent-repair-mode {
+  display: inline-block;
+  margin: 2px 0 3px;
+  background: var(--branch-soft);
+  color: var(--branch);
+}
+.agent-repair-mode.deterministic {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.agent-read-sources {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+.agent-read-sources article {
+  display: grid;
+  gap: 2px;
+  padding: 7px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  background: var(--raised);
+}
+.agent-read-sources b {
+  color: var(--ink-2);
+}
+.agent-read-sources span {
+  overflow-wrap: anywhere;
+  color: var(--branch);
+  font-size: 9.5px;
+}
+.agent-read-sources p {
+  margin: 2px 0 0;
+  color: var(--ink-2);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 /* Harness citations are explicit evidence handles, never invisible prompt text. */
 .note-citation-row {
   display: flex;
