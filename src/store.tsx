@@ -101,12 +101,18 @@ import {
   deleteReferences,
   loadAttentionState,
   importLibrary,
+  loadAgentAudit,
   loadWorkspace,
   putAttentionState,
   saveWorkspace,
   seedIfEmpty,
 } from "./lib/storage";
 import { appendAgentBudgetTerminal } from "./lib/agentBudgetAudit";
+import {
+  claimAgentContinuation,
+  recoverTurnFromAgentAudit,
+  settleInterruptedAgentAudit,
+} from "./lib/agentResume";
 import { EDGE_META } from "./types";
 import type {
   AnswerMode,
@@ -466,6 +472,7 @@ interface Ctx {
   send: (text: string) => void;
   stopStream: (cardId?: string) => void;
   retryLast: () => void;
+  continueAgentRun: (turnId: string) => void;
   contextForCurrent: () => BuiltContext;
   refreshProvider: () => Promise<ProviderHealth | null>;
   refreshNoteLibraries: () => Promise<void>;
@@ -595,6 +602,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
     >(),
   );
+  const continuationClaimsRef = useRef(new Set<string>());
   const toastTimer = useRef<number | null>(null);
   const persistTimer = useRef<number | null>(null);
   const attentionPersistTimer = useRef<number | null>(null);
@@ -691,8 +699,61 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // persisted streaming assistant turn before any UI state is exposed, and
       // wait for the storage transaction so refresh cannot resurrect it.
       const interrupted = recoverInterruptedTurns(next.cards);
-      if (interrupted.recoveredTurnIds.length) {
-        const recoveredWorkspace = { ...next, cards: interrupted.cards };
+      const recoveryCandidateIds = new Set(interrupted.recoveredTurnIds);
+      for (const card of interrupted.cards)
+        for (const turn of card.turns)
+          if (
+            turn.role === "ai" &&
+            (turn.status === "interrupted" ||
+              turn.agentRun?.terminal?.result === "partial")
+          )
+            recoveryCandidateIds.add(turn.id);
+      if (recoveryCandidateIds.size) {
+        let recoveredCards = interrupted.cards;
+        for (const turnId of recoveryCandidateIds) {
+          let audit = await loadAgentAudit(turnId);
+          if (
+            audit?.kind === "event-sourced" &&
+            audit.run.phase !== "terminal" &&
+            audit.run.phase !== "interrupted"
+          ) {
+            await settleInterruptedAgentAudit({
+              audit,
+              persistence: {
+                runId: audit.run.id,
+                turnId,
+                appendStep: appendAgentStep,
+                hostScope: audit.run.checkpoint.hostScope,
+              },
+              occurredAt: now,
+            });
+            audit = await loadAgentAudit(turnId);
+          }
+          recoveredCards = recoveredCards.map((card) => ({
+            ...card,
+            turns: card.turns.map((turn) =>
+              turn.id === turnId
+                ? recoverTurnFromAgentAudit(turn, audit)
+                : turn,
+            ),
+          }));
+          if (
+            audit?.kind === "event-sourced" &&
+            audit.run.phase !== "terminal" &&
+            audit.run.phase !== "interrupted"
+          )
+            await settleInterruptedAgentAudit({
+              audit,
+              persistence: {
+                runId: audit.run.id,
+                turnId,
+                appendStep: appendAgentStep,
+                hostScope: audit.run.checkpoint.hostScope,
+              },
+              occurredAt: now,
+            });
+        }
+        const recoveredWorkspace = { ...next, cards: recoveredCards };
         await applyChanges(diffWorkspace(next, recoveredWorkspace));
         if (!active) return;
         next = recoveredWorkspace;
@@ -1368,30 +1429,52 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       snapshotsSnapshot?: ContextSnapshot[];
       relation?: EdgeType;
       retryOf?: string;
+      resumeTurnId?: string;
     }) => {
       const target = input.cardsSnapshot.find(
         (card) => card.id === input.cardId,
       );
       if (!target || streamingTurnsRef.current[input.cardId]) return;
-      const aiId = uid("turn");
-      const aiTurn: Turn = {
-        id: aiId,
-        role: "ai",
-        content: "",
-        createdAt: Date.now(),
-        streaming: true,
-        status: "streaming",
-        model: settings.model,
-      };
-      const agentRunId = uid("agent-run");
-      const agentAudit = {
-        runId: agentRunId,
+      const existingTurn = input.resumeTurnId
+        ? target.turns.find(
+            (turn) => turn.id === input.resumeTurnId && turn.role === "ai",
+          )
+        : undefined;
+      if (input.resumeTurnId && !existingTurn) return;
+      const aiId = existingTurn?.id ?? uid("turn");
+      const aiTurn: Turn = existingTurn
+        ? {
+            ...existingTurn,
+            streaming: true,
+            status: "streaming",
+            error: undefined,
+            agentPhase: "searching",
+          }
+        : {
+            id: aiId,
+            role: "ai",
+            content: "",
+            createdAt: Date.now(),
+            streaming: true,
+            status: "streaming",
+            model: settings.model,
+          };
+      const newAgentRunId = uid("agent-run");
+      let agentAudit = {
+        runId: newAgentRunId,
         turnId: aiId,
         appendStep: appendAgentStep,
+        hostScope: undefined as
+          { projectId: string; libraryIds: string[] } | undefined,
+        eventIdSuffix: undefined as string | undefined,
+        objective: undefined as string | undefined,
       };
+      let continuationClaimed = false;
       updateCard(input.cardId, (card) => ({
         ...card,
-        turns: [...card.turns, aiTurn],
+        turns: existingTurn
+          ? card.turns.map((turn) => (turn.id === aiId ? aiTurn : turn))
+          : [...card.turns, aiTurn],
       }));
       const nextStreaming = {
         ...streamingTurnsRef.current,
@@ -1411,7 +1494,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             turns: card.turns.map((turn) =>
               turn.id === aiId &&
               turn.status === "streaming" &&
-              content.length >= turn.content.length
+              (Boolean(input.resumeTurnId) ||
+                content.length >= turn.content.length)
                 ? { ...turn, content }
                 : turn,
             ),
@@ -1446,6 +1530,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           view: null,
           settings: null,
         });
+        const resumeAudit = input.resumeTurnId
+          ? await loadAgentAudit(input.resumeTurnId)
+          : null;
         const built = buildContext({
           cards: input.cardsSnapshot,
           edges: input.edgesSnapshot ?? edges,
@@ -1453,31 +1540,43 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           references: input.references,
           currentCardId: input.cardId,
         });
+        agentAudit.objective =
+          [...built.messages]
+            .reverse()
+            .find((message) => message.role === "user")?.content ??
+          "回答用户问题";
         // 资料库绑定和“当前可用”是不同事实。桌面端在这一轮开始时重新检查
         // Vault 根目录，失效库绝不能继续把旧 SQLite 索引喂给模型。后续搜索/read
         // 仍会在 Rust 宿主侧再次检查，防止本轮运行中目录又被移走。
-        const boundLibraryIds = await noteLibraries.projectLibraryIds(
+        const currentlyBoundLibraryIds = await noteLibraries.projectLibraryIds(
           target.projectId,
         );
-        const libraries = boundLibraryIds.length
+        const frozenLibraryIds =
+          resumeAudit?.kind === "event-sourced"
+            ? resumeAudit.run.checkpoint.hostScope?.libraryIds
+            : undefined;
+        const scopeLibraryIds = input.resumeTurnId
+          ? (frozenLibraryIds ?? [])
+          : currentlyBoundLibraryIds;
+        const libraries = scopeLibraryIds.length
           ? await noteLibraries.listLibraries()
           : [];
-        let libraryIds = boundLibraryIds;
+        let libraryIds = scopeLibraryIds;
         let unavailableLibraries: Array<{ name: string; reason: string }> = [];
-        if (vault.available && boundLibraryIds.length) {
+        if (vault.available && scopeLibraryIds.length) {
           try {
             const resolved = await desktopProjectNoteScope(target.projectId);
             libraryIds = resolved.availableLibraryIds.filter((id) =>
-              boundLibraryIds.includes(id),
+              scopeLibraryIds.includes(id),
             );
             unavailableLibraries = resolved.unavailableLibraries
-              .filter((library) => boundLibraryIds.includes(library.id))
+              .filter((library) => scopeLibraryIds.includes(library.id))
               .map(({ name, reason }) => ({ name, reason }));
           } catch {
             // Scope status itself is a host operation.  If it cannot be read,
             // fail closed rather than silently falling back to stale indexes.
             libraryIds = [];
-            unavailableLibraries = boundLibraryIds.map((id) => ({
+            unavailableLibraries = scopeLibraryIds.map((id) => ({
               name:
                 libraries.find((library) => library.id === id)?.name ??
                 "已绑定资料库",
@@ -1486,7 +1585,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }
         }
         const allBoundLibrariesUnavailable =
-          boundLibraryIds.length > 0 && libraryIds.length === 0;
+          scopeLibraryIds.length > 0 && libraryIds.length === 0;
         const scopeWarning = noteScopeWarning(
           unavailableLibraries,
           libraryIds.length > 0,
@@ -1499,6 +1598,47 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         const capability = libraryIds.length
           ? await ensureProviderCapability()
           : undefined;
+        if (
+          input.resumeTurnId &&
+          (resumeAudit?.kind !== "event-sourced" ||
+            capability?.mode !== "native-tools" ||
+            !capability.streamingToolCalls ||
+            !capability.toolResultAccepted)
+        )
+          throw new Error(
+            "续跑必须保留原 run 的旗舰原生工具协议与宿主冻结作用域。",
+          );
+        const resume = input.resumeTurnId
+          ? await claimAgentContinuation({
+              audit: resumeAudit!,
+              persistence: {
+                runId:
+                  resumeAudit?.kind === "event-sourced"
+                    ? resumeAudit.run.id
+                    : "",
+                turnId: aiId,
+                appendStep: appendAgentStep,
+              },
+              projectId: target.projectId,
+              occurredAt: Date.now(),
+            })
+          : undefined;
+        if (resumeAudit?.kind === "event-sourced") {
+          continuationClaimed = true;
+          agentAudit = {
+            runId: resumeAudit.run.id,
+            turnId: aiId,
+            appendStep: appendAgentStep,
+            hostScope: resumeAudit.run.checkpoint.hostScope,
+            eventIdSuffix: `resume-${resumeAudit.run.lastSequence}`,
+            objective: resumeAudit.run.checkpoint.objective,
+          };
+        } else {
+          agentAudit.hostScope = {
+            projectId: target.projectId,
+            libraryIds: [...libraryIds],
+          };
+        }
         const builtForRun = withNoteScopeAvailabilityNotice(
           built,
           scopeWarning,
@@ -1509,6 +1649,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           libraryIds,
           libraryScopes,
           capability,
+          resume,
           signal: controller.signal,
           onPhase: (agentPhase) =>
             updateCard(input.cardId, (card) => ({
@@ -1597,7 +1738,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             void runBackgroundTasks(input.cardId, target.title, answer);
         }
       } catch (error) {
-        if (!controller.signal.aborted) {
+        if (input.resumeTurnId && !continuationClaimed) {
+          throttle.dispose();
+          updateCard(input.cardId, (card) => ({
+            ...card,
+            turns: card.turns.map((turn) =>
+              turn.id === aiId ? (existingTurn ?? turn) : turn,
+            ),
+          }));
+          showToast({
+            text:
+              error instanceof Error
+                ? error.message
+                : "无法认领同一 run 的续跑。",
+          });
+        } else if (!controller.signal.aborted) {
           throttle.dispose();
           const message =
             error instanceof Error ? error.message : "模型生成失败。";
@@ -1636,6 +1791,41 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             ),
           }));
           showToast({ text: message });
+        } else if (error instanceof AgentRunFailure) {
+          const agentRun = withHistoricalRetrievalEvidence(
+            error.trace,
+            error.readChunks,
+            error.searchHits,
+          );
+          updateCard(input.cardId, (card) => ({
+            ...card,
+            turns: card.turns.map((turn) =>
+              turn.id === aiId
+                ? {
+                    ...turn,
+                    streaming: false,
+                    status: "stopped",
+                    agentPhase: undefined,
+                    agentRun: {
+                      ...agentRun,
+                      terminal: undefined,
+                    },
+                  }
+                : turn,
+            ),
+          }));
+          const audit = await loadAgentAudit(aiId);
+          if (audit?.kind === "event-sourced")
+            await settleInterruptedAgentAudit({
+              audit,
+              persistence: {
+                runId: audit.run.id,
+                turnId: aiId,
+                appendStep: appendAgentStep,
+                hostScope: audit.run.checkpoint.hostScope,
+              },
+              occurredAt: Date.now(),
+            });
         }
       } finally {
         throttle.dispose();
@@ -1943,6 +2133,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     streamAnswer,
     streamingTurnId,
   ]);
+
+  const continueAgentRun = useCallback(
+    (turnId: string) => {
+      if (streamingTurnId || continuationClaimsRef.current.has(turnId)) return;
+      const card = cards.find((candidate) => candidate.id === currentCardId);
+      const turn = card?.turns.find((candidate) => candidate.id === turnId);
+      if (!card || !turn || turn.role !== "ai")
+        return showToast({ text: "没有找到可续跑的 Agent 轮次。" });
+      continuationClaimsRef.current.add(turnId);
+      void streamAnswer({
+        cardId: card.id,
+        cardsSnapshot: cards,
+        references,
+        resumeTurnId: turnId,
+      }).finally(() => continuationClaimsRef.current.delete(turnId));
+    },
+    [
+      cards,
+      currentCardId,
+      references,
+      showToast,
+      streamAnswer,
+      streamingTurnId,
+    ],
+  );
 
   const setProposalTrayOpen = useCallback((open: boolean) => {
     setProposalTrayOpenState(open);
@@ -3298,6 +3513,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       send,
       stopStream,
       retryLast,
+      continueAgentRun,
       contextForCurrent,
       refreshProvider,
       refreshNoteLibraries,
@@ -3388,6 +3604,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       send,
       stopStream,
       retryLast,
+      continueAgentRun,
       contextForCurrent,
       refreshProvider,
       refreshNoteLibraries,

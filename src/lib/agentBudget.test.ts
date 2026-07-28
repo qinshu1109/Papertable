@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import {
+  addAgentBudget,
   assertAgentBudgetInvariants,
   consumeAgentBudget,
   createAgentBudgetLedger,
@@ -69,6 +70,48 @@ test("budget records are append-only and exhaustion is an explicit record", () =
   );
   assert.equal(exhausted.exhaustionReason, "rounds_exhausted");
   assert.equal(ledger.exhaustionReason, "rounds_exhausted");
+  assertAgentBudgetInvariants(ledger);
+});
+
+test("continuation adds limits without resetting TASK-005 usage", () => {
+  const ledger = createAgentBudgetLedger({
+    rounds: 1,
+    calls: 2,
+    wallMs: 100,
+    tokens: 50,
+  });
+  consumeAgentBudget(ledger, "rounds", 1, 1);
+  consumeAgentBudget(ledger, "calls", 2, 2);
+  markAgentBudgetExhausted(ledger, "rounds_exhausted", 3);
+  const records = structuredClone(ledger.records);
+
+  addAgentBudget(ledger, {
+    rounds: 2,
+    calls: 3,
+    wallMs: 50,
+    tokens: 25,
+  });
+
+  assert.deepEqual(ledger.used, {
+    rounds: 1,
+    calls: 2,
+    wallMs: 0,
+    tokens: null,
+  });
+  assert.deepEqual(ledger.limits, {
+    rounds: 3,
+    calls: 5,
+    wallMs: 150,
+    tokens: 75,
+  });
+  assert.deepEqual(ledger.remaining, {
+    rounds: 2,
+    calls: 3,
+    wallMs: 150,
+    tokens: null,
+  });
+  assert.equal(ledger.exhaustionReason, undefined);
+  assert.deepEqual(ledger.records, records, "usage records remain append-only");
   assertAgentBudgetInvariants(ledger);
 });
 

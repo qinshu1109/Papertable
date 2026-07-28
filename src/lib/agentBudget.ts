@@ -1,4 +1,5 @@
 import type { StopReason } from "./agentTerminal";
+import type { AgentBudgetDelta } from "./agentEvents";
 
 export const AGENT_BUDGET_SCHEMA_VERSION = 1 as const;
 
@@ -218,6 +219,33 @@ export function markAgentBudgetExhausted(
     source: dimension === "wallMs" ? "clock" : "agent",
     stage,
   });
+}
+
+/**
+ * Extend the persisted run ledger without resetting any usage. The append-only
+ * schema-v1 `budget-added` event is the audit record; this function owns only
+ * the TASK-005 source-of-truth arithmetic.
+ */
+export function addAgentBudget(
+  ledger: AgentBudgetLedger,
+  added: AgentBudgetDelta,
+): AgentBudgetLedger {
+  for (const dimension of ["rounds", "calls", "wallMs", "tokens"] as const) {
+    const amount = finiteNonNegative(added[dimension] ?? 0, dimension);
+    ledger.limits[dimension] += amount;
+  }
+  for (const dimension of ["rounds", "calls", "wallMs"] as const)
+    ledger.remaining[dimension] = Math.max(
+      0,
+      ledger.limits[dimension] - ledger.used[dimension],
+    );
+  ledger.remaining.tokens =
+    ledger.used.tokens === null
+      ? null
+      : Math.max(0, ledger.limits.tokens - ledger.used.tokens);
+  delete ledger.exhaustionReason;
+  assertAgentBudgetInvariants(ledger);
+  return ledger;
 }
 
 export function assertAgentBudgetInvariants(ledger: AgentBudgetLedger): void {

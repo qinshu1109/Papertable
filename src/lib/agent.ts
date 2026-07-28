@@ -50,6 +50,10 @@ import {
   validateCompletedToolProtocol,
   visibleProtocolLeak,
 } from "./agentProtocolRepair";
+import {
+  normalizeCompletedSearchForResume,
+  type AgentResumeSeed,
+} from "./agentResume";
 
 const MAX_READS = 4;
 const MAX_SEARCH = 8;
@@ -144,6 +148,8 @@ export interface AgentTurnInput {
    */
   runtime?: Partial<AgentRuntime>;
   budgetLimits?: Partial<AgentBudgetLimits>;
+  /** Already-claimed same-run continuation, rebuilt from committed events. */
+  resume?: AgentResumeSeed;
   /** Host persistence boundary; secrets and filesystem scope never enter it. */
   audit?: AgentAuditPersistence;
   /** Same endpoint/model capability refresh; it must never select another protocol. */
@@ -185,7 +191,9 @@ function budgetController(input: {
   runtime: AgentRuntime;
   ledger: AgentBudgetLedger;
 }): AgentBudgetController {
-  let lastWallAt = input.trace.startedAt;
+  let lastWallAt = input.turn.resume
+    ? input.runtime.now()
+    : input.trace.startedAt;
   const persist = async (record: AgentBudgetRecord) => {
     assertAgentBudgetInvariants(input.ledger);
     if (input.turn.audit)
@@ -682,6 +690,8 @@ async function executeToolCalls(input: {
   onPhase: AgentTurnInput["onPhase"];
   failures: Map<string, number>;
   successfulCalls: Map<string, number>;
+  completedSearches?: Set<string>;
+  completedReadChunkIds?: Set<string>;
   onDuplicate: (signature: string, occurrences: number) => Promise<void>;
   audit?: AgentAuditPersistence;
   ledger: AgentBudgetLedger;
@@ -710,7 +720,38 @@ async function executeToolCalls(input: {
       });
       continue;
     }
-    const successfulSignature = successfulToolCallSignature(call);
+    const resumeArgs = safeJson(call.arguments);
+    const resumedSearchSignature =
+      call.name === "search_notes" &&
+      typeof resumeArgs?.query === "string" &&
+      input.completedSearches?.has(
+        normalizeCompletedSearchForResume(resumeArgs.query),
+      )
+        ? `search_notes:resume:${normalizeCompletedSearchForResume(
+            resumeArgs.query,
+          )}`
+        : undefined;
+    const resumedReadIds =
+      call.name === "read_notes" && Array.isArray(resumeArgs?.chunkIds)
+        ? resumeArgs.chunkIds.filter(
+            (id): id is string => typeof id === "string",
+          )
+        : [];
+    const resumedReadSignature =
+      resumedReadIds.length > 0 &&
+      resumedReadIds.every((id) => input.completedReadChunkIds?.has(id))
+        ? `read_notes:resume:${[...resumedReadIds].sort().join(",")}`
+        : undefined;
+    const successfulSignature =
+      resumedSearchSignature ??
+      resumedReadSignature ??
+      successfulToolCallSignature(call);
+    if (
+      (resumedSearchSignature || resumedReadSignature) &&
+      successfulSignature &&
+      !input.successfulCalls.has(successfulSignature)
+    )
+      input.successfulCalls.set(successfulSignature, 1);
     const successfulOccurrences = successfulSignature
       ? input.successfulCalls.get(successfulSignature)
       : undefined;
@@ -826,9 +867,11 @@ async function executeToolCalls(input: {
           throw new Error(
             "只能读取本轮 search_notes 已返回的片段；请求包含未检索 chunk。",
           );
-        const ids = requestedIds.slice(0, MAX_READS);
+        const ids = requestedIds
+          .filter((id) => !input.completedReadChunkIds?.has(id))
+          .slice(0, MAX_READS);
         if (!ids.length)
-          throw new Error("只能读取本轮 search_notes 已返回的片段。");
+          throw new Error("请求片段已经在本 run 的已读工作集中。");
         input.onPhase("reading");
         if (input.audit)
           await appendAgentReadRequested(
@@ -1210,13 +1253,22 @@ async function runNativeStateMachine(
   runtime: AgentRuntime,
   budget: AgentBudgetController,
 ): Promise<AgentOutcome> {
-  let messages = appendAgentSystem(input.built.messages, input.libraryScopes);
-  const readableIds = new Set<string>();
-  const readChunks: NoteChunk[] = [];
+  let messages = appendAgentSystem(
+    input.resume?.messages ?? input.built.messages,
+    input.libraryScopes,
+  );
+  const readableIds = new Set<string>(input.resume?.readableIds ?? []);
+  const readChunks: NoteChunk[] = structuredClone(
+    input.resume?.readChunks ?? [],
+  );
   const searchHits: NoteHit[] = [];
   const failures = new Map<string, number>();
   const successfulCalls = new Map<string, number>();
-  let auditSequence = 0;
+  const completedSearches = new Set(input.resume?.completedSearches ?? []);
+  const completedReadChunkIds = new Set(
+    input.resume?.completedReadChunkIds ?? [],
+  );
+  let auditSequence = input.resume?.auditSequenceStart ?? 0;
   const nextAuditSequence = () => {
     auditSequence += 1;
     return auditSequence;
@@ -1454,6 +1506,8 @@ async function runNativeStateMachine(
           onPhase: input.onPhase,
           failures,
           successfulCalls,
+          completedSearches,
+          completedReadChunkIds,
           onDuplicate: async (signature, occurrences) => {
             if (input.audit)
               await appendAgentDuplicateCall(
@@ -1922,19 +1976,28 @@ export async function runAgentTurn(
 ): Promise<AgentOutcome> {
   const runtime = runtimeFor(input);
   const now = runtime.now();
-  const trace: AgentRunTrace = {
-    mode: input.capability?.mode ?? "two-stage",
-    startedAt: now,
-    finishedAt: now,
-    searchQueries: [],
-    hitCount: 0,
-    readChunkIds: [],
-    errors: [],
-  };
-  const ledger = createAgentBudgetLedger(input.budgetLimits);
+  const trace: AgentRunTrace = input.resume
+    ? {
+        ...structuredClone(input.resume.trace),
+        finishedAt: now,
+        errors: [...(input.resume.trace.errors ?? [])],
+      }
+    : {
+        mode: input.capability?.mode ?? "two-stage",
+        startedAt: now,
+        finishedAt: now,
+        searchQueries: [],
+        hitCount: 0,
+        readChunkIds: [],
+        errors: [],
+      };
+  const ledger = input.resume
+    ? input.resume.ledger
+    : createAgentBudgetLedger(input.budgetLimits);
   trace.budget = ledger;
   const budget = budgetController({ turn: input, trace, runtime, ledger });
-  if (input.audit) await appendAgentBudgetStart(input.audit, trace, ledger);
+  if (input.audit && !input.resume)
+    await appendAgentBudgetStart(input.audit, trace, ledger);
   const controller = new AbortController();
   const relayAbort = () => controller.abort(input.signal.reason);
   input.signal.addEventListener("abort", relayAbort, { once: true });
@@ -1943,7 +2006,7 @@ export async function runAgentTurn(
   // without changing production cancellation behavior.
   const timeout = globalThis.setTimeout(
     () => controller.abort("Harness timed out"),
-    ledger.limits.wallMs,
+    Math.max(1, ledger.remaining.wallMs),
   );
   const nested: AgentTurnInput = { ...input, signal: controller.signal };
   try {

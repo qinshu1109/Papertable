@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "scenario": "concurrent-double-resume",
+  "startingCursor": 6,
+  "claims": [
+    {
+      "expectedLastSequence": 6,
+      "result": "committed",
+      "newSequence": 7
+    },
+    {
+      "expectedLastSequence": 6,
+      "result": "rejected",
+      "reason": "Agent run cursor changed before continuation claim"
+    }
+  ],
+  "assert": {
+    "budgetAddedEvents": 1,
+    "checkpointReopens": 1,
+    "providerGenerations": 1,
+    "newRuns": 0,
+    "newTurns": 0,
+    "appendOnlyOrderPreserved": true
+  }
+}

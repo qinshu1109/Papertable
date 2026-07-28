@@ -37,6 +37,7 @@ const AGENT_RUN_PHASES: &[&str] = &[
     "repairing",
     "retrying",
     "synthesizing",
+    "interrupted",
     "terminal",
 ];
 
@@ -183,6 +184,8 @@ pub struct AppendAgentStepInput {
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "skip_none")]
     pub finished_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "skip_none")]
+    pub expected_last_sequence: Option<i64>,
     pub checkpoint: Value,
     pub event: AgentStepEventInput,
 }
@@ -918,9 +921,10 @@ fn append_agent_step_inner(
         )));
     }
 
-    let existing: Option<(String, i64, String, i64, i64, i64)> = tx
+    let existing: Option<(String, i64, String, i64, i64, i64, String)> = tx
         .query_row(
-            "SELECT turn_id, schema_version, phase, last_sequence, started_at, updated_at
+            "SELECT turn_id, schema_version, phase, last_sequence, started_at, updated_at,
+                    checkpoint
              FROM agent_runs WHERE id = ?1",
             params![input.run_id],
             |row| {
@@ -931,19 +935,60 @@ fn append_agent_step_inner(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()?;
     let last_sequence = match existing {
-        Some((turn_id, schema_version, existing_phase, last_sequence, started_at, updated_at)) => {
+        Some((
+            turn_id,
+            schema_version,
+            existing_phase,
+            last_sequence,
+            started_at,
+            updated_at,
+            existing_checkpoint,
+        )) => {
             if turn_id != input.turn_id
                 || schema_version != input.schema_version
                 || started_at != input.started_at
             {
                 return Err(Error("Agent run 标识与既有记录不一致".into()));
             }
-            if existing_phase == "terminal" {
+            if input
+                .expected_last_sequence
+                .is_some_and(|expected| expected != last_sequence)
+            {
+                return Err(Error("Agent run 游标在续跑认领前已变化".into()));
+            }
+            let previous_checkpoint: Value = serde_json::from_str(&existing_checkpoint)?;
+            let continuation_claim = event_type == "budget-added"
+                && input
+                    .event
+                    .message
+                    .get("added")
+                    .is_some_and(Value::is_object)
+                && phase == "exploring"
+                && input.expected_last_sequence == Some(last_sequence)
+                && previous_checkpoint
+                    .get("terminal")
+                    .and_then(|terminal| terminal.get("result"))
+                    .and_then(Value::as_str)
+                    == Some("partial")
+                && matches!(
+                    previous_checkpoint
+                        .get("terminal")
+                        .and_then(|terminal| terminal.get("reason"))
+                        .and_then(Value::as_str),
+                    Some(
+                        "rounds_exhausted"
+                            | "calls_exhausted"
+                            | "wall_exhausted"
+                            | "tokens_exhausted"
+                    )
+                );
+            if existing_phase == "terminal" && !continuation_claim {
                 return Err(Error("终态 Agent run 不接受后续事件".into()));
             }
             if input.updated_at < updated_at {
@@ -952,6 +997,9 @@ fn append_agent_step_inner(
             last_sequence
         }
         None => {
+            if input.expected_last_sequence.is_some() {
+                return Err(Error("续跑认领引用了不存在的 Agent run".into()));
+            }
             tx.execute(
                 "INSERT INTO agent_runs (
                    id, turn_id, schema_version, phase, started_at, updated_at, finished_at,
@@ -1855,6 +1903,7 @@ mod tests {
             started_at: 100,
             updated_at: at,
             finished_at: (kind == "terminal").then_some(at),
+            expected_last_sequence: None,
             checkpoint: json!({
                 "phase": phase,
                 "objective": "测试崩溃恢复",
@@ -2158,6 +2207,127 @@ mod tests {
         assert_eq!(events[0].event_type, "exploration-started");
         assert_eq!(run.last_sequence, 1);
         assert_eq!(run.checkpoint["step"], 0);
+    }
+
+    fn seed_resumable_run(conn: &mut Connection) -> AppendAgentStepInput {
+        let mut start = agent_step("exploration-started", 0);
+        start.turn_id = "t".into();
+        start.checkpoint["hostScope"] = json!({"projectId":"p","libraryIds":["library-original"]});
+        append_agent_step(conn, &start).unwrap();
+
+        let mut terminal = agent_step("terminal", 1);
+        terminal.turn_id = "t".into();
+        terminal.checkpoint["terminal"] = json!({"result":"partial","reason":"rounds_exhausted"});
+        terminal.checkpoint["stopReason"] = json!("rounds_exhausted");
+        terminal.checkpoint["hostScope"] =
+            json!({"projectId":"p","libraryIds":["library-original"]});
+        terminal.event.message = json!({
+            "kind":"terminal",
+            "terminal":{"result":"partial","reason":"rounds_exhausted"},
+            "citations":[],
+            "unresolvedQuestions":["预算耗尽"]
+        });
+        append_agent_step(conn, &terminal).unwrap();
+
+        let mut continuation = agent_step("budget-added", 2);
+        continuation.turn_id = "t".into();
+        continuation.expected_last_sequence = Some(2);
+        continuation.checkpoint["phase"] = json!("exploring");
+        continuation.checkpoint["terminal"] = Value::Null;
+        continuation.checkpoint["stopReason"] = Value::Null;
+        continuation.checkpoint["hostScope"] =
+            json!({"projectId":"p","libraryIds":["library-original"]});
+        continuation.event.message = json!({
+            "kind":"budget-added",
+            "added":{"rounds":2,"calls":3},
+            "reason":"user-requested same-run continuation"
+        });
+        continuation
+    }
+
+    #[test]
+    fn same_run_continuation_has_one_atomic_cursor_winner() {
+        let mut conn = seeded();
+        let continuation = seed_resumable_run(&mut conn);
+        let event = append_agent_step(&mut conn, &continuation).unwrap();
+        assert_eq!(event.sequence, 3);
+        assert!(
+            append_agent_step(&mut conn, &continuation).is_err(),
+            "the stale terminal cursor cannot claim the run twice"
+        );
+        let AgentAudit::EventSourced { run, events } =
+            load_agent_audit(&conn, "t").unwrap().unwrap()
+        else {
+            panic!("run must stay event sourced");
+        };
+        assert_eq!(run.id, "run-1");
+        assert_eq!(run.phase, "exploring");
+        assert_eq!(run.finished_at, None);
+        assert_eq!(run.last_sequence, 3);
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.event_type == "budget-added" && event.message.get("added").is_some()
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn continuation_claim_crash_reopens_at_the_prior_terminal_checkpoint() {
+        for crash in [
+            AgentAppendCrashPoint::RunEnsured,
+            AgentAppendCrashPoint::EventInserted,
+            AgentAppendCrashPoint::RunStateChanged,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("resume-claim.sqlite3");
+            let continuation = {
+                let mut conn = open(&path).unwrap();
+                let mut seed = WorkspaceUpsert::default();
+                seed.projects.upserts = vec![project("p")];
+                seed.cards.upserts = vec![card("c", "p")];
+                seed.turns.upserts = vec![TurnRecord {
+                    card_id: "c".into(),
+                    turn: Turn {
+                        id: "t".into(),
+                        role: "user".into(),
+                        content: "问题".into(),
+                        created_at: 1,
+                        streaming: None,
+                        status: Some("complete".into()),
+                        error: None,
+                        model: None,
+                        favorite: None,
+                        agent_run: None,
+                        citations: None,
+                        agent_phase: None,
+                    },
+                }];
+                singletons(&mut seed);
+                apply_changes(&mut conn, &seed).unwrap();
+                seed_resumable_run(&mut conn)
+            };
+            {
+                let mut conn = open(&path).unwrap();
+                assert!(append_agent_step_inner(&mut conn, &continuation, Some(crash)).is_err());
+            }
+            let conn = open(&path).unwrap();
+            let AgentAudit::EventSourced { run, events } =
+                load_agent_audit(&conn, "t").unwrap().unwrap()
+            else {
+                panic!("terminal run must survive");
+            };
+            assert_eq!(run.phase, "terminal");
+            assert_eq!(
+                run.checkpoint["terminal"],
+                json!({"result":"partial","reason":"rounds_exhausted"})
+            );
+            assert_eq!(events.len(), 2);
+        }
     }
 
     #[test]

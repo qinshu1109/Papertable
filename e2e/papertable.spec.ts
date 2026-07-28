@@ -165,6 +165,262 @@ async function seedLongAnswer(page: import("@playwright/test").Page) {
   }, content);
 }
 
+async function seedSameRunResumeFixture(page: import("@playwright/test").Page) {
+  await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("papertable-web-v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const stores = [
+        "view",
+        "settings",
+        "turns",
+        "noteLibraries",
+        "noteDocuments",
+        "noteChunks",
+        "projectNoteLibraries",
+        "agentRuns",
+        "agentEvents",
+      ];
+      const tx = db.transaction(stores, "readwrite");
+      const viewRequest = tx.objectStore("view").get("main");
+      viewRequest.onsuccess = () => {
+        const projectId = viewRequest.result?.activeProjectId;
+        const cardId = viewRequest.result?.currentCardId;
+        if (!projectId || !cardId) return tx.abort();
+        const now = Date.now();
+        const runId = "e2e-same-run";
+        const turnId = "e2e-resumable-turn";
+        const libraryId = "e2e-resume-library";
+        const documentId = "e2e-resume-document";
+        const chunkId = "e2e-resume-chunk";
+        const objective = "海蓝计划的内部代号是什么？";
+        const priorSearch = `用户目标\n${objective}`;
+        const sourceText =
+          "唯一事实：海蓝计划的内部代号是 ORBIT-97。续跑只能引用这段已读原文。";
+        const citation = {
+          chunkId,
+          libraryId,
+          documentId,
+          title: "海蓝计划",
+          relativePath: "验收资料/海蓝计划.md",
+          documentHash: "e2e-resume-hash",
+          excerpt: sourceText,
+        };
+        const ledger = {
+          schemaVersion: 1,
+          limits: { rounds: 1, calls: 2, wallMs: 120_000, tokens: 32_000 },
+          used: { rounds: 1, calls: 1, wallMs: 50, tokens: null },
+          remaining: { rounds: 0, calls: 1, wallMs: 119_950, tokens: null },
+          tokenReporting: {
+            state: "unreported",
+            reportedTokens: 0,
+            reportedRequests: 0,
+            unreportedRequests: 0,
+          },
+          exhaustionReason: "rounds_exhausted",
+          records: [
+            {
+              sequence: 1,
+              occurredAt: now - 90,
+              dimension: "rounds",
+              amount: 1,
+              source: "agent",
+              stage: "exploration",
+            },
+            {
+              sequence: 2,
+              occurredAt: now - 80,
+              dimension: "calls",
+              amount: 1,
+              source: "agent",
+              stage: "exploration",
+            },
+            {
+              sequence: 3,
+              occurredAt: now - 20,
+              dimension: "rounds",
+              amount: 0,
+              source: "agent",
+              stage: "exploration",
+              exhaustionReason: "rounds_exhausted",
+            },
+          ],
+        };
+        const terminal = {
+          result: "partial",
+          reason: "rounds_exhausted",
+        };
+        const checkpoint = {
+          phase: "terminal",
+          objective,
+          executedSearches: [priorSearch],
+          readChunkIds: [chunkId],
+          confirmedCitationChunkIds: [chunkId],
+          unresolvedQuestions: ["仍需完成最终综合。"],
+          addedBudget: {},
+          hostScope: { projectId, libraryIds: [libraryId] },
+          budget: ledger,
+          stopReason: "rounds_exhausted",
+          terminal,
+        };
+        tx.objectStore("turns").put({
+          id: turnId,
+          cardId,
+          role: "ai",
+          content: "已保存有界部分结果。",
+          createdAt: now,
+          status: "complete",
+          model: "papertable-test-model",
+          agentRun: {
+            mode: "native-tools",
+            startedAt: now - 100,
+            finishedAt: now - 10,
+            searchQueries: [priorSearch],
+            hitCount: 1,
+            readChunkIds: [chunkId],
+            truncated: true,
+            terminal,
+            budget: ledger,
+          },
+          citations: [citation],
+        });
+        tx.objectStore("noteLibraries").put({
+          id: libraryId,
+          name: "续跑验收资料",
+          kind: "web-import",
+          availability: "ready",
+          createdAt: now - 100,
+          updatedAt: now - 100,
+        });
+        tx.objectStore("noteDocuments").put({
+          id: documentId,
+          libraryId,
+          relativePath: "验收资料/海蓝计划.md",
+          title: "海蓝计划",
+          tags: [],
+          versionHash: "e2e-resume-hash",
+          charCount: sourceText.length,
+          updatedAt: now - 100,
+          content: sourceText,
+        });
+        tx.objectStore("noteChunks").put({
+          id: chunkId,
+          libraryId,
+          documentId,
+          documentVersionHash: "e2e-resume-hash",
+          relativePath: "验收资料/海蓝计划.md",
+          titlePath: ["海蓝计划"],
+          tags: [],
+          ordinal: 0,
+          start: 0,
+          end: sourceText.length,
+          text: sourceText,
+        });
+        tx.objectStore("projectNoteLibraries").put({ projectId, libraryId });
+        tx.objectStore("agentRuns").put({
+          id: runId,
+          turnId,
+          schemaVersion: 1,
+          phase: "terminal",
+          startedAt: now - 100,
+          updatedAt: now - 10,
+          finishedAt: now - 10,
+          lastSequence: 6,
+          checkpoint,
+        });
+        const source = {
+          chunkId,
+          libraryId,
+          documentId,
+          title: "海蓝计划",
+          relativePath: "验收资料/海蓝计划.md",
+          documentHash: "e2e-resume-hash",
+          text: sourceText,
+        };
+        const messages = [
+          {
+            kind: "exploration-started",
+            objective,
+            mode: "native-tools",
+            budget: ledger.limits,
+          },
+          {
+            kind: "search-requested",
+            query: priorSearch,
+            callId: "e2e-search",
+          },
+          {
+            kind: "search-completed",
+            query: priorSearch,
+            callId: "e2e-search",
+            hitCount: 1,
+            hitChunkIds: [chunkId],
+          },
+          {
+            kind: "read-requested",
+            chunkIds: [chunkId],
+            callId: "e2e-read",
+          },
+          {
+            kind: "read-completed",
+            requestedChunkIds: [chunkId],
+            sources: [source],
+            callId: "e2e-read",
+          },
+          {
+            kind: "terminal",
+            terminal,
+            answer: "已保存有界部分结果。",
+            citations: [citation],
+            unresolvedQuestions: ["仍需完成最终综合。"],
+          },
+        ];
+        messages.forEach((message, index) =>
+          tx.objectStore("agentEvents").put({
+            id: `e2e-resume-event-${index + 1}`,
+            runId,
+            sequence: index + 1,
+            schemaVersion: 1,
+            eventType: message.kind,
+            occurredAt: now - 100 + index * 10,
+            message,
+          }),
+        );
+        const settingsRequest = tx.objectStore("settings").get("app");
+        settingsRequest.onsuccess = () => {
+          const settings = settingsRequest.result;
+          if (!settings) return tx.abort();
+          tx.objectStore("settings").put({
+            ...settings,
+            providerBaseUrl: "local-test-provider",
+            model: "papertable-test-model",
+            providerCapabilities: [
+              {
+                baseUrl: "local-test-provider",
+                model: "papertable-test-model",
+                mode: "native-tools",
+                streamingToolCalls: true,
+                toolResultAccepted: true,
+                testedAt: now,
+              },
+            ],
+          });
+        };
+        settingsRequest.onerror = () => tx.abort();
+      };
+      viewRequest.onerror = () => tx.abort();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () =>
+        reject(tx.error ?? new Error("无法写入同 run 续跑夹具"));
+    });
+    db.close();
+  });
+}
+
 test("desktop flow creates a real streamed card without an API key", async ({
   page,
 }) => {
@@ -689,6 +945,132 @@ test("a read-only library uses bounded tools, renders a controlled citation, and
   await expect(
     page.getByText("在已绑定的只读资料库中没有找到足够证据"),
   ).toBeVisible();
+});
+
+test("继续深挖 adds budget and resumes the persisted run after reload", async ({
+  page,
+}) => {
+  const agentRequests: Array<{
+    task?: string;
+    messages?: Array<{ role?: string; content?: string }>;
+  }> = [];
+  page.on("request", (request) => {
+    if (!request.url().includes("/api/llm/stream")) return;
+    const body = request.postDataJSON();
+    if (body?.task === "agent") agentRequests.push(body);
+  });
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await seedSameRunResumeFixture(page);
+  await page.reload();
+
+  const status = page.getByTestId("agent-resume-e2e-resumable-turn");
+  await expect(status).toContainText("本轮达到预算边界");
+  await expect(status.getByRole("button", { name: "继续深挖" })).toBeVisible();
+  // The resumable checkpoint itself must survive a second hydration before
+  // any continuation request is made.
+  await page.reload();
+  await expect(status).toContainText("完整历史已保存");
+  const before = await workspaceCounts(page);
+
+  await status.getByRole("button", { name: "继续深挖" }).click();
+  await expect(page.getByText("正在继续深挖同一轮…")).toBeVisible();
+  await expect(
+    page.getByText("我已阅读本轮检索到的资料，并据此给出回答。"),
+  ).toBeVisible();
+  await expect.poll(() => agentRequests.length).toBeGreaterThanOrEqual(2);
+
+  const firstMessages = agentRequests[0]?.messages ?? [];
+  // The native protocol guard is a separate leading system instruction; the
+  // persisted working-set payload immediately after it is exactly ADR-006's
+  // seven ordered categories.
+  const workingSetMessages = firstMessages.slice(1, 8);
+  expect(workingSetMessages.map((message) => message.role)).toEqual([
+    "user",
+    "system",
+    "system",
+    "system",
+    "system",
+    "system",
+    "system",
+  ]);
+  for (const [index, category] of [
+    "用户目标",
+    "已完成的去重搜索",
+    "实际读取的证据原文",
+    "已确认引用",
+    "未解决问题",
+    "上次停止原因",
+    "本次新增预算",
+  ].entries())
+    expect(workingSetMessages[index]?.content).toContain(category);
+  expect(JSON.stringify(workingSetMessages)).not.toContain("read-requested");
+  expect(JSON.stringify(workingSetMessages)).not.toContain(
+    "exploration-started",
+  );
+
+  const persisted = await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("papertable-web-v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const tx = db.transaction(
+      ["turns", "agentRuns", "agentEvents"],
+      "readonly",
+    );
+    const getAll = (store: string) =>
+      new Promise<unknown[]>((resolve, reject) => {
+        const request = tx.objectStore(store).getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    const [turns, runs, events] = await Promise.all([
+      getAll("turns"),
+      getAll("agentRuns"),
+      getAll("agentEvents"),
+    ]);
+    db.close();
+    return { turns, runs, events };
+  });
+  const after = await workspaceCounts(page);
+  expect(after.turns).toHaveLength(before.turns.length);
+  expect(
+    (persisted.runs as Array<{ id?: string; turnId?: string }>).filter(
+      (run) => run.turnId === "e2e-resumable-turn",
+    ),
+  ).toEqual([
+    expect.objectContaining({
+      id: "e2e-same-run",
+      turnId: "e2e-resumable-turn",
+    }),
+  ]);
+  const sameRunEvents = (
+    persisted.events as Array<{
+      runId?: string;
+      message?: { kind?: string; added?: unknown; query?: string };
+    }>
+  ).filter((event) => event.runId === "e2e-same-run");
+  expect(
+    sameRunEvents.filter(
+      (event) => event.message?.kind === "budget-added" && event.message.added,
+    ),
+  ).toHaveLength(1);
+  expect(
+    sameRunEvents.filter(
+      (event) =>
+        event.message?.kind === "search-completed" &&
+        event.message.query === "用户目标\n海蓝计划的内部代号是什么？",
+    ),
+  ).toHaveLength(1);
+
+  await page.reload();
+  await expect(
+    page.getByText("我已阅读本轮检索到的资料，并据此给出回答。"),
+  ).toBeVisible();
+  await expect(page.getByTestId("agent-resume-e2e-resumable-turn")).toHaveCount(
+    0,
+  );
 });
 
 test("390px keeps read-only Harness citations reachable without horizontal overflow", async ({

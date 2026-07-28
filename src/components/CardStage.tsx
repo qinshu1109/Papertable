@@ -113,6 +113,7 @@ export function CardStage() {
     rememberCardScroll,
     cardScroll,
     retryLast,
+    continueAgentRun,
     lastCreated,
     streamingTurnId,
     showToast,
@@ -915,6 +916,7 @@ export function CardStage() {
                       }
                     }}
                     onRetry={retryLast}
+                    onContinue={() => continueAgentRun(turn.id)}
                     onCitation={setNoteSource}
                     onOpenLongTurn={(turnId) => setLongTurnId(turnId)}
                     copied={copied === turn.id}
@@ -1171,6 +1173,7 @@ function TurnBlock({
   onCopy,
   onEditQuestion,
   onRetry,
+  onContinue,
   onCitation,
   onOpenLongTurn,
   copied,
@@ -1189,6 +1192,7 @@ function TurnBlock({
   onCopy: () => void;
   onEditQuestion: (text: string) => void;
   onRetry: () => void;
+  onContinue: () => void;
   onCitation: (citation: NoteCitation) => void;
   onOpenLongTurn: (turnId: string) => void;
   copied: boolean;
@@ -1196,6 +1200,19 @@ function TurnBlock({
   const [more, setMore] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState(false);
   const [questionDraft, setQuestionDraft] = useState("");
+  const terminal = turn.agentRun?.terminal;
+  const resumableBudgetExit =
+    terminal?.result === "partial" &&
+    [
+      "rounds_exhausted",
+      "calls_exhausted",
+      "wall_exhausted",
+      "tokens_exhausted",
+    ].includes(terminal.reason);
+  const resumableInterruption =
+    Boolean(turn.agentRun) &&
+    !terminal &&
+    (turn.status === "stopped" || turn.status === "interrupted");
 
   if (turn.role === "user") {
     return (
@@ -1361,6 +1378,33 @@ function TurnBlock({
           {turn.content.trim()
             ? "已停止，已保留生成内容。"
             : "已停止，未产生可显示的最终文本。"}
+        </div>
+      )}
+
+      {streaming && turn.agentRun && (
+        <div className="thinking" role="status" aria-live="polite">
+          <span className="dot-pulse" />
+          正在继续深挖同一轮…
+        </div>
+      )}
+
+      {(resumableBudgetExit || resumableInterruption) && !streaming && (
+        <div
+          className="thinking"
+          role="status"
+          data-testid={`agent-resume-${turn.id}`}
+          style={{ color: "var(--ink-2)", alignItems: "center" }}
+        >
+          {resumableBudgetExit
+            ? "本轮达到预算边界，完整历史已保存。"
+            : "本轮在完整步骤边界中断，检查点已保存。"}
+          <button
+            className="chip-btn"
+            onClick={onContinue}
+            style={{ marginLeft: 8 }}
+          >
+            继续深挖
+          </button>
         </div>
       )}
 

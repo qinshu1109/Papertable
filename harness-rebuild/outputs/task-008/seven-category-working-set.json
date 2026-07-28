@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "scenario": "adr-006-seven-category-provider-working-set",
+  "categories": [
+    {
+      "ordinal": 1,
+      "name": "user-goal",
+      "value": "核对海蓝计划的内部代号"
+    },
+    {
+      "ordinal": 2,
+      "name": "deduplicated-searches",
+      "value": ["海蓝计划 内部代号"],
+      "citationAuthority": false
+    },
+    {
+      "ordinal": 3,
+      "name": "actually-read-evidence-full-text",
+      "value": [
+        {
+          "chunkId": "read-1",
+          "relativePath": "验收资料/海蓝计划.md",
+          "text": "唯一事实：海蓝计划的内部代号是 ORBIT-97。"
+        }
+      ],
+      "citationAuthority": true
+    },
+    {
+      "ordinal": 4,
+      "name": "accepted-citations",
+      "value": ["read-1"]
+    },
+    {
+      "ordinal": 5,
+      "name": "unresolved-questions",
+      "value": ["仍需完成最终综合。"]
+    },
+    {
+      "ordinal": 6,
+      "name": "stop-reason",
+      "value": "rounds_exhausted"
+    },
+    {
+      "ordinal": 7,
+      "name": "newly-added-budget",
+      "value": {
+        "rounds": 4,
+        "calls": 8,
+        "wallMs": 120000,
+        "tokens": 32000
+      }
+    }
+  ],
+  "storedButExcludedFromProvider": [
+    "search-requested events",
+    "read-requested events",
+    "requested-only partial tool batch",
+    "protocol repair trajectory",
+    "retry trajectory",
+    "search-hit text that was never read"
+  ],
+  "assert": {
+    "categoryCount": 7,
+    "fullHistoryStillQueryable": true,
+    "fullHistoryBlindlyReplayed": false,
+    "onlyReadCompletedTextIsCitationQualified": true,
+    "absoluteVaultPathsExposed": false,
+    "hiddenReasoningExposed": false
+  }
+}

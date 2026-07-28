@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "scenario": "continuation-crash-reopen-equivalence",
+  "cases": [
+    {
+      "crashPoint": "before-budget-transaction-commit",
+      "reopenedPhase": "terminal",
+      "budgetAddedEvents": 0,
+      "nextAction": "atomically claim continuation"
+    },
+    {
+      "crashPoint": "after-budget-transaction-before-provider",
+      "settledPhase": "interrupted",
+      "budgetAddedEvents": 1,
+      "nextAction": "cursor-only interrupted-continuation-resumed claim"
+    },
+    {
+      "crashPoint": "after-last-complete-tool-step",
+      "settledPhase": "interrupted",
+      "partialRequestedOnlyBatchExecuted": false,
+      "nextAction": "resume after the last completed event"
+    }
+  ],
+  "assert": {
+    "sameRunId": true,
+    "sameTurnId": true,
+    "partialTraceDiscarded": false,
+    "budgetChargedTwice": false,
+    "eventAndCheckpointAtomic": true,
+    "hostFrozenScopePreserved": true,
+    "rustCurrentRunAllowlistPreserved": true,
+    "citationAuthorityPreserved": true
+  }
+}

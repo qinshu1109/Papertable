@@ -32,6 +32,7 @@ export type AgentRunPhase =
   | "repairing"
   | "retrying"
   | "synthesizing"
+  | "interrupted"
   | "terminal";
 
 export interface AgentBudgetDelta {
@@ -143,6 +144,11 @@ export interface AgentRunCheckpoint {
   confirmedCitationChunkIds: string[];
   unresolvedQuestions: string[];
   addedBudget: AgentBudgetDelta;
+  /** Frozen by the host when the run starts; never accepted from model JSON. */
+  hostScope?: {
+    projectId: string;
+    libraryIds: string[];
+  };
   /** TASK-005 persisted per-run ledger; absent only on pre-TASK-005 rows. */
   budget?: AgentBudgetLedger;
   stopReason?: StopReason;
@@ -178,6 +184,8 @@ export interface AppendAgentStepInput {
   startedAt: number;
   updatedAt: number;
   finishedAt?: number;
+  /** Optimistic cursor used to atomically claim one continuation generation. */
+  expectedLastSequence?: number;
   checkpoint: AgentRunCheckpoint;
   event: {
     id: string;
