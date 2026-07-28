@@ -889,11 +889,7 @@ mod artifact_writer_tests {
     fn desktop_artifact_writer_only_succeeds_after_a_real_round_trip() {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("Papertable-验收.zip");
-        write_export_artifact(
-            destination.display().to_string(),
-            vec![0, 1, 2, 3, 0xff],
-        )
-        .unwrap();
+        write_export_artifact(destination.display().to_string(), vec![0, 1, 2, 3, 0xff]).unwrap();
         assert_eq!(std::fs::read(destination).unwrap(), vec![0, 1, 2, 3, 0xff]);
     }
 

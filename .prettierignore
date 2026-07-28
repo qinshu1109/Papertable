@@ -10,3 +10,6 @@ pnpm-lock.yaml
 DESIGN_NOTES.md
 index.html
 src-tauri
+harness-rebuild/sources
+harness-rebuild/tasks/TASK-011.md
+**/target

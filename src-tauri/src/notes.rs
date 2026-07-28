@@ -2256,7 +2256,7 @@ mod tests {
             1,
         )
         .unwrap();
-        bind_project(&conn, "p", &[library.id.clone()]).unwrap();
+        bind_project(&conn, "p", std::slice::from_ref(&library.id)).unwrap();
         let hit = search_project(&conn, "p", "VAULT-42", Some(3))
             .unwrap()
             .pop()
