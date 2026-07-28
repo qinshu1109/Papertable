@@ -21,6 +21,8 @@ TASK-013 必须同时等待 TASK-011 与 TASK-012。TASK-001 已完成；任何�
 
 TASK-003 合入后先做只读文件重叠预检。只有附件线不修改状态机、事件 schema、`readableIds` Rust 数据层校验及主泳道共享热点时才开第二泳道；否则自动回退串行。放行时必须使用独立 worktree，WenzMark 工作路径指向该 worktree，禁止共享工作副本并发写。
 
+2026-07-28 预检结论：TASK-012 会修改 `agent.ts`、`store.tsx`、引用与索引路径，与 TASK-004~010 共享热点重叠；不启用第二泳道，TASK-012 回退主泳道串行。
+
 ## 每卡 WenzMark 设置
 
 - 模型固定 `gpt-5.6-sol`，推理固定 `high`；一次定向修复仍失败时，才以 `xhigh` 重跑。

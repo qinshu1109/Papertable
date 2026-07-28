@@ -1,7 +1,7 @@
 ---
 id: TASK-004
 title: 状态机重装：17条路径映射 + 3个既有bug修复
-status: in_progress
+status: done
 depends_on: [TASK-001, TASK-002, TASK-003]
 parallelizable: false
 isolation: outputs/task-004/

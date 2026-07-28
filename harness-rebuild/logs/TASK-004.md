@@ -66,4 +66,8 @@
 
 ## Acceptance
 
-- Supervisor technical acceptance: PASS. The card remains `in_progress` until its PR is merged.
+- Supervisor technical acceptance: PASS.
+- PR: `#6`
+- CI: Rust and verify PASS.
+- Merged into `feat/readonly-note-harness-alpha` as `b4951a1`.
+- Final status: `done`.
