@@ -7,6 +7,7 @@ import type {
 } from "../../types";
 import type { OutputChannel } from "../modelOutput";
 import { agentTerminalErrorMessage } from "../agentTerminal";
+import type { ProviderUsage } from "../agentBudget";
 
 export interface ProviderHealth {
   configured: boolean;
@@ -311,6 +312,7 @@ export async function* streamModel(input: {
           name?: string;
           arguments?: string;
           finishReason?: string;
+          usage?: ProviderUsage;
         };
         try {
           payload = JSON.parse(raw) as typeof payload;
@@ -349,6 +351,7 @@ export async function* streamModel(input: {
             ...(typeof payload.finishReason === "string"
               ? { finishReason: payload.finishReason }
               : {}),
+            ...(payload.usage ? { usage: payload.usage } : {}),
           };
           return;
         }
@@ -378,7 +381,11 @@ export async function completeModel(input: {
         type: "function";
         function: { name: ProviderTool["function"]["name"] };
       };
-}): Promise<{ content: string; toolCalls: ToolCall[] }> {
+}): Promise<{
+  content: string;
+  toolCalls: ToolCall[];
+  usage?: ProviderUsage;
+}> {
   let response: Response;
   try {
     response = await fetch("/api/llm/generate", {
@@ -395,6 +402,7 @@ export async function completeModel(input: {
   const body = (await readJsonSafely(response)) as {
     content?: string;
     toolCalls?: ToolCall[];
+    usage?: ProviderUsage;
   } | null;
   if (
     !response.ok ||
@@ -420,6 +428,7 @@ export async function completeModel(input: {
             typeof call.arguments === "string",
         )
       : [],
+    ...(body.usage ? { usage: body.usage as ProviderUsage } : {}),
   };
 }
 

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "scenario": "budget-audit-close-reopen",
+  "events": [
+    { "sequence": 1, "eventType": "exploration-started" },
+    {
+      "sequence": 2,
+      "eventType": "budget-added",
+      "record": {
+        "sequence": 2,
+        "dimension": "calls",
+        "amount": 0,
+        "exhaustionReason": "calls_exhausted"
+      }
+    }
+  ],
+  "checkpoint": {
+    "budget": {
+      "used": { "calls": 1 },
+      "remaining": { "calls": 0 },
+      "exhaustionReason": "calls_exhausted"
+    }
+  },
+  "assert": {
+    "eventSchemaVersionUnchanged": 1,
+    "eventRowsAppendOnly": true,
+    "checkpointMatchesLastEvent": true,
+    "reopenPreservesLedger": true
+  }
+}

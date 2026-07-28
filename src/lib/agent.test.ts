@@ -801,3 +801,266 @@ test("finishReason length invalidates the entire truncated tool-call batch", asy
   assert.equal(outcome.trace.truncated, true);
   assert.deepEqual(visible, ["截断批次已作废。"]);
 });
+
+function oneToolThenSynthesis(
+  options: {
+    firstDone?: Extract<ProviderStreamEvent, { type: "done" }>;
+    now?: () => number;
+    final?: "success" | "empty";
+  } = {},
+): AgentRuntime {
+  let request = 0;
+  return baseRuntime({
+    now: options.now ?? (() => 1),
+    stream: () => {
+      request += 1;
+      return request === 1
+        ? events([
+            {
+              type: "tool-call-delta",
+              index: 0,
+              id: "one-search",
+              name: "search_notes",
+              arguments: '{"query":"预算"}',
+            },
+            options.firstDone ?? {
+              type: "done",
+              finishReason: "tool_calls",
+            },
+          ])
+        : options.final === "empty"
+          ? events([{ type: "done", finishReason: "stop" }])
+          : events([
+              {
+                type: "token",
+                text: "预算耗尽后的真实综合。",
+                channel: "final",
+              },
+              { type: "done", finishReason: "stop" },
+            ]);
+    },
+    search: async () => [],
+  });
+}
+
+test("call budget exhaustion persists exact used and remaining values", async () => {
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: () => undefined,
+    budgetLimits: { calls: 1, rounds: 5 },
+    runtime: oneToolThenSynthesis(),
+  });
+
+  assert.deepEqual(outcome.terminal, {
+    result: "partial",
+    reason: "calls_exhausted",
+  });
+  assert.equal(outcome.trace.budget?.used.calls, 1);
+  assert.equal(outcome.trace.budget?.remaining.calls, 0);
+  assert.equal(outcome.trace.budget?.exhaustionReason, "calls_exhausted");
+});
+
+test("reported provider usage exhausts the token budget without fabricated counts", async () => {
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: () => undefined,
+    budgetLimits: { tokens: 10, rounds: 5 },
+    runtime: oneToolThenSynthesis({
+      firstDone: {
+        type: "done",
+        finishReason: "tool_calls",
+        usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+      },
+    }),
+  });
+
+  assert.deepEqual(outcome.terminal, {
+    result: "partial",
+    reason: "tokens_exhausted",
+  });
+  assert.equal(outcome.trace.budget?.used.tokens, null);
+  assert.equal(outcome.trace.budget?.remaining.tokens, null);
+  assert.equal(outcome.trace.budget?.tokenReporting.reportedTokens, 10);
+  assert.equal(outcome.trace.budget?.tokenReporting.state, "partial");
+  assert.equal(
+    outcome.trace.budget?.tokenReporting.unreportedRequests,
+    1,
+    "the synthesis request did not report usage and must remain explicit",
+  );
+});
+
+test("wall budget exhaustion enters real synthesis and records elapsed time", async () => {
+  const clock = [0, 0, 4_000, 4_000, 12_000, 12_000, 12_000, 12_000];
+  let tick = 0;
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: () => undefined,
+    budgetLimits: { wallMs: 10_000, rounds: 5 },
+    runtime: oneToolThenSynthesis({
+      now: () => clock[Math.min(tick++, clock.length - 1)]!,
+    }),
+  });
+
+  assert.deepEqual(outcome.terminal, {
+    result: "partial",
+    reason: "wall_exhausted",
+  });
+  assert.equal(outcome.trace.budget?.used.wallMs, 12_000);
+  assert.equal(outcome.trace.budget?.remaining.wallMs, 0);
+  assert.equal(outcome.trace.budget?.exhaustionReason, "wall_exhausted");
+});
+
+test("an in-flight synthesis timeout remains auditable after failure wrapping", async () => {
+  let request = 0;
+  let failure: AgentRunFailure | undefined;
+  try {
+    await runAgentTurn({
+      built: built("general"),
+      projectId: "project-a",
+      libraryIds: ["library-a"],
+      capability: capability("native-tools"),
+      signal: new AbortController().signal,
+      onPhase: () => undefined,
+      onToken: () => undefined,
+      budgetLimits: { wallMs: 20, rounds: 5 },
+      runtime: baseRuntime({
+        now: () => Date.now(),
+        stream: (input) => {
+          request += 1;
+          if (request === 1)
+            return events([{ type: "done", finishReason: "stop" }]);
+          return (async function* () {
+            if (input.signal.aborted) {
+              yield {
+                type: "error" as const,
+                message: "wall timer already elapsed",
+              };
+              return;
+            }
+            await new Promise<void>((resolve) =>
+              input.signal.addEventListener("abort", () => resolve(), {
+                once: true,
+              }),
+            );
+            throw new Error("transport stopped by the wall timer");
+          })();
+        },
+      }),
+    });
+  } catch (cause) {
+    assert.ok(cause instanceof AgentRunFailure);
+    failure = cause;
+  }
+
+  assert.ok(failure);
+  assert.equal(failure.trace.budget?.exhaustionReason, "wall_exhausted");
+  assert.ok(
+    failure.trace.budget?.records.some(
+      (record) =>
+        record.dimension === "wallMs" &&
+        record.exhaustionReason === "wall_exhausted",
+    ),
+  );
+});
+
+test("round exhaustion ledger retains the four TASK-004 rounds", async () => {
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: () => undefined,
+    runtime: budgetExhaustionRuntime({ final: "success" }),
+  });
+
+  assert.equal(outcome.trace.budget?.used.rounds, 4);
+  assert.equal(outcome.trace.budget?.remaining.rounds, 0);
+  assert.equal(outcome.trace.budget?.exhaustionReason, "rounds_exhausted");
+  assert.equal(
+    outcome.trace.budget?.records.filter(
+      (record) => record.dimension === "rounds" && record.amount === 1,
+    ).length,
+    4,
+  );
+});
+
+for (const scenario of [
+  {
+    name: "calls",
+    reason: "calls_exhausted",
+    limits: { calls: 1, rounds: 5 },
+    runtime: () => oneToolThenSynthesis({ final: "empty" }),
+  },
+  {
+    name: "tokens",
+    reason: "tokens_exhausted",
+    limits: { tokens: 10, rounds: 5 },
+    runtime: () =>
+      oneToolThenSynthesis({
+        final: "empty",
+        firstDone: {
+          type: "done",
+          finishReason: "tool_calls",
+          usage: { totalTokens: 10 },
+        },
+      }),
+  },
+  {
+    name: "wall",
+    reason: "wall_exhausted",
+    limits: { wallMs: 10_000, rounds: 5 },
+    runtime: () => {
+      const clock = [0, 0, 4_000, 4_000, 12_000];
+      let tick = 0;
+      return oneToolThenSynthesis({
+        final: "empty",
+        now: () => clock[Math.min(tick++, clock.length - 1)]!,
+      });
+    },
+  },
+] as const) {
+  test(`${scenario.name} exhaustion plus exhausted synthesis repair is failed/protocol_error without an answer`, async () => {
+    const visible: string[] = [];
+    let failure: AgentRunFailure | undefined;
+    try {
+      await runAgentTurn({
+        built: built("general"),
+        projectId: "project-a",
+        libraryIds: ["library-a"],
+        capability: capability("native-tools"),
+        signal: new AbortController().signal,
+        onPhase: () => undefined,
+        onToken: (event) => visible.push(event.text),
+        budgetLimits: scenario.limits,
+        runtime: scenario.runtime(),
+      });
+    } catch (cause) {
+      assert.ok(cause instanceof AgentRunFailure);
+      failure = cause;
+    }
+    assert.ok(failure);
+    assert.deepEqual(failure.terminal, {
+      result: "failed",
+      reason: "protocol_error",
+    });
+    assert.equal(failure.trace.budget?.exhaustionReason, scenario.reason);
+    assert.deepEqual(visible, []);
+  });
+}

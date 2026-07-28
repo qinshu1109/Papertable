@@ -12,6 +12,7 @@ import type {
   ToolCall,
 } from "../../types";
 import type { OutputChannel } from "../modelOutput";
+import type { ProviderUsage } from "../agentBudget";
 import type {
   BuildInfo,
   KeySource,
@@ -84,7 +85,12 @@ type WireEvent =
       arguments?: string;
     }
   | { type: "error"; message: string; code?: ProviderErrorCode }
-  | { type: "done"; stopped: boolean; finishReason?: string };
+  | {
+      type: "done";
+      stopped: boolean;
+      finishReason?: string;
+      usage?: ProviderUsage;
+    };
 
 /** Tauri Channel 回调桥接成与 Web 完全一样的异步事件流。 */
 export async function* streamModel(input: {
@@ -165,6 +171,7 @@ export async function* streamModel(input: {
         yield {
           type: "done",
           ...(event.finishReason ? { finishReason: event.finishReason } : {}),
+          ...(event.usage ? { usage: event.usage } : {}),
         };
         return;
       }
@@ -205,11 +212,16 @@ export async function completeModel(input: {
         type: "function";
         function: { name: ProviderTool["function"]["name"] };
       };
-}): Promise<{ content: string; toolCalls: ToolCall[] }> {
-  const result = await invoke<{ content?: string; toolCalls?: ToolCall[] }>(
-    "llm_complete",
-    { request: input },
-  );
+}): Promise<{
+  content: string;
+  toolCalls: ToolCall[];
+  usage?: ProviderUsage;
+}> {
+  const result = await invoke<{
+    content?: string;
+    toolCalls?: ToolCall[];
+    usage?: ProviderUsage;
+  }>("llm_complete", { request: input });
   const toolCalls = Array.isArray(result.toolCalls)
     ? result.toolCalls.filter(
         (call): call is ToolCall =>
@@ -226,7 +238,11 @@ export async function completeModel(input: {
       providerErrorMessage("empty-response"),
       "empty-response",
     );
-  return { content: result.content ?? "", toolCalls };
+  return {
+    content: result.content ?? "",
+    toolCalls,
+    ...(result.usage ? { usage: result.usage } : {}),
+  };
 }
 
 /** Text-only helper retained for title/concept/preview callers. */

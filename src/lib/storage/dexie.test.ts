@@ -26,6 +26,11 @@ import {
   AGENT_EVENT_SCHEMA_VERSION,
   type AppendAgentStepInput,
 } from "../agentEvents";
+import {
+  consumeAgentBudget,
+  createAgentBudgetLedger,
+  markAgentBudgetExhausted,
+} from "../agentBudget";
 
 const snapshot = (): WorkspaceSnapshot => ({
   projects: [{ id: "p", name: "测试项目", pinned: false, updatedAt: 1 }],
@@ -307,6 +312,66 @@ test("agent event and run cursor abort together at every IndexedDB transaction b
     assert.equal(await db.agentEvents.count(), 0);
     assert.equal((await loadAgentAudit("t"))?.kind, "legacy");
   }
+});
+
+test("budget ledger and append audit survive close and reopen", async () => {
+  await freshDb();
+  await saveWorkspace(snapshot());
+  await appendAgentStep(agentStep("exploration-started", 1));
+  const ledger = createAgentBudgetLedger({ calls: 1 });
+  consumeAgentBudget(ledger, "calls", 1, 12);
+  const record = markAgentBudgetExhausted(ledger, "calls_exhausted", 13);
+  await appendAgentStep({
+    runId: "run-1",
+    turnId: "t",
+    schemaVersion: AGENT_EVENT_SCHEMA_VERSION,
+    startedAt: 10,
+    updatedAt: 13,
+    checkpoint: {
+      phase: "exploring",
+      objective: "测试事件持久化",
+      executedSearches: [],
+      readChunkIds: [],
+      confirmedCitationChunkIds: [],
+      unresolvedQuestions: ["预算耗尽：calls_exhausted"],
+      addedBudget: {},
+      stopReason: "calls_exhausted",
+      budget: ledger,
+    },
+    event: {
+      id: "agent-event-budget",
+      schemaVersion: AGENT_EVENT_SCHEMA_VERSION,
+      occurredAt: 13,
+      message: {
+        kind: "budget-added",
+        record,
+        ledger,
+        reason: "TASK-005 usage append",
+      },
+    },
+  });
+
+  db.close();
+  await db.open();
+  const audit = await loadAgentAudit("t");
+  assert.equal(audit?.kind, "event-sourced");
+  if (audit?.kind !== "event-sourced") return;
+  assert.equal(audit.run.checkpoint.budget?.used.calls, 1);
+  assert.equal(audit.run.checkpoint.budget?.remaining.calls, 0);
+  assert.equal(
+    audit.run.checkpoint.budget?.exhaustionReason,
+    "calls_exhausted",
+  );
+  assert.deepEqual(
+    audit.events.map((event) => event.eventType),
+    ["exploration-started", "budget-added"],
+  );
+  assert.equal(
+    audit.events[1]?.message.kind === "budget-added"
+      ? audit.events[1].message.record?.sequence
+      : undefined,
+    2,
+  );
 });
 
 test("incremental saves leave untouched rows in place", async () => {

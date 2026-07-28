@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   extractMessage,
+  extractUsage,
   extractToolCalls,
   friendlyProviderError,
   providerErrorMessage,
@@ -349,6 +350,9 @@ function providerPayload(payload, stream) {
   return {
     model: providerConfig.model,
     stream,
+    ...(stream && payload.task === "agent"
+      ? { stream_options: { include_usage: true } }
+      : {}),
     messages: payload.messages.map((message) => {
       if (message.role === "assistant") {
         const calls = messageToolCalls(message);
@@ -794,9 +798,11 @@ const server = http.createServer(async (req, res) => {
       const parsed = JSON.parse(body);
       const content = extractMessage(parsed);
       const toolCalls = extractToolCalls(parsed);
+      const usage = extractUsage(parsed);
       return json(res, 200, {
         content,
         ...(toolCalls.length ? { toolCalls } : {}),
+        ...(usage ? { usage } : {}),
       });
     } catch (error) {
       const code = error?.name === "AbortError" ? "timeout" : "disconnected";

@@ -94,6 +94,7 @@ import {
 import {
   applyAttentionChanges,
   applyChanges,
+  appendAgentStep,
   clearWorkspace,
   deleteProjectCascade,
   deleteProposals,
@@ -105,6 +106,7 @@ import {
   saveWorkspace,
   seedIfEmpty,
 } from "./lib/storage";
+import { appendAgentBudgetTerminal } from "./lib/agentBudgetAudit";
 import { EDGE_META } from "./types";
 import type {
   AnswerMode,
@@ -1373,6 +1375,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         status: "streaming",
         model: settings.model,
       };
+      const agentRunId = uid("agent-run");
+      const agentAudit = {
+        runId: agentRunId,
+        turnId: aiId,
+        appendStep: appendAgentStep,
+      };
       updateCard(input.cardId, (card) => ({
         ...card,
         turns: [...card.turns, aiTurn],
@@ -1416,6 +1424,20 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         flush: throttle.flush,
       });
       try {
+        // TASK-005 budget events reference the turn row. Commit that one row
+        // before the first append-only Agent event instead of racing the
+        // ordinary 500 ms streaming autosave.
+        await applyChanges({
+          projects: { upserts: [] },
+          cards: { upserts: [] },
+          turns: { upserts: [{ ...aiTurn, cardId: input.cardId }] },
+          edges: { upserts: [] },
+          anchors: { upserts: [] },
+          snapshots: { upserts: [] },
+          references: { upserts: [] },
+          view: null,
+          settings: null,
+        });
         const built = buildContext({
           cards: input.cardsSnapshot,
           edges: input.edgesSnapshot ?? edges,
@@ -1496,6 +1518,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             answer = nextAnswer;
             throttle.push(answer);
           },
+          audit: agentAudit,
         };
         const outcome =
           allBoundLibrariesUnavailable && built.answerMode === "sources-only"
@@ -1548,6 +1571,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 : turn,
             ),
           }));
+          if (agentRun.budget)
+            await appendAgentBudgetTerminal(
+              agentAudit,
+              agentRun,
+              outcome.terminal,
+              Date.now(),
+              { answer, citations: cited.citations },
+            );
           // A host-produced strict refusal must not quietly create title /
           // concept background model calls.  That would defeat the promise
           // that an unavailable sources-only scope makes no model request.
@@ -1567,6 +1598,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                   error.searchHits,
                 )
               : undefined;
+          if (error instanceof AgentRunFailure && agentRun?.budget)
+            await appendAgentBudgetTerminal(
+              agentAudit,
+              agentRun,
+              error.terminal,
+              Date.now(),
+            );
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
