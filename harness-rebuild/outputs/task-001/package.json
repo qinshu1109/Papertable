@@ -1,0 +1,19 @@
+{
+  "name": "@papertable/task-001-pi-bridge-spike",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.17.0",
+  "scripts": {
+    "bundle": "vite build --config vite.config.ts",
+    "test": "tsx --test pi-rust-bridge.test.ts",
+    "typecheck": "tsc --noEmit --skipLibCheck --module ESNext --moduleResolution Bundler --target ES2022 --lib ES2022,DOM --types node pi-rust-bridge.ts pi-rust-bridge.test.ts browser-smoke-entry.ts vite.config.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.82.1",
+    "@earendil-works/pi-ai": "0.82.1",
+    "@types/node": "^24.10.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
