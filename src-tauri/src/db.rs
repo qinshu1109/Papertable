@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 9;
+const USER_VERSION: i64 = 10;
 const AGENT_EVENT_SCHEMA_VERSION: i64 = 1;
 const AGENT_EVENT_TYPES: &[&str] = &[
     "exploration-started",
@@ -393,6 +393,30 @@ fn migrate(conn: &Connection) -> Result<()> {
         // v7 只补一个用户可见的短状态。它不是推理链，也不参与上下文组装。
         if version < 7 && !has_column(conn, "turns", "agent_phase")? {
             conn.execute("ALTER TABLE turns ADD COLUMN agent_phase TEXT", [])?;
+        }
+        // v10 capability cache rows used booleans plus a two-stage fallback.
+        // They cannot prove TASK-010 admission and must be invalidated rather
+        // than guessed into the new three-stage schema.
+        if version < 10 {
+            let raw: Option<String> = conn
+                .query_row("SELECT doc FROM settings WHERE id = 'app'", [], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            if let Some(raw) = raw {
+                let mut settings: Value = serde_json::from_str(&raw)?;
+                if let Some(object) = settings.as_object_mut() {
+                    object.insert("providerCapabilities".into(), Value::Array(vec![]));
+                    object.insert(
+                        "providerCapabilityTtlMs".into(),
+                        Value::from(24 * 60 * 60 * 1_000_i64),
+                    );
+                    conn.execute(
+                        "UPDATE settings SET doc = ?1 WHERE id = 'app'",
+                        params![serde_json::to_string(&settings)?],
+                    )?;
+                }
+            }
         }
         conn.execute_batch(&format!("PRAGMA user_version = {USER_VERSION}"))?;
     }
@@ -1964,7 +1988,7 @@ mod tests {
     }
 
     #[test]
-    fn v9_migration_adds_harness_transport_allowlist_and_fts_without_rebuilding_turns() {
+    fn v10_migration_adds_harness_transport_allowlist_and_fts_without_rebuilding_turns() {
         let conn = Connection::open_in_memory().unwrap();
         // 模拟真用户 v5 的 turns：表已存在，所以 schema.sql 的 IF NOT EXISTS 不会替
         // 它补列，迁移必须显式 ALTER。
@@ -1991,7 +2015,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         let allowlist: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_master
@@ -2002,6 +2026,36 @@ mod tests {
             .unwrap();
         assert!(allowlist.contains("run_id"));
         assert!(allowlist.contains("chunk_id"));
+    }
+
+    #[test]
+    fn v10_migration_invalidates_legacy_capability_cache_and_sets_default_ttl() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO settings (id, doc) VALUES ('app', ?1)",
+            params![json!({
+                "id":"app",
+                "model":"legacy",
+                "providerCapabilities":[{
+                    "baseUrl":"https://legacy.example/v1",
+                    "model":"legacy",
+                    "mode":"two-stage",
+                    "streamingToolCalls":false,
+                    "toolResultAccepted":false,
+                    "testedAt":1
+                }]
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 9").unwrap();
+        migrate(&conn).unwrap();
+        let settings = read_singleton(&conn, "settings", "app").unwrap().unwrap();
+        assert_eq!(settings["providerCapabilities"], json!([]));
+        assert_eq!(
+            settings["providerCapabilityTtlMs"],
+            json!(24 * 60 * 60 * 1_000_i64)
+        );
     }
 
     #[test]
@@ -2042,7 +2096,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         let run_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM agent_runs", [], |row| row.get(0))
             .unwrap();

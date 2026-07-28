@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   ProviderError,
   getProviderHealth,
+  normalizeProviderCapabilityResult,
   providerErrorMessage,
   streamModel,
 } from "./http";
@@ -132,4 +133,35 @@ test("web stream preserves normalized provider usage on done", async () => {
       ]);
     },
   );
+});
+
+test("web and Tauri probes share one fail-closed public capability normalizer", () => {
+  const wire = {
+    mode: "native-tools",
+    protocolAdapterVersion: "openai-native-tools-v1",
+    gatewayResponseShape: "openai-chat-completions-v1",
+    toolCallEmission: { status: "passed" },
+    toolResultAcceptance: { status: "passed" },
+    streamingToolCallDelta: { status: "passed" },
+    testedAt: "2026-07-28T00:00:00.000Z",
+  };
+  const web = normalizeProviderCapabilityResult(wire);
+  const tauri = normalizeProviderCapabilityResult(structuredClone(wire));
+  assert.deepEqual(tauri, web);
+  assert.equal(web.mode, "native-tools");
+  assert.equal(
+    normalizeProviderCapabilityResult({ ...wire, mode: "unavailable" }).mode,
+    "unavailable",
+  );
+  assert.equal(
+    normalizeProviderCapabilityResult({ ...wire, testedAt: undefined }).mode,
+    "unavailable",
+  );
+
+  const malformed = normalizeProviderCapabilityResult({
+    ...wire,
+    streamingToolCallDelta: undefined,
+  });
+  assert.equal(malformed.mode, "unavailable");
+  assert.equal(malformed.streamingToolCallDelta.status, "failed");
 });

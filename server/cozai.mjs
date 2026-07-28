@@ -1,4 +1,17 @@
 const encoder = new TextEncoder();
+export const OPENAI_GATEWAY_RESPONSE_SHAPE = "openai-chat-completions-v1";
+
+/** Structural fingerprint only; it never contains response content. */
+export function gatewayResponseShape(payload) {
+  const choice = payload?.choices?.[0];
+  if (!choice || typeof choice !== "object") return "unknown";
+  if (
+    (choice.message && typeof choice.message === "object") ||
+    (choice.delta && typeof choice.delta === "object")
+  )
+    return OPENAI_GATEWAY_RESPONSE_SHAPE;
+  return "unknown";
+}
 
 export function providerErrorCode(status) {
   if (status === 401 || status === 403) return "unauthorized";
@@ -163,6 +176,7 @@ export async function relayOpenAiStream({
   let emittedToolCall = false;
   let finishReason;
   let usage;
+  let observedGatewayResponseShape;
 
   try {
     while (!signal?.aborted) {
@@ -177,6 +191,8 @@ export async function relayOpenAiStream({
         if (!data || data === "[DONE]") continue;
         try {
           const payload = JSON.parse(data);
+          const shape = gatewayResponseShape(payload);
+          if (shape !== "unknown") observedGatewayResponseShape ??= shape;
           const delta = extractDelta(payload);
           if (delta.content) {
             // 只有正文走 answer gate；工具调用和独立推理都绝不作为正文。
@@ -232,6 +248,9 @@ export async function relayOpenAiStream({
       stopped: Boolean(signal?.aborted),
       ...(finishReason ? { finishReason } : {}),
       ...(usage ? { usage } : {}),
+      ...(observedGatewayResponseShape
+        ? { gatewayResponseShape: observedGatewayResponseShape }
+        : {}),
     }),
   );
 }

@@ -23,6 +23,7 @@ import {
 } from "../lib/provider";
 import { useStore } from "../store";
 import type { ImportInput } from "../types";
+import type { CapabilityStageResult } from "../types";
 
 const IMPORT_FORMATS = [
   {
@@ -71,6 +72,19 @@ function noteLibraryIsUsable(
   availability: "ready" | "indexing" | "missing" | "error" | undefined,
 ) {
   return !availability || availability === "ready";
+}
+
+function capabilityStageLabel(stage: CapabilityStageResult | undefined) {
+  if (!stage) return "尚未探测";
+  if (stage.status === "passed") return "通过";
+  if (stage.status === "not-run") return "未完成";
+  return "未通过";
+}
+
+function localProbeTime(value: number | undefined) {
+  return value
+    ? new Date(value).toLocaleString("zh-CN", { hour12: false })
+    : "—";
 }
 
 const EXPORT_FORMATS = [
@@ -352,6 +366,11 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const {
     provider,
     agentMode,
+    providerCapability,
+    providerCapabilityTtlMs,
+    capabilityReprobing,
+    reprobeProviderCapability,
+    setProviderCapabilityTtlMs,
     refreshProvider,
     exportAllBackup,
     exportLibraryBackup,
@@ -562,13 +581,97 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           密钥不会回显、不进 IndexedDB、不打包进导出文件。接口地址仅接受 HTTPS
           或本机 HTTP。
         </p>
+        <div
+          className="capability-gate"
+          aria-label="Agent 能力准入"
+          style={{ marginTop: 18 }}
+        >
+          <div className="fmt-name">Agent 能力准入</div>
+          <p className="note-line" style={{ marginTop: 4 }}>
+            {capabilityReprobing
+              ? "正在重新探测同一接口、模型与原生工具协议…"
+              : agentMode === "native-tools"
+                ? "三段握手全部通过，Agent 模式可用。"
+                : `Agent 模式不可用：${
+                    providerCapability &&
+                    providerCapability.expiresAt <= Date.now()
+                      ? "能力探测缓存已过期；进入 Agent 前必须重新探测。"
+                      : (providerCapability?.unavailableReason ??
+                        "尚未完成三段原生工具能力探测。")
+                  }`}
+          </p>
+          <div className="attention-metrics capability-stage-grid">
+            <span>工具调用发出</span>
+            <b>{capabilityStageLabel(providerCapability?.toolCallEmission)}</b>
+            <span>工具结果回灌</span>
+            <b>
+              {capabilityStageLabel(providerCapability?.toolResultAcceptance)}
+            </b>
+            <span>流式工具调用增量</span>
+            <b>
+              {capabilityStageLabel(providerCapability?.streamingToolCallDelta)}
+            </b>
+          </div>
+          {[
+            providerCapability?.toolCallEmission,
+            providerCapability?.toolResultAcceptance,
+            providerCapability?.streamingToolCallDelta,
+          ].map(
+            (stage, index) =>
+              stage?.detail && (
+                <p className="note-line" key={index} style={{ marginTop: 4 }}>
+                  {stage.detail}
+                </p>
+              ),
+          )}
+          <p className="note-line" style={{ marginTop: 8 }}>
+            上次探测：{localProbeTime(providerCapability?.testedAt)}
+            <br />
+            到期时间：{localProbeTime(providerCapability?.expiresAt)}
+          </p>
+          <label className="settings-field">
+            <span>能力缓存 TTL（小时）</span>
+            <input
+              type="number"
+              min={1 / 60}
+              max={720}
+              step={1}
+              value={
+                Math.round((providerCapabilityTtlMs / 3_600_000) * 100) / 100
+              }
+              onChange={(event) =>
+                setProviderCapabilityTtlMs(
+                  Number(event.target.value) * 3_600_000,
+                )
+              }
+              aria-label="能力缓存 TTL（小时）"
+            />
+          </label>
+          <button
+            className="btn"
+            disabled={capabilityReprobing}
+            onClick={() =>
+              void reprobeProviderCapability().catch((error: unknown) =>
+                showToast({
+                  text:
+                    error instanceof Error
+                      ? error.message
+                      : "模型能力重新探测失败。",
+                }),
+              )
+            }
+          >
+            <RefreshCw size={14} />
+            {capabilityReprobing ? "重新探测中…" : "立即重新探测"}
+          </button>
+        </div>
         <div className="fmt-name" style={{ marginTop: 22, marginBottom: 8 }}>
           只读资料库
         </div>
         <p className="note-line" style={{ marginTop: 0 }}>
           当前项目只能检索你在这里明确绑定、且当前可用的资料库。不可用的资料库不会进入本轮检索范围；模型看不到真实
-          Vault 根目录，也没有写入权限。当前协议：
-          {agentMode === "native-tools" ? "原生工具" : "双阶段检索"}。
+          Vault 根目录，也没有写入权限。Agent 准入：
+          {agentMode === "native-tools" ? "原生工具可用" : "不可用"}。
         </p>
         {noteLibraries.length === 0 ? (
           <p className="note-line">

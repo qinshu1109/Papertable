@@ -347,7 +347,7 @@ test("historical retrieval audit proves old tool use without making it current e
       createdAt: 3,
       status: "error",
       agentRun: {
-        mode: "two-stage",
+        mode: "unavailable",
         startedAt: 3,
         finishedAt: 3,
         searchQueries: ["不应进入审计"],
@@ -391,7 +391,7 @@ test("historical retrieval audit proves old tool use without making it current e
 test("completed agent trace stores only bounded, relative read audit evidence", () => {
   const trace = withHistoricalRetrievalEvidence(
     {
-      mode: "two-stage",
+      mode: "unavailable",
       startedAt: 1,
       finishedAt: 2,
       searchQueries: ["唯一事实", "第二个检索词"],

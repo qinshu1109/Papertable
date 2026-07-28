@@ -167,6 +167,35 @@ class PapertableDb extends Dexie {
         agentEvents: "id, runId, &[runId+sequence], occurredAt, eventType",
       })
       .upgrade(() => undefined);
+    // v7 replaces the legacy boolean/two-stage capability cache with the
+    // schema-v1 three-stage admission record. Old rows are not trustworthy
+    // enough to upgrade, so they are invalidated and re-probed on demand.
+    this.version(7)
+      .stores({
+        ...schema,
+        interactionEvents:
+          "id, projectId, sessionId, createdAt, type, targetCardId, sourceCardId",
+        sessionBoundaries:
+          "id, projectId, localDate, startedAt, lastActiveAt, endedAt, processedAt",
+        proposals:
+          "id, projectId, sessionId, status, createdAt, expiresAt, purgeAt, candidateKey",
+        noteLibraries: "id, kind, updatedAt",
+        noteDocuments: "id, libraryId, relativePath, versionHash, updatedAt",
+        noteChunks: "id, libraryId, documentId, ordinal",
+        projectNoteLibraries: "[projectId+libraryId], projectId, libraryId",
+        agentRuns: "id, &turnId, updatedAt, phase",
+        agentEvents: "id, runId, &[runId+sequence], occurredAt, eventType",
+      })
+      .upgrade(async (tx) => {
+        const settings = (await tx.table("settings").get("app")) as
+          AppSettings | undefined;
+        if (!settings) return;
+        await tx.table("settings").put({
+          ...settings,
+          providerCapabilities: [],
+          providerCapabilityTtlMs: 24 * 60 * 60 * 1_000,
+        });
+      });
   }
 }
 

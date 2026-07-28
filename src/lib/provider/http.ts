@@ -1,5 +1,6 @@
 import type {
   AgentExecutionMode,
+  CapabilityStageResult,
   ProviderErrorCode,
   ProviderMessage,
   ProviderStreamEvent,
@@ -8,6 +9,10 @@ import type {
 import type { OutputChannel } from "../modelOutput";
 import { agentTerminalErrorMessage } from "../agentTerminal";
 import type { ProviderUsage } from "../agentBudget";
+import {
+  OPENAI_GATEWAY_RESPONSE_SHAPE,
+  PROTOCOL_ADAPTER_VERSION,
+} from "./capabilityGate";
 
 export interface ProviderHealth {
   configured: boolean;
@@ -102,10 +107,13 @@ export interface ProviderTool {
 
 export interface ProviderCapabilityResult {
   mode: AgentExecutionMode;
-  streamingToolCalls: boolean;
-  toolResultAccepted: boolean;
+  protocolAdapterVersion: string;
+  gatewayResponseShape: string;
+  toolCallEmission: CapabilityStageResult;
+  toolResultAcceptance: CapabilityStageResult;
+  streamingToolCallDelta: CapabilityStageResult;
   testedAt: string;
-  error?: string;
+  unavailableReason?: string;
 }
 
 /** 密钥实际存在哪。Web 端为本机服务的 .env.local；桌面端为 0600 文件。 */
@@ -202,19 +210,90 @@ export async function probeProviderCapabilities(): Promise<ProviderCapabilityRes
     headers: { "content-type": "application/json" },
     credentials: "same-origin",
   });
-  const body = (await readJsonSafely(response)) as Partial<
-    ProviderCapabilityResult & { message: string }
-  > | null;
+  const body = await readJsonSafely(response);
   if (!response.ok) throw providerErrorFromStatus(response.status);
+  return normalizeProviderCapabilityResult(body);
+}
+
+function normalizeStage(
+  value: unknown,
+  fallback: string,
+): CapabilityStageResult {
+  const stage =
+    value && typeof value === "object"
+      ? (value as { status?: unknown; detail?: unknown })
+      : undefined;
+  const status =
+    stage?.status === "passed" ||
+    stage?.status === "failed" ||
+    stage?.status === "not-run"
+      ? stage.status
+      : "failed";
   return {
-    mode: body?.mode === "native-tools" ? "native-tools" : "two-stage",
-    streamingToolCalls: Boolean(body?.streamingToolCalls),
-    toolResultAccepted: Boolean(body?.toolResultAccepted),
-    testedAt:
-      typeof body?.testedAt === "string"
-        ? body.testedAt
-        : new Date().toISOString(),
-    ...(typeof body?.error === "string" ? { error: body.error } : {}),
+    status,
+    ...(typeof stage?.detail === "string"
+      ? { detail: stage.detail.slice(0, 240) }
+      : status === "failed"
+        ? { detail: fallback }
+        : {}),
+  };
+}
+
+/** Shared web/Tauri public-shape validator; unknown fields fail closed. */
+export function normalizeProviderCapabilityResult(
+  value: unknown,
+): ProviderCapabilityResult {
+  const body =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const toolCallEmission = normalizeStage(
+    body.toolCallEmission,
+    "探测结果缺少工具调用发出状态。",
+  );
+  const toolResultAcceptance = normalizeStage(
+    body.toolResultAcceptance,
+    "探测结果缺少工具结果回灌状态。",
+  );
+  const streamingToolCallDelta = normalizeStage(
+    body.streamingToolCallDelta,
+    "探测结果缺少流式工具调用增量状态。",
+  );
+  const protocolAdapterVersion =
+    typeof body.protocolAdapterVersion === "string"
+      ? body.protocolAdapterVersion
+      : "unknown";
+  const gatewayResponseShape =
+    typeof body.gatewayResponseShape === "string"
+      ? body.gatewayResponseShape
+      : "unknown";
+  const stagesPassed = [
+    toolCallEmission,
+    toolResultAcceptance,
+    streamingToolCallDelta,
+  ].every((stage) => stage.status === "passed");
+  const testedAtValid =
+    typeof body.testedAt === "string" &&
+    !Number.isNaN(Date.parse(body.testedAt));
+  const admitted =
+    body.mode === "native-tools" &&
+    stagesPassed &&
+    testedAtValid &&
+    protocolAdapterVersion === PROTOCOL_ADAPTER_VERSION &&
+    gatewayResponseShape === OPENAI_GATEWAY_RESPONSE_SHAPE;
+  return {
+    mode: admitted ? "native-tools" : "unavailable",
+    protocolAdapterVersion,
+    gatewayResponseShape,
+    toolCallEmission,
+    toolResultAcceptance,
+    streamingToolCallDelta,
+    testedAt: testedAtValid
+      ? (body.testedAt as string)
+      : new Date().toISOString(),
+    ...(typeof body.unavailableReason === "string"
+      ? { unavailableReason: body.unavailableReason.slice(0, 240) }
+      : {}),
   };
 }
 
@@ -313,6 +392,7 @@ export async function* streamModel(input: {
           arguments?: string;
           finishReason?: string;
           usage?: ProviderUsage;
+          gatewayResponseShape?: string;
         };
         try {
           payload = JSON.parse(raw) as typeof payload;
@@ -352,6 +432,9 @@ export async function* streamModel(input: {
               ? { finishReason: payload.finishReason }
               : {}),
             ...(payload.usage ? { usage: payload.usage } : {}),
+            ...(typeof payload.gatewayResponseShape === "string"
+              ? { gatewayResponseShape: payload.gatewayResponseShape }
+              : {}),
           };
           return;
         }

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "scenario": "capability-cache-invalidation",
+  "defaultTtlMs": 86400000,
+  "rows": [
+    {
+      "trigger": "model-or-base-url-change",
+      "reason": "settings-changed",
+      "action": "invalidate-and-reprobe-before-agent-admission"
+    },
+    {
+      "trigger": "protocol-adapter-version-change",
+      "reason": "adapter-version-changed",
+      "action": "invalidate-and-reprobe-before-agent-admission"
+    },
+    {
+      "trigger": "runtime-protocol_error",
+      "reason": "runtime-protocol-error",
+      "action": "invalidate-exact-entry-and-reprobe-same-endpoint-model-protocol"
+    },
+    {
+      "trigger": "changed-gateway-response-shape",
+      "reason": "gateway-response-shape-changed",
+      "action": "invalidate-and-reprobe-before-agent-admission"
+    },
+    {
+      "trigger": "ttl-expired",
+      "reason": "ttl-expired",
+      "action": "reprobe-before-agent-admission"
+    }
+  ],
+  "assert": {
+    "runtimeDowngradeAllowed": false,
+    "expiredCacheAdmitted": false,
+    "lateProbeMayOverwriteNewSettings": false
+  }
+}

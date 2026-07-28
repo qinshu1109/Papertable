@@ -7,6 +7,7 @@ import {
   extractToolCalls,
   extractUsage,
   friendlyProviderError,
+  gatewayResponseShape,
   providerErrorCode,
   providerErrorMessage,
   relayOpenAiStream,
@@ -75,6 +76,15 @@ test("stream relay emits normalized token and done events", async () => {
   assert.match(chunks.join(""), /event: token/);
   assert.match(chunks.join(""), /你好/);
   assert.match(chunks.join(""), /event: done/);
+  assert.match(
+    chunks.join(""),
+    /"gatewayResponseShape":"openai-chat-completions-v1"/,
+  );
+  assert.equal(
+    gatewayResponseShape({ choices: [{ delta: { content: "x" } }] }),
+    "openai-chat-completions-v1",
+  );
+  assert.equal(gatewayResponseShape({ output: [] }), "unknown");
 });
 
 test("provider usage is transported only when the upstream reports it", async () => {

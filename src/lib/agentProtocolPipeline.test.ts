@@ -12,12 +12,18 @@ import type { NoteChunk, NoteHit } from "./notes/types";
 import { ProviderError, providerErrorMessage } from "./provider/http";
 
 const nativeCapability: ProviderCapability = {
+  schemaVersion: 1,
   baseUrl: "http://127.0.0.1:0/v1",
   model: "fake",
   mode: "native-tools",
-  streamingToolCalls: true,
-  toolResultAccepted: true,
+  protocolAdapterVersion: "openai-native-tools-v1",
+  gatewayResponseShape: "openai-chat-completions-v1",
+  toolCallEmission: { status: "passed" },
+  toolResultAcceptance: { status: "passed" },
+  streamingToolCallDelta: { status: "passed" },
   testedAt: 1,
+  expiresAt: Number.MAX_SAFE_INTEGER,
+  ttlMs: 86_400_000,
 };
 
 const built: BuiltContext = {
@@ -368,6 +374,21 @@ test("capability invalidation and re-probe precede retry from the stable checkpo
       },
       { type: "done", finishReason: "tool_calls" },
     ]);
+  const changedShape = () =>
+    events([
+      {
+        type: "tool-call-delta",
+        index: 0,
+        id: "shape-changed",
+        name: "search_notes",
+        arguments: '{"query":"must-not-execute"}',
+      },
+      {
+        type: "done",
+        finishReason: "tool_calls",
+        gatewayResponseShape: "changed-gateway-shape",
+      },
+    ]);
   const outcome = await runAgentTurn({
     built,
     projectId: "project-a",
@@ -390,7 +411,8 @@ test("capability invalidation and re-probe precede retry from the stable checkpo
     runtime: runtime({
       stream: () => {
         streamRequest += 1;
-        if (streamRequest <= 2) return bad();
+        if (streamRequest === 1) return changedShape();
+        if (streamRequest === 2) return bad();
         if (streamRequest === 3)
           return events([
             {
@@ -416,6 +438,13 @@ test("capability invalidation and re-probe precede retry from the stable checkpo
   });
   assert.equal(reprobes, 1);
   assert.equal(searches, 1);
+  assert.ok(
+    appended.some(
+      (step) =>
+        step.event.message.kind === "protocol-repaired" &&
+        /返回结构已变化|畸形原生工具协议/.test(step.event.message.issue),
+    ),
+  );
   assert.deepEqual(visible, ["基于稳定检查点完成。"]);
   assert.deepEqual(outcome.terminal, {
     result: "partial",

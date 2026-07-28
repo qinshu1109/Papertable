@@ -15,12 +15,18 @@ import type { NoteChunk, NoteHit } from "./notes/types";
 import { ProviderError } from "./provider/http";
 
 const nativeCapability: ProviderCapability = {
+  schemaVersion: 1,
   baseUrl: "http://127.0.0.1:0/v1",
   model: "fake",
   mode: "native-tools",
-  streamingToolCalls: true,
-  toolResultAccepted: true,
+  protocolAdapterVersion: "openai-native-tools-v1",
+  gatewayResponseShape: "openai-chat-completions-v1",
+  toolCallEmission: { status: "passed" },
+  toolResultAcceptance: { status: "passed" },
+  streamingToolCallDelta: { status: "passed" },
   testedAt: 1,
+  expiresAt: Number.MAX_SAFE_INTEGER,
+  ttlMs: 86_400_000,
 };
 
 const built = (answerMode: BuiltContext["answerMode"]): BuiltContext => ({

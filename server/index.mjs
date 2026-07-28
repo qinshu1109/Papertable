@@ -8,10 +8,14 @@ import {
   extractUsage,
   extractToolCalls,
   friendlyProviderError,
+  gatewayResponseShape,
+  OPENAI_GATEWAY_RESPONSE_SHAPE,
   providerErrorMessage,
   relayOpenAiStream,
   sseEvent,
 } from "./cozai.mjs";
+
+const PROTOCOL_ADAPTER_VERSION = "openai-native-tools-v1";
 import {
   emitFakeStream,
   fakeCompletion,
@@ -444,49 +448,80 @@ function parseSseEventText(text, eventName) {
  */
 async function probeProviderCapabilities(signal) {
   const testedAt = new Date().toISOString();
+  const stage = (status, detail) => ({
+    status,
+    ...(detail ? { detail } : {}),
+  });
   if (fakeModel) {
     return {
       mode: "native-tools",
-      streamingToolCalls: true,
-      toolResultAccepted: true,
+      protocolAdapterVersion: PROTOCOL_ADAPTER_VERSION,
+      gatewayResponseShape: OPENAI_GATEWAY_RESPONSE_SHAPE,
+      toolCallEmission: stage("passed"),
+      toolResultAcceptance: stage("passed"),
+      streamingToolCallDelta: stage("passed"),
       testedAt,
     };
   }
   if (!providerConfig.apiKey) {
     return {
-      mode: "two-stage",
-      streamingToolCalls: false,
-      toolResultAccepted: false,
+      mode: "unavailable",
+      protocolAdapterVersion: PROTOCOL_ADAPTER_VERSION,
+      gatewayResponseShape: "unknown",
+      toolCallEmission: stage("failed", "未配置模型密钥。"),
+      toolResultAcceptance: stage("not-run", "工具调用发出阶段未通过。"),
+      streamingToolCallDelta: stage("not-run", "未配置模型密钥。"),
       testedAt,
-      error: "未配置模型密钥。",
+      unavailableReason: "未配置模型密钥，Agent 模式不可用。",
     };
   }
 
-  let nonStreamingToolCalls = false;
-  let toolResultAccepted = false;
-  let streamingToolCalls = false;
-  let error;
+  let toolCallEmission;
+  let toolResultAcceptance = stage("not-run", "工具调用发出阶段未通过。");
+  let streamingToolCallDelta;
+  let observedShape = "unknown";
+  let gatewayShapeValid = true;
+  const observeShape = (shape, required = false) => {
+    if (shape === "unknown") {
+      if (required) gatewayShapeValid = false;
+      return;
+    }
+    if (shape !== OPENAI_GATEWAY_RESPONSE_SHAPE) {
+      gatewayShapeValid = false;
+      observedShape = shape;
+      return;
+    }
+    if (observedShape === "unknown") observedShape = shape;
+  };
   let responseMessage;
   let calls = [];
   try {
     const response = await providerFetch(probeRequest(), false, signal);
     const body = await response.text();
     if (!response.ok) {
-      error = friendlyProviderError(response.status, body);
+      toolCallEmission = stage(
+        "failed",
+        friendlyProviderError(response.status, body),
+      );
     } else {
       const parsed = JSON.parse(body);
+      observeShape(gatewayResponseShape(parsed), true);
       calls = extractToolCalls(parsed);
       responseMessage = extractMessage(parsed);
-      nonStreamingToolCalls = calls.length > 0;
+      toolCallEmission = calls.length
+        ? stage("passed")
+        : stage("failed", "没有返回强制工具调用。");
     }
   } catch (caught) {
-    error =
+    toolCallEmission = stage(
+      "failed",
       caught?.name === "AbortError"
         ? "模型能力探测超时。"
-        : "无法连接模型服务。";
+        : "无法连接模型服务。",
+    );
   }
 
-  if (nonStreamingToolCalls) {
+  if (toolCallEmission.status === "passed") {
     try {
       const first = calls[0];
       const response = await providerFetch(
@@ -514,46 +549,76 @@ async function probeProviderCapabilities(signal) {
       if (response.ok) {
         // 2xx is enough: this specifically checks that the provider accepts
         // assistant tool_calls + a tool-role result, not prose quality.
-        toolResultAccepted = true;
-      } else if (!error) {
-        error = friendlyProviderError(response.status, body);
+        toolResultAcceptance = stage("passed");
+        try {
+          observeShape(gatewayResponseShape(JSON.parse(body)));
+        } catch {
+          // The acceptance stage is deliberately transport-only. The initial
+          // and streaming stages own response-shape validation.
+        }
+      } else {
+        toolResultAcceptance = stage(
+          "failed",
+          friendlyProviderError(response.status, body),
+        );
       }
     } catch (caught) {
-      if (!error)
-        error =
-          caught?.name === "AbortError"
-            ? "模型能力探测超时。"
-            : "模型不接受工具结果回填。";
+      toolResultAcceptance = stage(
+        "failed",
+        caught?.name === "AbortError"
+          ? "模型能力探测超时。"
+          : "模型不接受工具结果回填。",
+      );
     }
   }
 
-  if (nonStreamingToolCalls) {
-    try {
-      const response = await providerFetch(probeRequest(), true, signal);
-      const chunks = [];
-      await relayOpenAiStream({
-        upstream: response,
-        write: (chunk) => chunks.push(new TextDecoder().decode(chunk)),
-        signal,
-      });
-      streamingToolCalls =
-        parseSseEventText(chunks.join(""), "tool-call-delta").length > 0;
-    } catch (caught) {
-      if (!error)
-        error =
-          caught?.name === "AbortError"
-            ? "模型能力探测超时。"
-            : "模型不支持流式工具调用。";
-    }
+  try {
+    const response = await providerFetch(probeRequest(), true, signal);
+    const chunks = [];
+    await relayOpenAiStream({
+      upstream: response,
+      write: (chunk) => chunks.push(new TextDecoder().decode(chunk)),
+      signal,
+    });
+    const output = chunks.join("");
+    const deltas = parseSseEventText(output, "tool-call-delta");
+    const done = parseSseEventText(output, "done").at(-1);
+    observeShape(
+      typeof done?.gatewayResponseShape === "string"
+        ? done.gatewayResponseShape
+        : "unknown",
+      true,
+    );
+    streamingToolCallDelta = deltas.length
+      ? stage("passed")
+      : stage("failed", "没有返回流式工具调用增量。");
+  } catch (caught) {
+    streamingToolCallDelta = stage(
+      "failed",
+      caught?.name === "AbortError"
+        ? "模型能力探测超时。"
+        : "模型不支持流式工具调用。",
+    );
   }
 
-  const nativeTools = nonStreamingToolCalls && toolResultAccepted;
+  const nativeTools =
+    toolCallEmission.status === "passed" &&
+    toolResultAcceptance.status === "passed" &&
+    streamingToolCallDelta.status === "passed" &&
+    gatewayShapeValid &&
+    observedShape === OPENAI_GATEWAY_RESPONSE_SHAPE;
+  const unavailableReason = !nativeTools
+    ? "三段原生工具握手未全部通过，Agent 模式不可用。"
+    : undefined;
   return {
-    mode: nativeTools ? "native-tools" : "two-stage",
-    streamingToolCalls,
-    toolResultAccepted,
+    mode: nativeTools ? "native-tools" : "unavailable",
+    protocolAdapterVersion: PROTOCOL_ADAPTER_VERSION,
+    gatewayResponseShape: observedShape,
+    toolCallEmission,
+    toolResultAcceptance,
+    streamingToolCallDelta,
     testedAt,
-    ...(error ? { error } : {}),
+    ...(unavailableReason ? { unavailableReason } : {}),
   };
 }
 
@@ -690,11 +755,23 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, await probeProviderCapabilities(controller.signal));
     } catch {
       return json(res, 200, {
-        mode: "two-stage",
-        streamingToolCalls: false,
-        toolResultAccepted: false,
+        mode: "unavailable",
+        protocolAdapterVersion: PROTOCOL_ADAPTER_VERSION,
+        gatewayResponseShape: "unknown",
+        toolCallEmission: {
+          status: "failed",
+          detail: "模型能力探测失败。",
+        },
+        toolResultAcceptance: {
+          status: "not-run",
+          detail: "工具调用发出阶段未通过。",
+        },
+        streamingToolCallDelta: {
+          status: "not-run",
+          detail: "模型能力探测失败。",
+        },
         testedAt: new Date().toISOString(),
-        error: "模型能力探测失败，已改用双阶段检索。",
+        unavailableReason: "模型能力探测失败，Agent 模式不可用。",
       });
     } finally {
       clearTimeout(timeout);

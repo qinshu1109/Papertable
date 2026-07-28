@@ -15,12 +15,23 @@ import type {
 import type { NoteChunk, NoteHit } from "./notes/types";
 
 const capability = (mode: ProviderCapability["mode"]): ProviderCapability => ({
+  schemaVersion: 1,
   baseUrl: "http://127.0.0.1:0/v1",
   model: "fake",
   mode,
-  streamingToolCalls: mode === "native-tools",
-  toolResultAccepted: mode === "native-tools",
+  protocolAdapterVersion: "openai-native-tools-v1",
+  gatewayResponseShape: "openai-chat-completions-v1",
+  toolCallEmission: { status: mode === "native-tools" ? "passed" : "failed" },
+  toolResultAcceptance: {
+    status: mode === "native-tools" ? "passed" : "not-run",
+  },
+  streamingToolCallDelta: {
+    status: mode === "native-tools" ? "passed" : "not-run",
+  },
   testedAt: 1,
+  expiresAt: Number.MAX_SAFE_INTEGER,
+  ttlMs: 86_400_000,
+  ...(mode === "unavailable" ? { unavailableReason: "三段握手未通过。" } : {}),
 });
 
 const built = (answerMode: BuiltContext["answerMode"]): BuiltContext => ({
@@ -79,7 +90,7 @@ function baseRuntime(overrides: Partial<AgentRuntime> = {}): AgentRuntime {
   };
 }
 
-test("sources-only finds no evidence and refuses before a final model answer", async () => {
+test("failed capability probe refuses Agent admission without two-stage search or answer", async () => {
   const searches: Array<{
     projectId: string;
     libraryIds: string[];
@@ -100,37 +111,32 @@ test("sources-only finds no evidence and refuses before a final model answer", a
   const phases: string[] = [];
   const visible: string[] = [];
 
-  const outcome = await runAgentTurn({
-    built: built("sources-only"),
-    projectId: "project-a",
-    libraryIds: ["library-a"],
-    capability: capability("two-stage"),
-    signal: new AbortController().signal,
-    onPhase: (phase) => phases.push(phase),
-    onToken: (event) => visible.push(event.text),
-    runtime,
-  });
-
-  assert.match(
-    outcome.directAnswer ?? "",
-    /不会在“仅依据材料”模式下补充无来源结论/,
-  );
-  assert.equal(outcome.trace.retrievalUnavailable, true);
-  assert.equal(
-    finalStreamCalls,
-    0,
-    "strict refusal must not secretly call a final answer model",
-  );
-  assert.deepEqual(visible, []);
-  assert.deepEqual(phases, ["searching"]);
-  assert.deepEqual(searches, [
-    {
-      projectId: "project-a",
-      libraryIds: ["library-a"],
-      query: "唯一事实",
-      limit: 8,
+  await assert.rejects(
+    () =>
+      runAgentTurn({
+        built: built("sources-only"),
+        projectId: "project-a",
+        libraryIds: ["library-a"],
+        capability: capability("unavailable"),
+        signal: new AbortController().signal,
+        onPhase: (phase) => phases.push(phase),
+        onToken: (event) => visible.push(event.text),
+        runtime,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentRunFailure);
+      assert.deepEqual(error.terminal, {
+        result: "failed",
+        reason: "protocol_error",
+      });
+      assert.match(error.message, /Agent 模式不可用/);
+      return true;
     },
-  ]);
+  );
+  assert.equal(finalStreamCalls, 0);
+  assert.deepEqual(visible, []);
+  assert.deepEqual(phases, []);
+  assert.deepEqual(searches, []);
 });
 
 test("sources-only root cards refuse locally when no material is bound", async () => {
@@ -159,7 +165,7 @@ test("sources-only root cards refuse locally when no material is bound", async (
   assert.equal(outcome.trace.retrievalUnavailable, true);
 });
 
-test("two-stage inventory accepts the bounded wildcard and reads bound documents", async () => {
+test("unknown capability cannot execute the legacy inventory workflow", async () => {
   const allowed = chunk("inventory-chunk");
   const searches: string[] = [];
   const reads: string[][] = [];
@@ -203,24 +209,24 @@ test("two-stage inventory accepts the bounded wildcard and reads bound documents
     ],
   };
 
-  const outcome = await runAgentTurn({
-    built: inventoryBuilt,
-    projectId: "project-a",
-    libraryIds: ["library-a"],
-    libraryScopes: [{ id: "library-a", name: "知识教练" }],
-    capability: capability("two-stage"),
-    signal: new AbortController().signal,
-    onPhase: () => undefined,
-    onToken: (event) => visible.push(event.text),
-    runtime,
-  });
-
-  assert.deepEqual(searches, ["*"]);
-  assert.deepEqual(reads, [[allowed.id]]);
-  assert.deepEqual(outcome.trace.searchQueries, ["*"]);
-  assert.equal(outcome.trace.hitCount, 1);
-  assert.deepEqual(outcome.trace.readChunkIds, [allowed.id]);
-  assert.deepEqual(visible, [`已读取相对路径。[[source:${allowed.id}]]`]);
+  await assert.rejects(
+    () =>
+      runAgentTurn({
+        built: inventoryBuilt,
+        projectId: "project-a",
+        libraryIds: ["library-a"],
+        libraryScopes: [{ id: "library-a", name: "知识教练" }],
+        capability: capability("unavailable"),
+        signal: new AbortController().signal,
+        onPhase: () => undefined,
+        onToken: (event) => visible.push(event.text),
+        runtime,
+      }),
+    /Agent 模式不可用/,
+  );
+  assert.deepEqual(searches, []);
+  assert.deepEqual(reads, []);
+  assert.deepEqual(visible, []);
 });
 
 test("native tool loop rejects guessed chunk ids without calling read", async () => {

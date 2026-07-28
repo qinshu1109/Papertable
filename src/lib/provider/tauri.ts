@@ -5,7 +5,6 @@
  */
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
-  AgentExecutionMode,
   ProviderErrorCode,
   ProviderMessage,
   ProviderStreamEvent,
@@ -23,6 +22,7 @@ import type {
   ProviderTool,
 } from "./http";
 import { ProviderError, providerErrorMessage } from "./http";
+import { normalizeProviderCapabilityResult } from "./http";
 
 export function getProviderHealth(): Promise<ProviderHealth> {
   return invoke<ProviderHealth>("provider_health");
@@ -59,20 +59,13 @@ function asIso(value: unknown) {
 }
 
 export async function probeProviderCapabilities(): Promise<ProviderCapabilityResult> {
-  const result = await invoke<{
-    mode?: AgentExecutionMode;
-    streamingToolCalls?: boolean;
-    toolResultAccepted?: boolean;
-    testedAt?: string;
-    error?: string;
-  }>("provider_probe_capability");
-  return {
-    mode: result.mode === "native-tools" ? "native-tools" : "two-stage",
-    streamingToolCalls: Boolean(result.streamingToolCalls),
-    toolResultAccepted: Boolean(result.toolResultAccepted),
+  const result = await invoke<Record<string, unknown>>(
+    "provider_probe_capability",
+  );
+  return normalizeProviderCapabilityResult({
+    ...result,
     testedAt: asIso(result.testedAt),
-    ...(typeof result.error === "string" ? { error: result.error } : {}),
-  };
+  });
 }
 
 type WireEvent =
@@ -90,6 +83,7 @@ type WireEvent =
       stopped: boolean;
       finishReason?: string;
       usage?: ProviderUsage;
+      gatewayResponseShape?: string;
     };
 
 function providerErrorFromInvoke(cause: unknown): ProviderError {
@@ -197,6 +191,9 @@ export async function* streamModel(input: {
           type: "done",
           ...(event.finishReason ? { finishReason: event.finishReason } : {}),
           ...(event.usage ? { usage: event.usage } : {}),
+          ...(event.gatewayResponseShape
+            ? { gatewayResponseShape: event.gatewayResponseShape }
+            : {}),
         };
         return;
       }

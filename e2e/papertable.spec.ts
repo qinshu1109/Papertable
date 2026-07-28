@@ -108,6 +108,75 @@ async function seedPriorDaySignal(page: import("@playwright/test").Page) {
   );
 }
 
+async function seedCapabilityUi(
+  page: import("@playwright/test").Page,
+  scenario: "partial" | "expired",
+) {
+  await page.evaluate(async (kind) => {
+    const health = (await fetch("/api/health").then((response) =>
+      response.json(),
+    )) as { baseUrl: string; model: string };
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("papertable-web-v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("settings", "readwrite");
+      const store = tx.objectStore("settings");
+      const request = store.get("app");
+      request.onsuccess = () => {
+        const settings = request.result;
+        if (!settings) return tx.abort();
+        const now = Date.now();
+        store.put({
+          ...settings,
+          providerBaseUrl: health.baseUrl,
+          model: health.model,
+          providerCapabilityTtlMs: 86_400_000,
+          providerCapabilities: [
+            {
+              schemaVersion: 1,
+              baseUrl: health.baseUrl,
+              model: health.model,
+              mode: kind === "partial" ? "unavailable" : "native-tools",
+              protocolAdapterVersion: "openai-native-tools-v1",
+              gatewayResponseShape: "openai-chat-completions-v1",
+              toolCallEmission: { status: "passed" },
+              toolResultAcceptance:
+                kind === "partial"
+                  ? {
+                      status: "failed",
+                      detail: "模型不接受工具结果回填。",
+                    }
+                  : { status: "passed" },
+              streamingToolCallDelta:
+                kind === "partial"
+                  ? {
+                      status: "not-run",
+                      detail: "工具结果回灌阶段未通过。",
+                    }
+                  : { status: "passed" },
+              testedAt: now - 60_000,
+              expiresAt: kind === "expired" ? now - 1 : now + 86_340_000,
+              ttlMs: 86_400_000,
+              ...(kind === "partial"
+                ? { unavailableReason: "工具结果回灌未通过。" }
+                : {}),
+            },
+          ],
+        });
+      };
+      request.onerror = () => tx.abort();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () =>
+        reject(tx.error ?? new Error("无法写入能力门禁 UI 夹具"));
+    });
+    db.close();
+  }, scenario);
+}
+
 async function importReadOnlyFixture(page: import("@playwright/test").Page) {
   // `page.goto()` only guarantees document load. Wait for React's shell before
   // deciding whether this viewport has the mobile drawer; otherwise an early
@@ -411,12 +480,18 @@ async function seedSameRunResumeFixture(page: import("@playwright/test").Page) {
             model: "papertable-test-model",
             providerCapabilities: [
               {
+                schemaVersion: 1,
                 baseUrl: "local-test-provider",
                 model: "papertable-test-model",
                 mode: "native-tools",
-                streamingToolCalls: true,
-                toolResultAccepted: true,
+                protocolAdapterVersion: "openai-native-tools-v1",
+                gatewayResponseShape: "openai-chat-completions-v1",
+                toolCallEmission: { status: "passed" },
+                toolResultAcceptance: { status: "passed" },
+                streamingToolCallDelta: { status: "passed" },
                 testedAt: now,
+                expiresAt: now + 86_400_000,
+                ttlMs: 86_400_000,
               },
             ],
           });
@@ -974,6 +1049,102 @@ test("rapid double-clicking send starts one model run", async ({ page }) => {
   await page.waitForTimeout(650);
   expect((await workspaceCounts(page)).turns).toHaveLength(
     before.turns.length + 2,
+  );
+});
+
+test("settings shows the three-stage Agent gate, TTL, expiry and re-probing state", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "设置" });
+  const gate = dialog.getByLabel("Agent 能力准入");
+  await expect(gate).toContainText("Agent 模式不可用");
+  await gate.getByRole("button", { name: "立即重新探测" }).click();
+  await expect(gate).toContainText("正在重新探测同一接口");
+  await expect(gate).toContainText("三段握手全部通过");
+  await expect(gate.getByText("通过", { exact: true })).toHaveCount(3);
+  await expect(gate).toContainText("上次探测：");
+  await expect(gate).toContainText("到期时间：");
+  const ttl = gate.getByRole("spinbutton", {
+    name: "能力缓存 TTL（小时）",
+  });
+  await ttl.fill("12");
+  await ttl.blur();
+  await expect(ttl).toHaveValue("12");
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const db = await new Promise<IDBDatabase>((resolve, reject) => {
+          const request = indexedDB.open("papertable-web-v1");
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        const settings = await new Promise<Record<string, unknown>>(
+          (resolve, reject) => {
+            const tx = db.transaction("settings", "readonly");
+            const request = tx.objectStore("settings").get("app");
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          },
+        );
+        db.close();
+        const capability = (
+          settings.providerCapabilities as Array<{
+            testedAt: number;
+            expiresAt: number;
+          }>
+        )?.[0];
+        return capability
+          ? {
+              ttl: settings.providerCapabilityTtlMs,
+              cacheTtl: capability.expiresAt - capability.testedAt,
+            }
+          : null;
+      }),
+    )
+    .toEqual({ ttl: 43_200_000, cacheTtl: 43_200_000 });
+  await gate.screenshot({
+    path: "harness-rebuild/outputs/task-010/screenshots/agent-capability-gate.png",
+  });
+});
+
+test("settings renders deterministic partial-stage failure detail", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await page.goto("/api/health");
+  await seedCapabilityUi(page, "partial");
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  const gate = page
+    .getByRole("dialog", { name: "设置" })
+    .getByLabel("Agent 能力准入");
+  await expect(gate).toContainText("Agent 模式不可用：工具结果回灌未通过");
+  await expect(gate.getByText("通过", { exact: true })).toHaveCount(1);
+  await expect(gate.getByText("未通过", { exact: true })).toHaveCount(1);
+  await expect(gate.getByText("未完成", { exact: true })).toHaveCount(1);
+  await expect(gate).toContainText("模型不接受工具结果回填");
+});
+
+test("settings explains that an expired cache must re-probe before Agent admission", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await page.goto("/api/health");
+  await seedCapabilityUi(page, "expired");
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  const gate = page
+    .getByRole("dialog", { name: "设置" })
+    .getByLabel("Agent 能力准入");
+  await expect(gate).toContainText(
+    "能力探测缓存已过期；进入 Agent 前必须重新探测",
   );
 });
 

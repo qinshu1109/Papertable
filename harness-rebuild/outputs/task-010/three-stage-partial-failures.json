@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "scenario": "three-stage-partial-failures",
+  "cases": [
+    {
+      "failedStage": "toolCallEmission",
+      "stages": {
+        "toolCallEmission": {
+          "status": "failed",
+          "detail": "没有返回强制工具调用。"
+        },
+        "toolResultAcceptance": {
+          "status": "not-run",
+          "detail": "工具调用发出阶段未通过。"
+        },
+        "streamingToolCallDelta": { "status": "passed" }
+      },
+      "mode": "unavailable"
+    },
+    {
+      "failedStage": "toolResultAcceptance",
+      "stages": {
+        "toolCallEmission": { "status": "passed" },
+        "toolResultAcceptance": {
+          "status": "failed",
+          "detail": "模型不接受工具结果回填。"
+        },
+        "streamingToolCallDelta": { "status": "passed" }
+      },
+      "mode": "unavailable"
+    },
+    {
+      "failedStage": "streamingToolCallDelta",
+      "stages": {
+        "toolCallEmission": { "status": "passed" },
+        "toolResultAcceptance": { "status": "passed" },
+        "streamingToolCallDelta": {
+          "status": "failed",
+          "detail": "没有返回流式工具调用增量。"
+        }
+      },
+      "mode": "unavailable"
+    }
+  ],
+  "assert": {
+    "everyIncompleteProbeUnavailable": true,
+    "fallbackSelected": false,
+    "safeDetailOnly": true
+  }
+}
