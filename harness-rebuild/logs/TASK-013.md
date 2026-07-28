@@ -2,7 +2,7 @@
 
 - Branch: `task/TASK-013-final-acceptance`
 - Started: `2026-07-28T16:35:50+08:00`
-- Status: `in_progress`
+- Status: `done`
 - Base HEAD: `9b605df`
 
 ## Checkpoints
@@ -40,6 +40,10 @@
   `fd5b2612-c1ad-403f-8c1a-6c0ff27786bc` was confirmed at
   `awaitingAcceptance` with exit code 0. Generated historical screenshots were
   restored; protected QA artifacts remain untracked.
+- `2026-07-28T17:05:00+08:00` — PR #15 passed GitHub CI (`rust` and
+  `verify`) and was squash-merged into `feat/readonly-note-harness-alpha` as
+  `35b50622cfaaf27f56297477385a77931ba3e041`. TASK-013 and the 13-card
+  program are accepted complete.
 
 ## Tests
 
@@ -102,13 +106,12 @@
 
 ## Scope and acceptance
 
-- TASK-013 remains `in_progress` for supervisor acceptance.
+- TASK-013 is `done`; PR #15 and all required gates passed.
 - No staging, commit, push, PR, merge, or branch switch is permitted in this
   execution.
 - Product runtime behavior was not modified. Added code is an isolated
   acceptance runner/test surface plus package scripts and TASK-013 evidence.
 - `QA_REPORT.md`, `conversation-2026-07-27-084611.txt`, and `qa-evidence/`
   remain present, untracked, and untouched.
-- Supervisor verdict: implementation is technically accepted for PR/CI;
-  task status remains `in_progress` until the PR is merged and all three state
-  stores are closed.
+- Supervisor verdict: accepted and merged. Git and project-document state are
+  closed; WenzMark is closed in the final synchronization step.

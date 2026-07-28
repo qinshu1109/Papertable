@@ -26,5 +26,5 @@ It does not compare answer wording.
 - Mandatory fixed failure:
   `failed/protocol_error`, evidence retained, no answer emitted.
 
-The implementation is a candidate pass. TASK-013 remains `in_progress` until
-the supervisor independently accepts it.
+The supervisor independently reran the gate, GitHub CI passed, and PR #15 was
+merged as `35b5062`. TASK-013 is accepted and complete.

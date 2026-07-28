@@ -1,7 +1,7 @@
 ---
 id: TASK-013
 title: 金样回放与真实模型验收矩阵（持续建设，最终门禁）
-status: in_progress
+status: done
 depends_on: [TASK-011, TASK-012]
 parallelizable: false
 isolation: outputs/task-013/
