@@ -127,19 +127,39 @@ export type ProviderStreamEvent =
       name?: string;
       arguments?: string;
     }
-  | { type: "done"; finishReason?: string; usage?: ProviderUsage }
+  | {
+      type: "done";
+      finishReason?: string;
+      usage?: ProviderUsage;
+      gatewayResponseShape?: string;
+    }
   | { type: "error"; message: string; code?: ProviderErrorCode };
 
-export type AgentExecutionMode = "native-tools" | "two-stage";
+export type AgentExecutionMode = "native-tools" | "unavailable";
+
+export type CapabilityStageStatus = "passed" | "failed" | "not-run";
+
+export interface CapabilityStageResult {
+  status: CapabilityStageStatus;
+  /** Sanitised explanation only; never an upstream body or protocol payload. */
+  detail?: string;
+}
 
 /** Safe capability cache key is base URL + model; never contains a secret. */
 export interface ProviderCapability {
+  schemaVersion: 1;
   baseUrl: string;
   model: string;
   mode: AgentExecutionMode;
-  streamingToolCalls: boolean;
-  toolResultAccepted: boolean;
+  protocolAdapterVersion: string;
+  gatewayResponseShape: string;
+  toolCallEmission: CapabilityStageResult;
+  toolResultAcceptance: CapabilityStageResult;
+  streamingToolCallDelta: CapabilityStageResult;
   testedAt: number;
+  expiresAt: number;
+  ttlMs: number;
+  unavailableReason?: string;
 }
 
 export interface NoteCitation {
@@ -331,6 +351,8 @@ export interface AppSettings {
   vaultSubtree?: string;
   /** Safe, local capability cache. It is invalidated whenever endpoint/model changes. */
   providerCapabilities?: ProviderCapability[];
+  /** Capability admission cache lifetime. Defaults to 24 hours. */
+  providerCapabilityTtlMs?: number;
 }
 
 /**

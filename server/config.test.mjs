@@ -131,8 +131,17 @@ test("本机假模型覆盖受限工具协议和能力探测", async () => {
     assert.equal(capabilities.status, 200);
     const capabilityResult = await capabilities.json();
     assert.equal(capabilityResult.mode, "native-tools");
-    assert.equal(capabilityResult.streamingToolCalls, true);
-    assert.equal(capabilityResult.toolResultAccepted, true);
+    assert.equal(capabilityResult.toolCallEmission.status, "passed");
+    assert.equal(capabilityResult.toolResultAcceptance.status, "passed");
+    assert.equal(capabilityResult.streamingToolCallDelta.status, "passed");
+    assert.equal(
+      capabilityResult.protocolAdapterVersion,
+      "openai-native-tools-v1",
+    );
+    assert.equal(
+      capabilityResult.gatewayResponseShape,
+      "openai-chat-completions-v1",
+    );
     assert.match(capabilityResult.testedAt, /^\d{4}-\d{2}-\d{2}T/);
 
     const completion = await fetch(`${origin}/api/llm/generate`, {

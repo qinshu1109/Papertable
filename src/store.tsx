@@ -44,6 +44,15 @@ import {
   type ProviderHealth,
 } from "./lib/provider";
 import {
+  DEFAULT_CAPABILITY_TTL_MS,
+  capabilityInvalidationReason,
+  clampCapabilityTtl,
+  createCapabilityProbeCoordinator,
+  invalidateCapabilityEntries,
+  isCapabilityAdmitted,
+  migrateCapabilityCache,
+} from "./lib/provider/capabilityGate";
+import {
   AgentRunFailure,
   controlledCitations,
   runAgentTurn,
@@ -129,6 +138,7 @@ import type {
   InteractionEvent,
   Proposal,
   Project,
+  ProviderCapability,
   ReferenceChip,
   SourceAnchor,
   SessionBoundary,
@@ -149,6 +159,7 @@ const defaultSettings: AppSettings = {
   attentionPromptedDates: {},
   attentionPromptHistory: [],
   providerCapabilities: [],
+  providerCapabilityTtlMs: DEFAULT_CAPABILITY_TTL_MS,
 };
 const defaultView = (): ViewState => ({
   id: "main",
@@ -428,6 +439,11 @@ interface Ctx {
   hydrated: boolean;
   provider: ProviderHealth | null;
   agentMode: AgentExecutionMode;
+  providerCapability?: ProviderCapability;
+  providerCapabilityTtlMs: number;
+  capabilityReprobing: boolean;
+  reprobeProviderCapability: () => Promise<void>;
+  setProviderCapabilityTtlMs: (ttlMs: number) => void;
   noteLibraries: NoteLibrary[];
   boundNoteLibraryIds: string[];
 
@@ -591,6 +607,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     type: EdgeType;
   } | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [reprobingCapabilityKeys, setReprobingCapabilityKeys] = useState<
+    ReadonlySet<string>
+  >(new Set());
   const streamingTurnsRef = useRef<Record<string, string>>({});
   const generationTasksRef = useRef(
     new Map<
@@ -619,6 +638,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const persistedAttentionRef = useRef<AttentionSnapshot | null>(null);
   const hiddenAtRef = useRef<number | null>(null);
   const materializingProposalIdsRef = useRef(new Set<string>());
+  const capabilityProbeCoordinatorRef = useRef(
+    createCapabilityProbeCoordinator(),
+  );
 
   const activeProjectId = view.activeProjectId;
   const currentCardId = view.currentCardId;
@@ -659,13 +681,28 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           message: settings.providerMessage ?? "",
         };
 
+  const providerBaseUrl = settings.providerBaseUrl ?? "https://cozai.net/v1";
+  const providerCapability = settings.providerCapabilities?.find(
+    (capability) =>
+      capability.baseUrl === providerBaseUrl &&
+      capability.model === settings.model,
+  );
+  const currentCapabilityInvalidation = providerCapability
+    ? capabilityInvalidationReason({
+        capability: providerCapability,
+        baseUrl: providerBaseUrl,
+        model: settings.model,
+        now: Date.now(),
+      })
+    : undefined;
   const agentMode: AgentExecutionMode =
-    settings.providerCapabilities?.find(
-      (capability) =>
-        capability.baseUrl ===
-          (settings.providerBaseUrl ?? "https://cozai.net/v1") &&
-        capability.model === settings.model,
-    )?.mode ?? "two-stage";
+    providerCapability &&
+    !currentCapabilityInvalidation &&
+    isCapabilityAdmitted(providerCapability)
+      ? "native-tools"
+      : "unavailable";
+  const currentCapabilityKey = `${providerBaseUrl}\u001f${settings.model}`;
+  const capabilityReprobing = reprobingCapabilityKeys.has(currentCapabilityKey);
 
   const activeProposals = useMemo(
     () => activeProposalsForProject(proposals, activeProjectId),
@@ -772,7 +809,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           now,
         attentionPromptedDates: next.settings.attentionPromptedDates ?? {},
         attentionPromptHistory: next.settings.attentionPromptHistory ?? [],
-        providerCapabilities: next.settings.providerCapabilities ?? [],
+        providerCapabilities: migrateCapabilityCache(
+          next.settings.providerCapabilities,
+        ),
+        providerCapabilityTtlMs: clampCapabilityTtl(
+          next.settings.providerCapabilityTtlMs,
+        ),
       };
       const pruned = pruneProjectScopedState({
         projects: next.projects,
@@ -974,13 +1016,35 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const refreshProvider = useCallback(async () => {
     try {
       const health = await getProviderHealth();
-      setSettings((current) => ({
-        ...current,
-        model: health.model,
-        providerBaseUrl: health.baseUrl,
-        providerStatus: health.configured ? "ready" : "missing",
-        providerMessage: health.message,
-      }));
+      setSettings((current) => {
+        const previousBaseUrl =
+          current.providerBaseUrl ?? "https://cozai.net/v1";
+        const changed =
+          previousBaseUrl !== health.baseUrl || current.model !== health.model;
+        const next: AppSettings = {
+          ...current,
+          model: health.model,
+          providerBaseUrl: health.baseUrl,
+          providerStatus: health.configured ? "ready" : "missing",
+          providerMessage: health.message,
+          ...(changed
+            ? {
+                providerCapabilities: invalidateCapabilityEntries(
+                  current.providerCapabilities,
+                  {
+                    baseUrl: previousBaseUrl,
+                    model: current.model,
+                    nextBaseUrl: health.baseUrl,
+                    nextModel: health.model,
+                    reason: "settings-changed",
+                  },
+                ),
+              }
+            : {}),
+        };
+        latestRef.current = { ...latestRef.current, settings: next };
+        return next;
+      });
       return health;
     } catch (error) {
       const message =
@@ -1072,63 +1136,72 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [refreshNoteLibraries, showToast],
   );
 
-  const ensureProviderCapability = useCallback(async (force = false) => {
-    const current = latestRef.current.settings;
-    const baseUrl = current.providerBaseUrl ?? "https://cozai.net/v1";
-    const model = current.model;
-    const cached = current.providerCapabilities?.find(
-      (capability) =>
-        capability.baseUrl === baseUrl && capability.model === model,
-    );
-    if (!force && cached) return cached;
-    if (force)
-      setSettings((previous) => ({
-        ...previous,
-        providerCapabilities: (previous.providerCapabilities ?? []).filter(
-          (capability) =>
-            capability.baseUrl !== baseUrl || capability.model !== model,
-        ),
-      }));
-    try {
-      const probe = await probeProviderCapabilities();
-      const next = {
+  const ensureProviderCapability = useCallback(
+    async (
+      force = false,
+      reason:
+        "runtime-protocol-error" | "manual-reprobe" | "ttl-expired" = force
+        ? "manual-reprobe"
+        : "ttl-expired",
+      expected?: { baseUrl: string; model: string },
+    ) => {
+      const current = latestRef.current.settings;
+      const baseUrl =
+        expected?.baseUrl ?? current.providerBaseUrl ?? "https://cozai.net/v1";
+      const model = expected?.model ?? current.model;
+      const ttlMs = clampCapabilityTtl(current.providerCapabilityTtlMs);
+      const key = `${baseUrl}\u001f${model}`;
+      return capabilityProbeCoordinatorRef.current({
         baseUrl,
         model,
-        mode: probe.mode,
-        streamingToolCalls: probe.streamingToolCalls,
-        toolResultAccepted: probe.toolResultAccepted,
-        testedAt: Date.parse(probe.testedAt) || Date.now(),
-      } as const;
-      setSettings((previous) => {
-        // A late probe for an old endpoint must never overwrite a new setting.
-        if (
-          previous.model !== model ||
-          (previous.providerBaseUrl ?? "https://cozai.net/v1") !== baseUrl
-        )
-          return previous;
-        return {
-          ...previous,
-          providerCapabilities: [
-            ...(previous.providerCapabilities ?? []).filter(
-              (capability) =>
-                capability.baseUrl !== baseUrl || capability.model !== model,
-            ),
-            next,
-          ].slice(-12),
-        };
+        ttlMs,
+        force,
+        reason,
+        now: Date.now,
+        read: () => latestRef.current.settings,
+        write: (update) =>
+          setSettings((previous) => {
+            const next = {
+              ...previous,
+              providerCapabilities: update(previous.providerCapabilities ?? []),
+            };
+            latestRef.current = { ...latestRef.current, settings: next };
+            return next;
+          }),
+        probe: probeProviderCapabilities,
+        onReprobing: (active) =>
+          setReprobingCapabilityKeys((previous) => {
+            const next = new Set(previous);
+            if (active) next.add(key);
+            else next.delete(key);
+            return next;
+          }),
       });
-      return next;
-    } catch {
-      // Unknown is intentionally deterministic: safe two-stage retrieval.
-      return {
-        baseUrl,
-        model,
-        mode: "two-stage" as const,
-        streamingToolCalls: false,
-        toolResultAccepted: false,
-        testedAt: Date.now(),
+    },
+    [],
+  );
+
+  const reprobeProviderCapability = useCallback(async () => {
+    await ensureProviderCapability(true, "manual-reprobe");
+  }, [ensureProviderCapability]);
+
+  const setProviderCapabilityTtlMs = useCallback((ttlMs: number) => {
+    setSettings((previous) => {
+      const clamped = clampCapabilityTtl(ttlMs);
+      const next = {
+        ...previous,
+        providerCapabilityTtlMs: clamped,
+        providerCapabilities: (previous.providerCapabilities ?? []).map(
+          (capability) => ({
+            ...capability,
+            ttlMs: clamped,
+            expiresAt: capability.testedAt + clamped,
+          }),
+        ),
       };
-    }
+      latestRef.current = { ...latestRef.current, settings: next };
+      return next;
+    });
   }, []);
 
   const updateCard = useCallback(
@@ -1470,6 +1543,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         objective: undefined as string | undefined,
       };
       let continuationClaimed = false;
+      let protocolReprobe: (() => Promise<ProviderCapability>) | undefined;
       updateCard(input.cardId, (card) => ({
         ...card,
         turns: existingTurn
@@ -1598,12 +1672,29 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         const capability = libraryIds.length
           ? await ensureProviderCapability()
           : undefined;
+        if (libraryIds.length && !isCapabilityAdmitted(capability))
+          throw new Error(
+            `Agent 模式不可用：${
+              capability?.unavailableReason ??
+              "三段原生工具能力探测未全部通过。"
+            }`,
+          );
+        if (capability) {
+          let pending: Promise<ProviderCapability> | undefined;
+          protocolReprobe = () =>
+            (pending ??= ensureProviderCapability(
+              true,
+              "runtime-protocol-error",
+              {
+                baseUrl: capability.baseUrl,
+                model: capability.model,
+              },
+            ));
+        }
         if (
           input.resumeTurnId &&
           (resumeAudit?.kind !== "event-sourced" ||
-            capability?.mode !== "native-tools" ||
-            !capability.streamingToolCalls ||
-            !capability.toolResultAccepted)
+            !isCapabilityAdmitted(capability))
         )
           throw new Error(
             "续跑必须保留原 run 的旗舰原生工具协议与宿主冻结作用域。",
@@ -1669,13 +1760,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           },
           audit: agentAudit,
           protocolRecovery: {
-            invalidateAndReprobe: () => ensureProviderCapability(true),
+            invalidateAndReprobe: () =>
+              protocolReprobe?.() ??
+              Promise.reject(
+                new Error("当前 Agent run 缺少匹配的能力缓存项。"),
+              ),
           },
         };
         const outcome =
           allBoundLibrariesUnavailable && built.answerMode === "sources-only"
             ? unavailableSourcesOnlyOutcome(
-                capability?.mode ?? "two-stage",
+                capability?.mode ?? "unavailable",
                 scopeWarning ?? "已绑定资料库当前不可用。",
               )
             : await runAgentTurn(runInput);
@@ -1738,6 +1833,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             void runBackgroundTasks(input.cardId, target.title, answer);
         }
       } catch (error) {
+        if (
+          error instanceof AgentRunFailure &&
+          error.terminal.reason === "protocol_error" &&
+          protocolReprobe
+        )
+          await protocolReprobe().catch(() => undefined);
         if (input.resumeTurnId && !continuationClaimed) {
           throttle.dispose();
           updateCard(input.cardId, (card) => ({
@@ -3483,6 +3584,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       hydrated,
       provider,
       agentMode,
+      providerCapability,
+      providerCapabilityTtlMs: clampCapabilityTtl(
+        settings.providerCapabilityTtlMs,
+      ),
+      capabilityReprobing,
+      reprobeProviderCapability,
+      setProviderCapabilityTtlMs,
       noteLibraries: noteLibraryList,
       boundNoteLibraryIds,
       cardById,
@@ -3574,6 +3682,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       hydrated,
       provider,
       agentMode,
+      providerCapability,
+      settings.providerCapabilityTtlMs,
+      capabilityReprobing,
+      reprobeProviderCapability,
+      setProviderCapabilityTtlMs,
       noteLibraryList,
       boundNoteLibraryIds,
       cardById,

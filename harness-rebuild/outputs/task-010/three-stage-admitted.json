@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "scenario": "three-stage-native-tools-admitted",
+  "capability": {
+    "schemaVersion": 1,
+    "baseUrl": "https://gateway.example/v1",
+    "model": "flagship",
+    "mode": "native-tools",
+    "protocolAdapterVersion": "openai-native-tools-v1",
+    "gatewayResponseShape": "openai-chat-completions-v1",
+    "toolCallEmission": { "status": "passed" },
+    "toolResultAcceptance": { "status": "passed" },
+    "streamingToolCallDelta": { "status": "passed" },
+    "testedAt": 1785196800000,
+    "expiresAt": 1785283200000,
+    "ttlMs": 86400000
+  },
+  "assert": {
+    "agentAdmitted": true,
+    "normalChatIndependent": true,
+    "containsSensitivePayload": false
+  }
+}

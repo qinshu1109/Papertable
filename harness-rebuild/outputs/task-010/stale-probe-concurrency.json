@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "scenario": "concurrent-probe-old-settings-result",
+  "timeline": [
+    {
+      "sequence": 1,
+      "event": "probe-requested",
+      "baseUrl": "https://gateway.example/v1",
+      "model": "flagship"
+    },
+    {
+      "sequence": 2,
+      "event": "matching-concurrent-request-joined-inflight"
+    },
+    {
+      "sequence": 3,
+      "event": "settings-changed",
+      "model": "new-flagship"
+    },
+    {
+      "sequence": 4,
+      "event": "old-probe-finished-and-was-discarded"
+    }
+  ],
+  "assert": {
+    "providerProbeCount": 1,
+    "oldCapabilityCacheWrites": 0,
+    "oldResultMode": "unavailable",
+    "newSettingsPreserved": true
+  }
+}

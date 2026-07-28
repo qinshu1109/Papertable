@@ -1,4 +1,4 @@
--- Papertable · SQLite schema (user_version = 9)
+-- Papertable · SQLite schema (user_version = 10)
 --
 -- 列的取舍只有一条判据：当且仅当字段是 (a) 外键、(b) ORDER BY 键、
 -- (c) 按项目删除的 WHERE 键、(d) Rust 侧 vault 写入器需要解释的字段，

@@ -2864,6 +2864,21 @@ textarea {
   font-variant-numeric: tabular-nums;
   font-weight: 620;
 }
+.capability-gate {
+  padding: 13px;
+  border: 1px solid var(--line-soft);
+  border-radius: 13px;
+  background: var(--raised);
+}
+.capability-stage-grid {
+  padding: 9px 0 0;
+}
+.capability-gate .settings-field input {
+  background: var(--card);
+}
+.capability-gate > .btn {
+  margin-top: 11px;
+}
 .btn {
   height: 32px;
   padding: 0 15px;

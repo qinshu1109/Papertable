@@ -163,6 +163,7 @@ pub struct Completion {
     pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<ProviderUsage>,
+    pub gateway_response_shape: String,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -175,15 +176,26 @@ pub struct ProviderUsage {
     pub total_tokens: u64,
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityStageResult {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCapabilityResult {
     pub mode: String,
-    pub streaming_tool_calls: bool,
-    pub tool_result_accepted: bool,
+    pub protocol_adapter_version: String,
+    pub gateway_response_shape: String,
+    pub tool_call_emission: CapabilityStageResult,
+    pub tool_result_acceptance: CapabilityStageResult,
+    pub streaming_tool_call_delta: CapabilityStageResult,
     pub tested_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub unavailable_reason: Option<String>,
 }
 
 /// 与前端 `streamModel` 消费的 SSE 事件一一对应。
@@ -211,6 +223,8 @@ pub enum StreamEvent {
         finish_reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         usage: Option<ProviderUsage>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gateway_response_shape: Option<String>,
     },
 }
 
@@ -218,6 +232,8 @@ const ALLOWED_TASKS: [&str; 5] = ["chat", "agent", "concept-preview", "title", "
 const ALLOWED_ROLES: [&str; 4] = ["system", "user", "assistant", "tool"];
 const CLIENT_TOOLS: [&str; 2] = ["search_notes", "read_notes"];
 const PROBE_TOOL: &str = "papertable_probe";
+const PROTOCOL_ADAPTER_VERSION: &str = "openai-native-tools-v1";
+const OPENAI_GATEWAY_RESPONSE_SHAPE: &str = "openai-chat-completions-v1";
 
 /// 对来自 WebView 的模型请求做白名单校验。`papertable_probe` 是能力探测的内部
 /// 实现细节，绝不能从 `llm_complete` / `llm_stream` 这两条公开命令声明出来。
@@ -670,6 +686,19 @@ pub fn extract_message(payload: &Value) -> String {
         .to_string()
 }
 
+/// Structural fingerprint only. It never contains response content.
+pub fn gateway_response_shape(payload: &Value) -> &'static str {
+    let choice = payload.get("choices").and_then(|choices| choices.get(0));
+    if choice.is_some_and(|value| {
+        value.get("message").is_some_and(Value::is_object)
+            || value.get("delta").is_some_and(Value::is_object)
+    }) {
+        OPENAI_GATEWAY_RESPONSE_SHAPE
+    } else {
+        "unknown"
+    }
+}
+
 pub fn extract_tool_calls(payload: &Value) -> Vec<ToolCall> {
     let Some(calls) = payload
         .get("choices")
@@ -899,6 +928,7 @@ fn complete_with_probe_permission(
                 content: extract_message(&value),
                 tool_calls: extract_tool_calls(&value),
                 usage: extract_usage(&value),
+                gateway_response_shape: gateway_response_shape(&value).into(),
             };
             if completion.content.is_empty() && completion.tool_calls.is_empty() {
                 Err(provider_error_message("empty-response").into())
@@ -951,6 +981,7 @@ pub fn stream(
             stopped: false,
             finish_reason: None,
             usage: None,
+            gateway_response_shape: None,
         });
         return Ok(());
     }
@@ -963,6 +994,7 @@ pub fn stream(
             stopped: false,
             finish_reason: None,
             usage: None,
+            gateway_response_shape: None,
         });
         return Ok(());
     }
@@ -971,6 +1003,7 @@ pub fn stream(
             stopped: true,
             finish_reason: None,
             usage: None,
+            gateway_response_shape: None,
         });
         return Ok(());
     }
@@ -993,6 +1026,7 @@ pub fn stream(
                 stopped: false,
                 finish_reason: None,
                 usage: None,
+                gateway_response_shape: None,
             });
             return Ok(());
         }
@@ -1006,6 +1040,7 @@ pub fn stream(
                 stopped: false,
                 finish_reason: None,
                 usage: None,
+                gateway_response_shape: None,
             });
             return Ok(());
         }
@@ -1018,6 +1053,7 @@ pub fn stream(
     let mut stopped = cancelled.load(Ordering::Relaxed);
     let mut reader = BufReader::new(reader);
     let mut stream_error = false;
+    let mut observed_gateway_response_shape = None;
     loop {
         if cancelled.load(Ordering::Relaxed) {
             stopped = true;
@@ -1053,6 +1089,10 @@ pub fn stream(
             // 非 JSON 的心跳帧不该打断这条流。
             continue;
         };
+        let shape = gateway_response_shape(&payload);
+        if shape != "unknown" {
+            observed_gateway_response_shape.get_or_insert_with(|| shape.to_string());
+        }
         let (content, _reasoning) = extract_delta(&payload);
         if !content.is_empty() {
             // `emitted` 只由 content 驱动：只有推理没有正文时仍要报错。
@@ -1089,6 +1129,7 @@ pub fn stream(
         stopped,
         finish_reason,
         usage,
+        gateway_response_shape: observed_gateway_response_shape,
     });
     Ok(())
 }
@@ -1124,7 +1165,10 @@ fn probe_request() -> ChatRequest {
     }
 }
 
-fn streaming_probe_has_tool_call(config: &ProviderConfig, request: &ChatRequest) -> Result<bool> {
+fn streaming_probe_has_tool_call(
+    config: &ProviderConfig,
+    request: &ChatRequest,
+) -> Result<(bool, String)> {
     validate_internal_probe(request)?;
     let response = agent()
         .post(&format!("{}/chat/completions", config.base_url))
@@ -1143,6 +1187,7 @@ fn streaming_probe_has_tool_call(config: &ProviderConfig, request: &ChatRequest)
         }
         Err(error) => return Err(format!("模型连接中断，请重试：{error}").into()),
     };
+    let mut observed_shape = "unknown".to_string();
     for line in BufReader::new(reader).lines() {
         let line = line?;
         let Some(raw) = line.strip_prefix("data:") else {
@@ -1155,91 +1200,141 @@ fn streaming_probe_has_tool_call(config: &ProviderConfig, request: &ChatRequest)
         let Ok(payload) = serde_json::from_str::<Value>(raw) else {
             continue;
         };
+        let shape = gateway_response_shape(&payload);
+        if shape != "unknown" {
+            observed_shape = shape.to_string();
+        }
         if !extract_tool_call_deltas(&payload).is_empty() {
-            return Ok(true);
+            return Ok((true, observed_shape));
         }
     }
-    Ok(false)
+    Ok((false, observed_shape))
 }
 
 /// 探测只验证 OpenAI-compatible 的工具协议，绝不把原始回复、密钥或模型推理持久化。
-/// 结果由前端按 baseUrl+model 缓存；地址或模型变化会自然失效。
+/// 结果由前端按 baseUrl+model+协议适配层版本缓存；任一变化都会失效。
 pub fn probe_capability(config: &ProviderConfig) -> ProviderCapabilityResult {
+    let stage = |status: &str, detail: Option<&str>| CapabilityStageResult {
+        status: status.into(),
+        detail: detail.map(|value| value.chars().take(240).collect()),
+    };
     let tested_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().to_string())
         .unwrap_or_else(|_| "0".into());
     if config.api_key.is_empty() {
         return ProviderCapabilityResult {
-            mode: "two-stage".into(),
-            streaming_tool_calls: false,
-            tool_result_accepted: false,
+            mode: "unavailable".into(),
+            protocol_adapter_version: PROTOCOL_ADAPTER_VERSION.into(),
+            gateway_response_shape: "unknown".into(),
+            tool_call_emission: stage("failed", Some("未配置模型密钥。")),
+            tool_result_acceptance: stage("not-run", Some("工具调用发出阶段未通过。")),
+            streaming_tool_call_delta: stage("not-run", Some("未配置模型密钥。")),
             tested_at,
-            error: Some("未配置模型密钥。".into()),
+            unavailable_reason: Some("未配置模型密钥，Agent 模式不可用。".into()),
         };
     }
-    let mut error = None;
-    let initial = match complete_internal_probe(config, &probe_request()) {
-        Ok(completion) => completion,
-        Err(cause) => {
-            return ProviderCapabilityResult {
-                mode: "two-stage".into(),
-                streaming_tool_calls: false,
-                tool_result_accepted: false,
-                tested_at,
-                error: Some(cause.to_string()),
+    let tool_call_emission;
+    let mut tool_result_acceptance = stage("not-run", Some("工具调用发出阶段未通过。"));
+    let mut gateway_shape = "unknown".to_string();
+    let mut gateway_shape_valid = true;
+    match complete_internal_probe(config, &probe_request()) {
+        Ok(initial) => {
+            gateway_shape = initial.gateway_response_shape.clone();
+            gateway_shape_valid = initial.gateway_response_shape == OPENAI_GATEWAY_RESPONSE_SHAPE;
+            if initial.tool_calls.is_empty() {
+                tool_call_emission = stage("failed", Some("没有返回强制工具调用。"));
+            } else {
+                tool_call_emission = stage("passed", None);
+            }
+            if let Some(call) = initial.tool_calls.first() {
+                let mut request = probe_request();
+                request.messages.push(Message {
+                    role: "assistant".into(),
+                    content: if initial.content.is_empty() {
+                        None
+                    } else {
+                        Some(initial.content.clone())
+                    },
+                    tool_calls: initial.tool_calls.clone(),
+                    tool_call_id: None,
+                });
+                request.messages.push(Message {
+                    role: "tool".into(),
+                    content: Some("{\"ok\":true}".into()),
+                    tool_calls: vec![],
+                    tool_call_id: Some(call.id.clone()),
+                });
+                request.tool_choice = Some(Value::String("none".into()));
+                match complete_internal_probe(config, &request) {
+                    Ok(completion) => {
+                        tool_result_acceptance = stage("passed", None);
+                        if completion.gateway_response_shape != "unknown" {
+                            if completion.gateway_response_shape != OPENAI_GATEWAY_RESPONSE_SHAPE {
+                                gateway_shape_valid = false;
+                            }
+                            gateway_shape = completion.gateway_response_shape;
+                        }
+                    }
+                    Err(cause) => {
+                        let detail = cause.to_string();
+                        tool_result_acceptance = stage("failed", Some(&detail));
+                    }
+                }
             }
         }
-    };
-    let has_calls = !initial.tool_calls.is_empty();
-    let mut tool_result_accepted = false;
-    if let Some(call) = initial.tool_calls.first() {
-        let mut request = probe_request();
-        request.messages.push(Message {
-            role: "assistant".into(),
-            content: if initial.content.is_empty() {
-                None
-            } else {
-                Some(initial.content.clone())
-            },
-            tool_calls: initial.tool_calls.clone(),
-            tool_call_id: None,
-        });
-        request.messages.push(Message {
-            role: "tool".into(),
-            content: Some("{\"ok\":true}".into()),
-            tool_calls: vec![],
-            tool_call_id: Some(call.id.clone()),
-        });
-        request.tool_choice = Some(Value::String("none".into()));
-        match complete_internal_probe(config, &request) {
-            Ok(_) => tool_result_accepted = true,
-            Err(cause) => error = Some(cause.to_string()),
+        Err(cause) => {
+            let detail = cause.to_string();
+            tool_call_emission = stage("failed", Some(&detail));
         }
     }
-    let streaming_tool_calls = if has_calls {
-        match streaming_probe_has_tool_call(config, &probe_request()) {
-            Ok(value) => value,
-            Err(cause) => {
-                if error.is_none() {
-                    error = Some(cause.to_string());
-                }
-                false
+    let streaming_tool_call_delta = match streaming_probe_has_tool_call(config, &probe_request()) {
+        Ok((true, shape)) => {
+            if shape == OPENAI_GATEWAY_RESPONSE_SHAPE {
+                gateway_shape = shape;
+            } else {
+                gateway_shape_valid = false;
             }
+            stage("passed", None)
         }
-    } else {
-        false
+        Ok((false, shape)) => {
+            if shape != "unknown" {
+                if shape != OPENAI_GATEWAY_RESPONSE_SHAPE {
+                    gateway_shape_valid = false;
+                }
+                gateway_shape = shape;
+            } else {
+                gateway_shape_valid = false;
+            }
+            stage("failed", Some("没有返回流式工具调用增量。"))
+        }
+        Err(cause) => {
+            let detail = cause.to_string();
+            stage("failed", Some(&detail))
+        }
     };
+    let admitted = tool_call_emission.status == "passed"
+        && tool_result_acceptance.status == "passed"
+        && streaming_tool_call_delta.status == "passed"
+        && gateway_shape_valid
+        && gateway_shape == OPENAI_GATEWAY_RESPONSE_SHAPE;
     ProviderCapabilityResult {
-        mode: if has_calls && tool_result_accepted {
+        mode: if admitted {
             "native-tools".into()
         } else {
-            "two-stage".into()
+            "unavailable".into()
         },
-        streaming_tool_calls,
-        tool_result_accepted,
+        protocol_adapter_version: PROTOCOL_ADAPTER_VERSION.into(),
+        gateway_response_shape: gateway_shape,
+        tool_call_emission,
+        tool_result_acceptance,
+        streaming_tool_call_delta,
         tested_at,
-        error,
+        unavailable_reason: if admitted {
+            None
+        } else {
+            Some("三段原生工具握手未全部通过，Agent 模式不可用。".into())
+        },
     }
 }
 
@@ -1452,6 +1547,11 @@ mod tests {
             extract_finish_reason(&payload).as_deref(),
             Some("tool_calls")
         );
+        assert_eq!(
+            gateway_response_shape(&payload),
+            OPENAI_GATEWAY_RESPONSE_SHAPE
+        );
+        assert_eq!(gateway_response_shape(&json!({"output": []})), "unknown");
     }
 
     #[test]
@@ -1475,6 +1575,7 @@ mod tests {
                 output_tokens: Some(2),
                 total_tokens: 6,
             }),
+            gateway_response_shape: Some(OPENAI_GATEWAY_RESPONSE_SHAPE.into()),
         };
         let wire = serde_json::to_value(event).unwrap();
         assert_eq!(wire["usage"]["totalTokens"], 6);
@@ -1524,12 +1625,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_key_capability_probe_is_safe_two_stage_fallback() {
+    fn missing_key_capability_probe_fails_closed_for_agent_admission() {
         let result = probe_capability(&ProviderConfig::default());
-        assert_eq!(result.mode, "two-stage");
-        assert!(!result.streaming_tool_calls);
-        assert!(!result.tool_result_accepted);
-        assert!(result.error.unwrap_or_default().contains("密钥"));
+        assert_eq!(result.mode, "unavailable");
+        assert_eq!(result.tool_call_emission.status, "failed");
+        assert_eq!(result.tool_result_acceptance.status, "not-run");
+        assert_eq!(result.streaming_tool_call_delta.status, "not-run");
+        assert_eq!(result.protocol_adapter_version, PROTOCOL_ADAPTER_VERSION);
+        assert_eq!(result.gateway_response_shape, "unknown");
+        assert!(result
+            .unavailable_reason
+            .unwrap_or_default()
+            .contains("Agent"));
     }
 
     #[test]

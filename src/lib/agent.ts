@@ -50,6 +50,7 @@ import {
   validateCompletedToolProtocol,
   visibleProtocolLeak,
 } from "./agentProtocolRepair";
+import { isCapabilityAdmitted } from "./provider/capabilityGate";
 import {
   normalizeCompletedSearchForResume,
   type AgentResumeSeed,
@@ -528,6 +529,7 @@ async function streamRound(input: {
   /** Native final synthesis buffers until the complete round is validated. */
   emitTokens?: boolean;
   onUsage?: (usage: ProviderUsage | undefined) => Promise<unknown>;
+  expectedGatewayResponseShape?: string;
 }): Promise<{
   toolCalls: ToolCall[];
   tokens: Extract<ProviderStreamEvent, { type: "token" }>[];
@@ -584,6 +586,18 @@ async function streamRound(input: {
   const usage = [...events]
     .reverse()
     .find((event) => event.type === "done")?.usage;
+  const gatewayResponseShape = [...events]
+    .reverse()
+    .find((event) => event.type === "done")?.gatewayResponseShape;
+  if (
+    input.expectedGatewayResponseShape &&
+    gatewayResponseShape &&
+    gatewayResponseShape !== input.expectedGatewayResponseShape
+  )
+    throw new ProviderError(
+      "模型网关返回结构已变化，必须重新探测 Agent 能力。",
+      "invalid-response",
+    );
   const forcedToolCall =
     input.withTools &&
     (input.toolChoice === "required" ||
@@ -951,6 +965,9 @@ async function executeToolCalls(input: {
   };
 }
 
+// Kept only as the executable legacy A–Q migration contract; TASK-010 removes
+// every runtime caller, while its eventual deletion belongs to TASK-011.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function runTwoStage(
   input: AgentTurnInput,
   trace: AgentRunTrace,
@@ -1244,8 +1261,8 @@ function exhaustedProtocolFailure(
 }
 
 /**
- * Native-only explicit state machine. The legacy two-stage implementation
- * remains separately callable through runAgentTurn's capability branch.
+ * Native-only explicit state machine. Agent admission never calls the legacy
+ * two-stage implementation.
  */
 async function runNativeStateMachine(
   input: AgentTurnInput,
@@ -1344,6 +1361,8 @@ async function runNativeStateMachine(
                 onToken: input.onToken,
                 runtime,
                 onUsage: (usage) => budget.provider(usage, "exploration"),
+                expectedGatewayResponseShape:
+                  input.capability?.gatewayResponseShape,
               }),
             signal: input.signal,
             runtime,
@@ -1616,6 +1635,8 @@ async function runNativeStateMachine(
                   onToken: input.onToken,
                   runtime,
                   onUsage: (usage) => budget.provider(usage, "exploration"),
+                  expectedGatewayResponseShape:
+                    input.capability?.gatewayResponseShape,
                 }),
               signal: input.signal,
               runtime,
@@ -1738,17 +1759,11 @@ async function runNativeStateMachine(
         const capability = await input.protocolRecovery.invalidateAndReprobe();
         await recordProtocol(
           repairState.issue,
-          capability.mode === "native-tools" &&
-            capability.streamingToolCalls &&
-            capability.toolResultAccepted
+          isCapabilityAdmitted(capability)
             ? "capability-reprobe-confirmed-native-tools"
             : "capability-reprobe-rejected-native-tools-without-downgrade",
         );
-        if (
-          capability.mode !== "native-tools" ||
-          !capability.streamingToolCalls ||
-          !capability.toolResultAccepted
-        )
+        if (!isCapabilityAdmitted(capability))
           throw exhaustedProtocolFailure(
             trace,
             readChunks,
@@ -1766,6 +1781,7 @@ async function runNativeStateMachine(
                 onToken: input.onToken,
                 runtime,
                 onUsage: (usage) => budget.provider(usage, "exploration"),
+                expectedGatewayResponseShape: capability.gatewayResponseShape,
               }),
             signal: input.signal,
             runtime,
@@ -1864,6 +1880,8 @@ async function runNativeStateMachine(
                 runtime,
                 emitTokens: false,
                 onUsage: (usage) => budget.provider(usage, "synthesis"),
+                expectedGatewayResponseShape:
+                  input.capability?.gatewayResponseShape,
               }),
             signal: input.signal,
             runtime,
@@ -1983,7 +2001,7 @@ export async function runAgentTurn(
         errors: [...(input.resume.trace.errors ?? [])],
       }
     : {
-        mode: input.capability?.mode ?? "two-stage",
+        mode: input.capability?.mode ?? "unavailable",
         startedAt: now,
         finishedAt: now,
         searchQueries: [],
@@ -2029,13 +2047,16 @@ export async function runAgentTurn(
         [],
       );
     }
-    if (
-      input.capability?.mode === "native-tools" &&
-      input.capability.streamingToolCalls &&
-      input.capability.toolResultAccepted
-    )
-      return await runNativeStateMachine(nested, trace, runtime, budget);
-    return await runTwoStage(nested, trace, runtime, budget);
+    if (!isCapabilityAdmitted(input.capability)) {
+      const message = `Agent 模式不可用：${
+        input.capability?.unavailableReason ??
+        "三段原生工具能力探测未全部通过。"
+      }`;
+      trace.errors?.push(message);
+      const terminal = createAgentTerminalState("failed", "protocol_error");
+      throw new AgentRunFailure(message, finish(trace, terminal), terminal);
+    }
+    return await runNativeStateMachine(nested, trace, runtime, budget);
   } catch (cause) {
     await budget.wall("synthesis");
     if (

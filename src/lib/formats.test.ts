@@ -55,7 +55,7 @@ const project = (): PortableProject => ({
             },
           ],
           agentRun: {
-            mode: "two-stage",
+            mode: "unavailable",
             startedAt: 1,
             finishedAt: 2,
             searchQueries: ["量子"],
@@ -113,7 +113,7 @@ test("native project package preserves graph, snapshots and cards", async () => 
     restored.cards[1].turns[0].citations?.[0].chunkId,
     "chunk-quantum",
   );
-  assert.equal(restored.cards[1].turns[0].agentRun?.mode, "two-stage");
+  assert.equal(restored.cards[1].turns[0].agentRun?.mode, "unavailable");
 });
 
 test("Markdown 和 Canvas 导出给人可读的笔记引用，但不公开 answerMode frontmatter", async () => {
