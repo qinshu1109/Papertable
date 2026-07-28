@@ -70,3 +70,5 @@
 - `2026-07-28T11:10:04+08:00` — Supervisor independently reviewed the event vocabulary, SQLite transaction and migration path, Dexie parity, crash/reopen tests, and unchanged runtime scope.
 - `2026-07-28T11:10:04+08:00` — Supervisor independently reran `pnpm verify`, Rust formatting, workspace validation, and `git diff --check`; all required gates passed.
 - Technical acceptance: **PASS**. Ready for scoped commit, PR, CI, and merge.
+- `2026-07-28T11:16:00+08:00` — PR #5 second CI run passed (`verify`, `rust`) after the recorded Clippy-only fix; squash merged into `feat/readonly-note-harness-alpha` as `81eac13`.
+- Final status: **done**.

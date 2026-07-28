@@ -1,7 +1,7 @@
 ---
 id: TASK-003
 title: 事件溯源持久化：schema 与写入路径
-status: in_progress
+status: done
 depends_on: [TASK-002]
 parallelizable: false
 isolation: outputs/task-003/
