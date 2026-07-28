@@ -167,9 +167,9 @@ class PapertableDb extends Dexie {
         agentEvents: "id, runId, &[runId+sequence], occurredAt, eventType",
       })
       .upgrade(() => undefined);
-    // v7 replaces the legacy boolean/two-stage capability cache with the
-    // schema-v1 three-stage admission record. Old rows are not trustworthy
-    // enough to upgrade, so they are invalidated and re-probed on demand.
+    // v7 replaces the pre-admission capability cache with the schema-v1
+    // three-stage record. Old rows are not trustworthy enough to upgrade, so
+    // they are invalidated and re-probed on demand.
     this.version(7)
       .stores({
         ...schema,

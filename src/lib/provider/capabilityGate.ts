@@ -123,7 +123,7 @@ export function currentCapability(
   );
 }
 
-/** Drops pre-TASK-010 boolean/fallback cache rows on both storage backends. */
+/** Drops pre-TASK-010 capability rows that cannot prove three-stage admission. */
 export function migrateCapabilityCache(value: unknown): ProviderCapability[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is ProviderCapability => {
