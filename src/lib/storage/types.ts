@@ -19,10 +19,19 @@ import type {
   WorkspaceSnapshot,
   WorkspaceUpsert,
 } from "../delta";
+import type {
+  AgentAudit,
+  AgentEventRecord,
+  AppendAgentStepInput,
+} from "../agentEvents";
 
 export interface StorageAdapter {
   loadWorkspace(): Promise<WorkspaceSnapshot | null>;
   loadAttentionState(): Promise<AttentionSnapshot>;
+  /** 事件版优先；没有新 run 时原样返回旧 turn 的摘要 trace，不做回填。 */
+  loadAgentAudit(turnId: string): Promise<AgentAudit | null>;
+  /** 只追加事件，并在同一事务内推进对应 run 的恢复游标。 */
+  appendAgentStep(input: AppendAgentStepInput): Promise<AgentEventRecord>;
   /** 库为空时播种；非空时返回库里已有的内容，绝不覆盖。 */
   seedIfEmpty(seed: WorkspaceSnapshot): Promise<WorkspaceSnapshot>;
   /** 日常自动保存。只增不删。 */

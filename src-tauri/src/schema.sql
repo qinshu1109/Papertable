@@ -1,4 +1,4 @@
--- Papertable · SQLite schema (user_version = 7)
+-- Papertable · SQLite schema (user_version = 8)
 --
 -- 列的取舍只有一条判据：当且仅当字段是 (a) 外键、(b) ORDER BY 键、
 -- (c) 按项目删除的 WHERE 键、(d) Rust 侧 vault 写入器需要解释的字段，
@@ -51,6 +51,39 @@ CREATE TABLE IF NOT EXISTS turns (
   -- 生成中的可见进度；刷新后仍能告诉用户正在检索、阅读还是组织最终回答。
   agent_phase TEXT
 );
+
+-- v8：Agent 过程事件与当前恢复游标分离。turn_id 刻意不是外键：普通工作区快照会
+-- 重建 turns，但完整审计历史不能因此被级联删除；设置页“清除本地数据”仍会显式清表。
+-- agent_events 只允许 INSERT。运行游标 agent_runs 可更新，但必须与新事件同一事务。
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id             TEXT PRIMARY KEY,
+  turn_id        TEXT    NOT NULL UNIQUE,
+  schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+  phase          TEXT    NOT NULL,
+  started_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  finished_at    INTEGER,
+  last_sequence  INTEGER NOT NULL DEFAULT 0 CHECK(last_sequence >= 0),
+  checkpoint     TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_events (
+  id             TEXT PRIMARY KEY,
+  run_id         TEXT    NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+  sequence       INTEGER NOT NULL CHECK(sequence > 0),
+  schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+  event_type     TEXT    NOT NULL,
+  occurred_at    INTEGER NOT NULL,
+  message        TEXT    NOT NULL,
+  UNIQUE(run_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS agent_events_run
+  ON agent_events(run_id, sequence);
+CREATE TRIGGER IF NOT EXISTS agent_events_no_update
+BEFORE UPDATE ON agent_events
+BEGIN
+  SELECT RAISE(ABORT, 'agent_events are append-only');
+END;
 
 CREATE TABLE IF NOT EXISTS edges (
   id              TEXT PRIMARY KEY,

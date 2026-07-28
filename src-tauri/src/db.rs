@@ -15,7 +15,30 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 7;
+const USER_VERSION: i64 = 8;
+const AGENT_EVENT_SCHEMA_VERSION: i64 = 1;
+const AGENT_EVENT_TYPES: &[&str] = &[
+    "exploration-started",
+    "search-requested",
+    "search-completed",
+    "read-requested",
+    "read-completed",
+    "duplicate-call-detected",
+    "protocol-repaired",
+    "retry",
+    "budget-added",
+    "final-synthesis",
+    "terminal",
+];
+const AGENT_RUN_PHASES: &[&str] = &[
+    "exploring",
+    "searching",
+    "reading",
+    "repairing",
+    "retrying",
+    "synthesizing",
+    "terminal",
+];
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -139,6 +162,70 @@ pub struct TurnRecord {
     #[serde(flatten)]
     pub turn: Turn,
     pub card_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStepEventInput {
+    pub id: String,
+    pub schema_version: i64,
+    pub occurred_at: i64,
+    pub message: Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendAgentStepInput {
+    pub run_id: String,
+    pub turn_id: String,
+    pub schema_version: i64,
+    pub started_at: i64,
+    pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "skip_none")]
+    pub finished_at: Option<i64>,
+    pub checkpoint: Value,
+    pub event: AgentStepEventInput,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunRecord {
+    pub id: String,
+    pub turn_id: String,
+    pub schema_version: i64,
+    pub phase: String,
+    pub started_at: i64,
+    pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "skip_none")]
+    pub finished_at: Option<i64>,
+    pub last_sequence: i64,
+    pub checkpoint: Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEventRecord {
+    pub id: String,
+    pub run_id: String,
+    pub sequence: i64,
+    pub schema_version: i64,
+    pub event_type: String,
+    pub occurred_at: i64,
+    pub message: Value,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum AgentAudit {
+    EventSourced {
+        run: AgentRunRecord,
+        events: Vec<AgentEventRecord>,
+    },
+    Legacy {
+        #[serde(rename = "turnId")]
+        turn_id: String,
+        trace: Option<Value>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -459,6 +546,109 @@ fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
     Ok(output)
 }
 
+fn read_agent_run_by_turn(conn: &Connection, turn_id: &str) -> Result<Option<AgentRunRecord>> {
+    let row: Option<(
+        String,
+        String,
+        i64,
+        String,
+        i64,
+        i64,
+        Option<i64>,
+        i64,
+        String,
+    )> = conn
+        .query_row(
+            "SELECT id, turn_id, schema_version, phase, started_at, updated_at, finished_at,
+                    last_sequence, checkpoint
+             FROM agent_runs WHERE turn_id = ?1",
+            params![turn_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|value| {
+        Ok(AgentRunRecord {
+            id: value.0,
+            turn_id: value.1,
+            schema_version: value.2,
+            phase: value.3,
+            started_at: value.4,
+            updated_at: value.5,
+            finished_at: value.6,
+            last_sequence: value.7,
+            checkpoint: serde_json::from_str(&value.8)?,
+        })
+    })
+    .transpose()
+}
+
+fn read_agent_events(conn: &Connection, run_id: &str) -> Result<Vec<AgentEventRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, run_id, sequence, schema_version, event_type, occurred_at, message
+         FROM agent_events WHERE run_id = ?1 ORDER BY sequence",
+    )?;
+    let rows = stmt.query_map(params![run_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    let mut events = Vec::new();
+    for row in rows {
+        let value = row?;
+        events.push(AgentEventRecord {
+            id: value.0,
+            run_id: value.1,
+            sequence: value.2,
+            schema_version: value.3,
+            event_type: value.4,
+            occurred_at: value.5,
+            message: serde_json::from_str(&value.6)?,
+        });
+    }
+    Ok(events)
+}
+
+pub fn load_agent_audit(conn: &Connection, turn_id: &str) -> Result<Option<AgentAudit>> {
+    if let Some(run) = read_agent_run_by_turn(conn, turn_id)? {
+        let events = read_agent_events(conn, &run.id)?;
+        return Ok(Some(AgentAudit::EventSourced { run, events }));
+    }
+
+    // v7 及更早的 turn 继续从原摘要读取。这里绝不 INSERT/backfill。
+    let legacy: Option<Option<String>> = conn
+        .query_row(
+            "SELECT agent_run FROM turns WHERE id = ?1",
+            params![turn_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = legacy else {
+        return Ok(None);
+    };
+    Ok(Some(AgentAudit::Legacy {
+        turn_id: turn_id.to_string(),
+        trace: json_col(raw)?,
+    }))
+}
+
 fn read_edges(conn: &Connection) -> Result<Vec<CardEdge>> {
     let mut stmt = conn.prepare(
         "SELECT id, type, source_card_id, target_card_id, source_turn_id, source_text,
@@ -650,6 +840,191 @@ pub fn load_attention(conn: &Connection) -> Result<AttentionSnapshot> {
 
 fn str_field(value: &Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(str::to_string)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum AgentAppendCrashPoint {
+    AfterRunEnsured,
+    AfterEventInserted,
+    AfterRunStateChanged,
+}
+
+fn validate_agent_step(input: &AppendAgentStepInput) -> Result<(String, String)> {
+    if input.schema_version != AGENT_EVENT_SCHEMA_VERSION
+        || input.event.schema_version != AGENT_EVENT_SCHEMA_VERSION
+    {
+        return Err(Error(format!(
+            "不支持的 Agent 事件 schema_version：run={} event={}",
+            input.schema_version, input.event.schema_version
+        )));
+    }
+    let event_type = input
+        .event
+        .message
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| AGENT_EVENT_TYPES.contains(kind))
+        .ok_or_else(|| Error("未知的 Agent 事件类型".into()))?
+        .to_string();
+    let phase = input
+        .checkpoint
+        .get("phase")
+        .and_then(Value::as_str)
+        .filter(|phase| AGENT_RUN_PHASES.contains(phase))
+        .ok_or_else(|| Error("未知的 Agent 运行阶段".into()))?
+        .to_string();
+    if input.updated_at < input.started_at || input.event.occurred_at < input.started_at {
+        return Err(Error("Agent 步骤时间早于运行开始时间".into()));
+    }
+    let terminal = event_type == "terminal";
+    if terminal != (phase == "terminal") || terminal != input.finished_at.is_some() {
+        return Err(Error(
+            "terminal 事件、terminal 阶段和 finishedAt 必须同时出现".into(),
+        ));
+    }
+    Ok((event_type, phase))
+}
+
+fn maybe_inject_agent_crash(
+    actual: Option<AgentAppendCrashPoint>,
+    expected: AgentAppendCrashPoint,
+) -> Result<()> {
+    if actual == Some(expected) {
+        return Err(Error(format!("injected crash at {expected:?}")));
+    }
+    Ok(())
+}
+
+fn append_agent_step_inner(
+    conn: &mut Connection,
+    input: &AppendAgentStepInput,
+    crash: Option<AgentAppendCrashPoint>,
+) -> Result<AgentEventRecord> {
+    let (event_type, phase) = validate_agent_step(input)?;
+    let tx = conn.transaction()?;
+
+    let turn_exists: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM turns WHERE id = ?1",
+        params![input.turn_id],
+        |row| row.get(0),
+    )?;
+    if turn_exists != 1 {
+        return Err(Error(format!(
+            "Agent run 引用了不存在的 turn：{}",
+            input.turn_id
+        )));
+    }
+
+    let existing: Option<(String, i64, String, i64, i64, i64)> = tx
+        .query_row(
+            "SELECT turn_id, schema_version, phase, last_sequence, started_at, updated_at
+             FROM agent_runs WHERE id = ?1",
+            params![input.run_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let last_sequence = match existing {
+        Some((turn_id, schema_version, existing_phase, last_sequence, started_at, updated_at)) => {
+            if turn_id != input.turn_id
+                || schema_version != input.schema_version
+                || started_at != input.started_at
+            {
+                return Err(Error("Agent run 标识与既有记录不一致".into()));
+            }
+            if existing_phase == "terminal" {
+                return Err(Error("终态 Agent run 不接受后续事件".into()));
+            }
+            if input.updated_at < updated_at {
+                return Err(Error("Agent run 更新时间不能倒退".into()));
+            }
+            last_sequence
+        }
+        None => {
+            tx.execute(
+                "INSERT INTO agent_runs (
+                   id, turn_id, schema_version, phase, started_at, updated_at, finished_at,
+                   last_sequence, checkpoint
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,0,?8)",
+                params![
+                    input.run_id,
+                    input.turn_id,
+                    input.schema_version,
+                    phase,
+                    input.started_at,
+                    input.updated_at,
+                    input.finished_at,
+                    serde_json::to_string(&input.checkpoint)?,
+                ],
+            )?;
+            0
+        }
+    };
+    maybe_inject_agent_crash(crash, AgentAppendCrashPoint::AfterRunEnsured)?;
+
+    let sequence = last_sequence + 1;
+    tx.execute(
+        "INSERT INTO agent_events (
+           id, run_id, sequence, schema_version, event_type, occurred_at, message
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            input.event.id,
+            input.run_id,
+            sequence,
+            input.event.schema_version,
+            event_type,
+            input.event.occurred_at,
+            serde_json::to_string(&input.event.message)?,
+        ],
+    )?;
+    maybe_inject_agent_crash(crash, AgentAppendCrashPoint::AfterEventInserted)?;
+
+    let changed = tx.execute(
+        "UPDATE agent_runs SET
+           phase = ?2, updated_at = ?3, finished_at = ?4, last_sequence = ?5, checkpoint = ?6
+         WHERE id = ?1 AND last_sequence = ?7",
+        params![
+            input.run_id,
+            phase,
+            input.updated_at,
+            input.finished_at,
+            sequence,
+            serde_json::to_string(&input.checkpoint)?,
+            last_sequence,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(Error("Agent run 游标发生并发变化".into()));
+    }
+    maybe_inject_agent_crash(crash, AgentAppendCrashPoint::AfterRunStateChanged)?;
+
+    tx.commit()?;
+    Ok(AgentEventRecord {
+        id: input.event.id.clone(),
+        run_id: input.run_id.clone(),
+        sequence,
+        schema_version: input.event.schema_version,
+        event_type,
+        occurred_at: input.event.occurred_at,
+        message: input.event.message.clone(),
+    })
+}
+
+/// 追加一个完整步骤，并在同一事务内推进恢复游标。事件表没有 upsert/update 路径。
+pub fn append_agent_step(
+    conn: &mut Connection,
+    input: &AppendAgentStepInput,
+) -> Result<AgentEventRecord> {
+    append_agent_step_inner(conn, input, None)
 }
 
 fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
@@ -1181,6 +1556,8 @@ pub fn clear_all(conn: &mut Connection) -> Result<()> {
     clear_workspace_data(conn)?;
     let tx = conn.transaction()?;
     for table in [
+        "agent_events",
+        "agent_runs",
         "project_note_libraries",
         "note_chunks",
         "note_documents",
@@ -1420,6 +1797,70 @@ mod tests {
         conn
     }
 
+    fn seed_agent_turn(conn: &mut Connection) {
+        let mut upsert = WorkspaceUpsert::default();
+        upsert.projects.upserts = vec![project("p")];
+        upsert.cards.upserts = vec![card("c", "p")];
+        upsert.turns.upserts = vec![TurnRecord {
+            card_id: "c".into(),
+            turn: Turn {
+                id: "agent-turn".into(),
+                role: "ai".into(),
+                content: "".into(),
+                created_at: 100,
+                streaming: Some(true),
+                status: Some("streaming".into()),
+                error: None,
+                model: Some("test-model".into()),
+                favorite: None,
+                agent_run: Some(json!({"mode":"two-stage","searchQueries":[]})),
+                citations: None,
+                agent_phase: Some("searching".into()),
+            },
+        }];
+        singletons(&mut upsert);
+        apply_changes(conn, &upsert).unwrap();
+    }
+
+    fn agent_step(kind: &str, index: usize) -> AppendAgentStepInput {
+        let phase = match kind {
+            "exploration-started" => "exploring",
+            "search-requested" | "search-completed" => "searching",
+            "read-requested" | "read-completed" => "reading",
+            "duplicate-call-detected" | "protocol-repaired" => "repairing",
+            "retry" | "budget-added" => "retrying",
+            "final-synthesis" => "synthesizing",
+            "terminal" => "terminal",
+            _ => panic!("unknown test event"),
+        };
+        let at = 101 + index as i64;
+        AppendAgentStepInput {
+            run_id: "run-1".into(),
+            turn_id: "agent-turn".into(),
+            schema_version: AGENT_EVENT_SCHEMA_VERSION,
+            started_at: 100,
+            updated_at: at,
+            finished_at: (kind == "terminal").then_some(at),
+            checkpoint: json!({
+                "phase": phase,
+                "objective": "测试崩溃恢复",
+                "executedSearches": [],
+                "readChunkIds": [],
+                "confirmedCitationChunkIds": [],
+                "unresolvedQuestions": [],
+                "addedBudget": {},
+                "lastCompleteKind": kind,
+                "step": index,
+            }),
+            event: AgentStepEventInput {
+                id: format!("event-{index}"),
+                schema_version: AGENT_EVENT_SCHEMA_VERSION,
+                occurred_at: at,
+                message: json!({"kind":kind,"step":index}),
+            },
+        }
+    }
+
     #[test]
     fn v5_migration_clears_legacy_reasoning() {
         let conn = open_in_memory().unwrap();
@@ -1459,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    fn v7_migration_adds_harness_transport_and_fts_without_rebuilding_turns() {
+    fn v8_migration_adds_harness_transport_and_fts_without_rebuilding_turns() {
         let conn = Connection::open_in_memory().unwrap();
         // 模拟真用户 v5 的 turns：表已存在，所以 schema.sql 的 IF NOT EXISTS 不会替
         // 它补列，迁移必须显式 ALTER。
@@ -1486,7 +1927,62 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
+    }
+
+    #[test]
+    fn v7_turns_stay_legacy_readable_without_event_backfill() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-v7.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE projects (
+                   id TEXT PRIMARY KEY, name TEXT NOT NULL, pinned INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE cards (
+                   id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL,
+                   favorite INTEGER NOT NULL, unread INTEGER NOT NULL, answer_mode TEXT,
+                   trashed INTEGER, origin TEXT, proposal_id TEXT, created_at INTEGER NOT NULL,
+                   concepts TEXT NOT NULL, concept_preview_cache TEXT
+                 );
+                 CREATE TABLE turns (
+                   id TEXT PRIMARY KEY, card_id TEXT NOT NULL, role TEXT NOT NULL,
+                   content TEXT NOT NULL, created_at INTEGER NOT NULL, streaming INTEGER,
+                   status TEXT, error TEXT, model TEXT, favorite INTEGER, agent_run TEXT,
+                   citations TEXT, agent_phase TEXT
+                 );
+                 INSERT INTO projects VALUES ('p','旧项目',0,1);
+                 INSERT INTO cards VALUES ('c','p','旧卡片',0,0,NULL,NULL,NULL,NULL,1,'[]',NULL);
+                 INSERT INTO turns VALUES (
+                   'legacy-turn','c','ai','旧回答',2,0,'complete',NULL,'m',NULL,
+                   '{\"mode\":\"two-stage\",\"searchQueries\":[\"旧检索\"]}',NULL,NULL
+                 );
+                 PRAGMA user_version = 7;",
+            )
+            .unwrap();
+            migrate(&conn).unwrap();
+        }
+
+        let conn = open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        let run_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_runs", [], |row| row.get(0))
+            .unwrap();
+        let event_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((run_count, event_count), (0, 0), "迁移不得伪造事件");
+        assert_eq!(
+            load_agent_audit(&conn, "legacy-turn").unwrap(),
+            Some(AgentAudit::Legacy {
+                turn_id: "legacy-turn".into(),
+                trace: Some(json!({"mode":"two-stage","searchQueries":["旧检索"]})),
+            })
+        );
     }
 
     #[test]
@@ -1537,6 +2033,124 @@ mod tests {
         assert_eq!(turn.agent_run.unwrap()["mode"], "two-stage");
         assert_eq!(turn.citations.unwrap()[0]["chunkId"], "chunk-1");
         assert_eq!(turn.agent_phase.as_deref(), Some("reading"));
+    }
+
+    #[test]
+    fn every_agent_step_boundary_survives_crash_and_reopen_without_partial_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-crash.sqlite3");
+        {
+            let mut conn = open(&path).unwrap();
+            seed_agent_turn(&mut conn);
+        }
+
+        for (index, kind) in AGENT_EVENT_TYPES.iter().enumerate() {
+            let input = agent_step(kind, index);
+            for crash in [
+                AgentAppendCrashPoint::AfterRunEnsured,
+                AgentAppendCrashPoint::AfterEventInserted,
+                AgentAppendCrashPoint::AfterRunStateChanged,
+            ] {
+                {
+                    let mut conn = open(&path).unwrap();
+                    let error = append_agent_step_inner(&mut conn, &input, Some(crash))
+                        .expect_err("注入点必须中止事务");
+                    assert!(error.to_string().contains("injected crash"));
+                    // 模拟进程在错误后消失，不在同一连接上做任何清理或补偿。
+                }
+                let conn = open(&path).unwrap();
+                match load_agent_audit(&conn, "agent-turn").unwrap().unwrap() {
+                    AgentAudit::Legacy { .. } => {
+                        assert_eq!(index, 0, "只有首步骤提交前可以仍是 legacy")
+                    }
+                    AgentAudit::EventSourced { run, events } => {
+                        assert_eq!(events.len(), index);
+                        assert_eq!(run.last_sequence, index as i64);
+                        assert_eq!(run.checkpoint["step"], json!(index - 1));
+                        assert!(
+                            events.iter().all(|event| event.id != input.event.id),
+                            "事务中写入的半条事件不得在 reopen 后出现"
+                        );
+                    }
+                }
+            }
+
+            {
+                let mut conn = open(&path).unwrap();
+                let event = append_agent_step(&mut conn, &input).unwrap();
+                assert_eq!(event.sequence, index as i64 + 1);
+            }
+            // 每一个完整步骤后立即丢弃连接并重开，等价验证 kill-after-commit。
+            let conn = open(&path).unwrap();
+            let AgentAudit::EventSourced { run, events } =
+                load_agent_audit(&conn, "agent-turn").unwrap().unwrap()
+            else {
+                panic!("提交首个事件后必须进入 event-sourced 模式");
+            };
+            assert_eq!(events.len(), index + 1);
+            assert_eq!(run.last_sequence, index as i64 + 1);
+            assert_eq!(run.checkpoint["lastCompleteKind"], json!(kind));
+            assert_eq!(events.last().unwrap().event_type, *kind);
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|event| event.sequence)
+                    .collect::<Vec<_>>(),
+                (1..=index as i64 + 1).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn agent_events_are_insert_only_and_duplicate_append_is_atomic() {
+        let mut conn = seeded();
+        // The generic seed uses turn "t"; adapt a valid first step to it.
+        let mut first = agent_step("exploration-started", 0);
+        first.turn_id = "t".into();
+        append_agent_step(&mut conn, &first).unwrap();
+
+        assert!(
+            conn.execute(
+                "UPDATE agent_events SET event_type = 'retry' WHERE id = ?1",
+                params![first.event.id],
+            )
+            .is_err(),
+            "schema trigger must reject mutation of an appended event"
+        );
+
+        let mut duplicate = agent_step("search-requested", 1);
+        duplicate.turn_id = "t".into();
+        duplicate.event.id = first.event.id.clone();
+        assert!(append_agent_step(&mut conn, &duplicate).is_err());
+
+        let AgentAudit::EventSourced { run, events } =
+            load_agent_audit(&conn, "t").unwrap().unwrap()
+        else {
+            panic!("first event must remain readable");
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "exploration-started");
+        assert_eq!(run.last_sequence, 1);
+        assert_eq!(run.checkpoint["step"], 0);
+    }
+
+    #[test]
+    fn ordinary_workspace_snapshot_replacement_preserves_agent_audit_history() {
+        let mut conn = seeded();
+        let mut first = agent_step("exploration-started", 0);
+        first.turn_id = "t".into();
+        append_agent_step(&mut conn, &first).unwrap();
+
+        let replacement = load_workspace(&conn).unwrap().unwrap();
+        replace_workspace_snapshot(&mut conn, &replacement).unwrap();
+
+        let AgentAudit::EventSourced { run, events } =
+            load_agent_audit(&conn, "t").unwrap().unwrap()
+        else {
+            panic!("ordinary workspace snapshots must not erase the audit log");
+        };
+        assert_eq!(run.last_sequence, 1);
+        assert_eq!(events.len(), 1);
     }
 
     /// 移植过来最容易在第一天炸的地方：Dexie 侧刻意把 turns 写在 cards 之前（那边

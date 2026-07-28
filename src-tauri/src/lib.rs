@@ -4,7 +4,10 @@ mod notes;
 mod vault;
 mod watcher;
 
-use db::{AttentionSnapshot, AttentionUpsert, RemovedProject, WorkspaceSnapshot, WorkspaceUpsert};
+use db::{
+    AgentAudit, AgentEventRecord, AppendAgentStepInput, AttentionSnapshot, AttentionUpsert,
+    RemovedProject, WorkspaceSnapshot, WorkspaceUpsert,
+};
 use llm::{ChatRequest, KeySource, ProviderConfig, ProviderHealth, PublicConfig, StreamEvent};
 use rusqlite::Connection;
 use serde_json::Value;
@@ -56,6 +59,19 @@ fn load_attention(state: State<Db>) -> Result<AttentionSnapshot, db::Error> {
 #[tauri::command]
 fn apply_changes(state: State<Db>, upsert: WorkspaceUpsert) -> Result<(), db::Error> {
     with_db!(state, conn, db::apply_changes(conn, &upsert))
+}
+
+#[tauri::command]
+fn load_agent_audit(state: State<Db>, turn_id: String) -> Result<Option<AgentAudit>, db::Error> {
+    with_db!(state, conn, db::load_agent_audit(conn, &turn_id))
+}
+
+#[tauri::command]
+fn append_agent_step(
+    state: State<Db>,
+    input: AppendAgentStepInput,
+) -> Result<AgentEventRecord, db::Error> {
+    with_db!(state, conn, db::append_agent_step(conn, &input))
 }
 
 #[tauri::command]
@@ -834,6 +850,8 @@ pub fn run() {
             load_workspace,
             load_attention,
             apply_changes,
+            load_agent_audit,
+            append_agent_step,
             apply_attention_changes,
             put_attention_state,
             delete_project_cascade,

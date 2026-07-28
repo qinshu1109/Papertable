@@ -16,11 +16,20 @@ import type {
   WorkspaceSnapshot,
   WorkspaceUpsert,
 } from "../delta";
+import type {
+  AgentAudit,
+  AgentEventRecord,
+  AppendAgentStepInput,
+} from "../agentEvents";
 import type { StorageAdapter } from "./types";
 
 export const tauriStorage: StorageAdapter = {
   loadWorkspace: () => invoke<WorkspaceSnapshot | null>("load_workspace"),
   loadAttentionState: () => invoke<AttentionSnapshot>("load_attention"),
+  loadAgentAudit: (turnId) =>
+    invoke<AgentAudit | null>("load_agent_audit", { turnId }),
+  appendAgentStep: (input: AppendAgentStepInput) =>
+    invoke<AgentEventRecord>("append_agent_step", { input }),
   seedIfEmpty: (seed) => invoke<WorkspaceSnapshot>("seed_if_empty", { seed }),
   applyChanges: (upsert) => invoke<void>("apply_changes", { upsert }),
   applyAttentionChanges: (upsert) =>

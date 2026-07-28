@@ -23,6 +23,12 @@ export type {
   WorkspaceSnapshot,
   WorkspaceUpsert,
 } from "../delta";
+export type {
+  AgentAudit,
+  AgentEventRecord,
+  AgentRunRecord,
+  AppendAgentStepInput,
+} from "../agentEvents";
 
 export const storage: StorageAdapter =
   __PAPERTABLE_TARGET__ === "desktop" ? tauriStorage : dexieStorage;
@@ -30,6 +36,8 @@ export const storage: StorageAdapter =
 export const {
   loadWorkspace,
   loadAttentionState,
+  loadAgentAudit,
+  appendAgentStep,
   seedIfEmpty,
   applyChanges,
   applyAttentionChanges,
