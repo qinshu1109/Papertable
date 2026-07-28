@@ -13,6 +13,8 @@
 - 2026-07-28: the first bundle audit command targeted a non-existent override path; the report was corrected to scan the actual isolated `dist/` artifact.
 - 2026-07-28: independent typechecks, ESLint, Prettier, four adapter tests, Rust compile, browser bundle audit, root dependency diff, and workspace validation all passed.
 - 2026-07-28: WenzMark was already marked `completed` before Git integration; the supervisor kept downstream tasks locked until PR merge.
+- 2026-07-28: PR #2 `verify` failed because repository-wide Prettier had not been run on the new workspace Markdown.
+- 2026-07-28: formatted governed workspace files while excluding immutable raw sources and generated `target/`; retained TASK-011's inline dependency list because the workspace validator requires a non-empty scalar on the key line.
 
 ## Acceptance
 

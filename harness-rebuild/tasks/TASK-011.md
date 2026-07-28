@@ -10,10 +10,13 @@ verify: runTwoStage/planQueries/宿主词法兜底代码删除，全量回归绿
 ---
 
 ## 任务内容
+
 唯一的删除卡。前置：所有失败路径已被新状态机承接（TASK-004~010 done）。删除 runTwoStage、planQueries、H路径及其调用点与探测回落逻辑。若用户要求，可将双阶段迁出为内部eval基线（默认不做）。
 
 ## 输入
+
 ADR-001；全部前置卡产物。
 
 ## 预期输出
+
 删除PR + 回归证明。

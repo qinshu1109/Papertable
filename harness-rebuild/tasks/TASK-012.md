@@ -10,10 +10,13 @@ verify: 拖文件/文件夹→当前卡片附件（体积与数量护栏、超�
 ---
 
 ## 任务内容
+
 按 ADR-004/005 实现：Tauri onDragDropEvent 接入 → 体积检查 → 快照拷贝 → 附件索引（与正式库表隔离）→ 宿主冻结作用域 → 引用与幽灵来源治理（扩展 controlledCitations）→ 提升动作。Rust 侧补 readableIds 数据层校验（此项为全局加固，不限附件）。
 
 ## 输入
+
 ADR-004/005；sources/research/papertable.md §4-5。
 
 ## 预期输出
+
 附件管线 + 双侧校验 + 幽灵来源展示 + 测试。
