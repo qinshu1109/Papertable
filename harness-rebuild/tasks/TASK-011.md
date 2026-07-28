@@ -1,7 +1,7 @@
 ---
 id: TASK-011
 title: 删除双阶段与全部旧兜底
-status: in_progress
+status: done
 depends_on: [TASK-004, TASK-005, TASK-006, TASK-007, TASK-008, TASK-009, TASK-010]
 parallelizable: false
 isolation: outputs/task-011/

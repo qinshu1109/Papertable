@@ -127,3 +127,10 @@
   card. Protected untracked QA files remain untouched.
 - Acceptance conclusion: pass. The change is eligible for explicit-path
   commit, PR, CI, and merge.
+
+## Merge closure
+
+- PR: `#13`
+- CI: Rust passed in 1m31s; verify passed in 2m29s.
+- Merge commit: `7e3c283ccfadf28b625bcfe41a4803a30c3f2499`
+- Final task status: `done`
