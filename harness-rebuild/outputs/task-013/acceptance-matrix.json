@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-28T08:53:15.743Z",
+  "overall": "passed",
+  "assertions": [
+    "correct-tool-calls",
+    "correct-terminal-state",
+    "persisted-evidence",
+    "no-unauthorized-reads",
+    "no-unhandled-duplicate-calls",
+    "no-two-stage-on-protocol-failure"
+  ],
+  "goldenReplay": {
+    "fixtureSchemaVersion": 1,
+    "tasks": [
+      "TASK-004",
+      "TASK-005",
+      "TASK-006",
+      "TASK-007",
+      "TASK-008",
+      "TASK-009",
+      "TASK-010",
+      "TASK-011",
+      "TASK-012"
+    ],
+    "fixtures": 32,
+    "passed": 32,
+    "failed": 0,
+    "answerWordingCompared": false,
+    "semanticMutationAlarmVerified": true
+  },
+  "deterministicRuntime": {
+    "providerContract": {
+      "model": "papertable-test-model",
+      "toolCallEmission": "passed",
+      "toolResultAcceptance": "passed",
+      "streamingToolCallDelta": "passed"
+    },
+    "rows": [
+      {
+        "id": "natural-convergence",
+        "terminal": { "result": "completed", "reason": "none" },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "exhaustion-successful-synthesis",
+        "terminal": { "result": "partial", "reason": "rounds_exhausted" },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "exhaustion-failed-repair",
+        "terminal": { "result": "failed", "reason": "protocol_error" },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "no-progress-lure",
+        "terminal": {
+          "result": "refused",
+          "reason": "insufficient_evidence"
+        },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "attachment-citation",
+        "terminal": { "result": "completed", "reason": "none" },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "protocol-failure-injection",
+        "terminal": { "result": "failed", "reason": "protocol_error" },
+        "allSixCriteria": "passed"
+      }
+    ]
+  },
+  "realProvider": {
+    "status": "passed",
+    "configured": true,
+    "model": "claude-opus-5",
+    "host": "cozai.net",
+    "toolCallEmission": "passed",
+    "toolResultAcceptance": "passed",
+    "streamingToolCallDelta": "passed",
+    "rows": [
+      {
+        "id": "natural-convergence",
+        "execution": "external",
+        "terminal": { "result": "completed", "reason": "none" },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "budget-exhaustion",
+        "execution": "external",
+        "terminal": { "result": "partial", "reason": "rounds_exhausted" },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "no-progress-lure",
+        "execution": "external",
+        "observedBehavior": "model-avoided-duplicate-after-one-empty-search",
+        "terminal": { "result": "completed", "reason": "none" },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "attachment-citation",
+        "execution": "external",
+        "terminal": { "result": "completed", "reason": "none" },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "exhaustion-failed-repair-injection",
+        "execution": "injected",
+        "terminal": { "result": "failed", "reason": "protocol_error" },
+        "allSixCriteria": "passed"
+      },
+      {
+        "id": "protocol-failure-injection",
+        "execution": "injected",
+        "terminal": { "result": "failed", "reason": "protocol_error" },
+        "allSixCriteria": "passed"
+      }
+    ]
+  }
+}

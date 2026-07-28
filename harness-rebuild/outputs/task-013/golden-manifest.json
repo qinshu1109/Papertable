@@ -1,0 +1,253 @@
+{
+  "schemaVersion": 1,
+  "fixtureSchemaVersion": 1,
+  "tasks": [
+    "task-004",
+    "task-005",
+    "task-006",
+    "task-007",
+    "task-008",
+    "task-009",
+    "task-010",
+    "task-011",
+    "task-012"
+  ],
+  "entries": [
+    {
+      "path": "task-004/empty-synthesis-protocol-error.json",
+      "semanticSha256": "c3f7ec6e70bae9c116e1ec3f75eca637ce0f298471a4d59a589166060fa01bcb",
+      "criteria": [
+        "correct-terminal-state",
+        "persisted-evidence",
+        "no-two-stage-on-protocol-failure"
+      ]
+    },
+    {
+      "path": "task-004/legacy-exit-matrix.json",
+      "semanticSha256": "21cd1f50555c8570bd15b637ede32558cb11ec70ae27527c2e2b4bf1c6f9180c",
+      "criteria": ["correct-terminal-state", "persisted-evidence"]
+    },
+    {
+      "path": "task-004/length-truncated-batch.json",
+      "semanticSha256": "31e28c853fddf180d2992f76094f4d3e04269ae0e2db7c46ee62699b074c2ffc",
+      "criteria": [
+        "correct-tool-calls",
+        "correct-terminal-state",
+        "persisted-evidence"
+      ]
+    },
+    {
+      "path": "task-004/rounds-exhausted-partial.json",
+      "semanticSha256": "45d4be071f128a71d6f0a878785b58498e7af9d7a56a84fd5883878c6cd26fba",
+      "criteria": [
+        "correct-tool-calls",
+        "correct-terminal-state",
+        "persisted-evidence",
+        "no-unauthorized-reads"
+      ]
+    },
+    {
+      "path": "task-005/calls-exhausted.json",
+      "semanticSha256": "eb30d404722fe7f1987adf7540aaa05bc73e75db3f2d60ade725ddf3ebb3cc0a",
+      "criteria": ["correct-terminal-state", "persisted-evidence"]
+    },
+    {
+      "path": "task-005/persistence-reopen.json",
+      "semanticSha256": "f4a0fe168ecae6db98e36578d8bf3cafa5b797d41729813b8b21f5d8f6a005c7",
+      "criteria": ["persisted-evidence"]
+    },
+    {
+      "path": "task-005/rounds-exhausted.json",
+      "semanticSha256": "109a755596c750d0443547007cdf270445ef144958b1d77211bd86c44ecd4fe9",
+      "criteria": ["correct-terminal-state", "persisted-evidence"]
+    },
+    {
+      "path": "task-005/tokens-exhausted.json",
+      "semanticSha256": "41b06737970f4f24f2847951f37ad156e2862416deb380ac6e96e54b7c38caf9",
+      "criteria": ["correct-terminal-state", "persisted-evidence"]
+    },
+    {
+      "path": "task-005/wall-exhausted.json",
+      "semanticSha256": "773abe8b92bba8fcb5e041ed4ba8d18bfe66b6c8c90a7e4c7a1e3fbb831ad0b9",
+      "criteria": ["correct-terminal-state", "persisted-evidence"]
+    },
+    {
+      "path": "task-006/first-repeat-reminder.json",
+      "semanticSha256": "cc4251a8287df0505475299c55b4cf14329ea3c21e14c62e221492f20a881518",
+      "criteria": [
+        "correct-tool-calls",
+        "persisted-evidence",
+        "no-unhandled-duplicate-calls"
+      ]
+    },
+    {
+      "path": "task-006/insufficient-no-progress.json",
+      "semanticSha256": "460888f378496a6ed111abb8dc7cbdf2c6ed514351abed7cf30aea8ca1d5c218",
+      "criteria": [
+        "correct-tool-calls",
+        "correct-terminal-state",
+        "persisted-evidence",
+        "no-unhandled-duplicate-calls"
+      ]
+    },
+    {
+      "path": "task-006/persistence-reopen.json",
+      "semanticSha256": "130946d808c20b2a84b4be89553993b8e77daa6c32bea3bc1159b02668dd1298",
+      "criteria": ["persisted-evidence", "no-unhandled-duplicate-calls"]
+    },
+    {
+      "path": "task-006/qualified-no-progress.json",
+      "semanticSha256": "938c1de3dd67481de43dd293340b5b6828b63a767d513adad1047b39edb5bdfb",
+      "criteria": [
+        "correct-tool-calls",
+        "correct-terminal-state",
+        "persisted-evidence",
+        "no-unauthorized-reads",
+        "no-unhandled-duplicate-calls"
+      ]
+    },
+    {
+      "path": "task-007/ambiguous-repair-success.json",
+      "semanticSha256": "e3e572d1f218de4c931143ef595e2042e65730a552ceb7e377522905f707446f",
+      "criteria": [
+        "correct-tool-calls",
+        "persisted-evidence",
+        "no-two-stage-on-protocol-failure"
+      ]
+    },
+    {
+      "path": "task-007/persistence-reopen.json",
+      "semanticSha256": "a42b81f50d6b171a5787189c8af07c75a13d9b1f34f37247a30bd5966ca78c86",
+      "criteria": [
+        "correct-terminal-state",
+        "persisted-evidence",
+        "no-unauthorized-reads",
+        "no-two-stage-on-protocol-failure"
+      ]
+    },
+    {
+      "path": "task-007/repair-exhausted-protocol-error.json",
+      "semanticSha256": "2148ee67e4809c4bc5d0b3440e1a24ee1d4f7a9703e043e4bc72bbdefc4650fc",
+      "criteria": [
+        "correct-tool-calls",
+        "correct-terminal-state",
+        "persisted-evidence",
+        "no-two-stage-on-protocol-failure"
+      ]
+    },
+    {
+      "path": "task-007/retry-classification.json",
+      "semanticSha256": "34941efc01521b53c7570af66f3896ec7ffa0585adb78daedf976cd828019b20",
+      "criteria": ["persisted-evidence", "no-two-stage-on-protocol-failure"]
+    },
+    {
+      "path": "task-007/rust-run-allowlist.json",
+      "semanticSha256": "63a11644c92ae23ecfb00c757ea292940e6b46a33264b6394b7c0af75c6a4fc2",
+      "criteria": [
+        "correct-tool-calls",
+        "persisted-evidence",
+        "no-unauthorized-reads"
+      ]
+    },
+    {
+      "path": "task-008/crash-reopen.json",
+      "semanticSha256": "b89329319641295cdc95c4552008538ee9b75d21a1099351c7ef3a4ff5ba9efe",
+      "criteria": [
+        "persisted-evidence",
+        "no-unauthorized-reads",
+        "no-unhandled-duplicate-calls"
+      ]
+    },
+    {
+      "path": "task-008/double-resume.json",
+      "semanticSha256": "bce16bfc0989581c42cce16f25e7e91549389020ab16c03536ff92da70507c53",
+      "criteria": ["persisted-evidence", "no-unhandled-duplicate-calls"]
+    },
+    {
+      "path": "task-008/same-run-event-flow.json",
+      "semanticSha256": "9e25551e54fc08b09520c0cffd2e8a184e16879c3527c4d1822a9e655c40c931",
+      "criteria": [
+        "correct-terminal-state",
+        "persisted-evidence",
+        "no-unhandled-duplicate-calls"
+      ]
+    },
+    {
+      "path": "task-008/seven-category-working-set.json",
+      "semanticSha256": "65863b2649bfa56b1a7a8b2d0db19173ba1b6920fea16a1397233aeb4220204c",
+      "criteria": [
+        "correct-tool-calls",
+        "persisted-evidence",
+        "no-unauthorized-reads"
+      ]
+    },
+    {
+      "path": "task-009/live-reload-timeline.json",
+      "semanticSha256": "3094d0500d04ba7771a46e103412732381f3730faf8749673f569ec2ab1ecca6",
+      "criteria": ["persisted-evidence"]
+    },
+    {
+      "path": "task-009/promotion-authority-boundary.json",
+      "semanticSha256": "1c70bdbe5ad0384bf227afe7da74c21ff770fb1c767cc5943674b9747ee75a94",
+      "criteria": ["persisted-evidence", "no-unauthorized-reads"]
+    },
+    {
+      "path": "task-009/repair-interruption-visibility.json",
+      "semanticSha256": "3fcbfd11da3f56542d81403dea900005cf31654f581f4f0e9f58da027a464f1b",
+      "criteria": [
+        "persisted-evidence",
+        "no-unhandled-duplicate-calls",
+        "no-two-stage-on-protocol-failure"
+      ]
+    },
+    {
+      "path": "task-009/terminal-budget-matrix.json",
+      "semanticSha256": "312a6c27706bdf10db7745ef6e13b131154aeb468f3089f047aaaf4d6a90e05a",
+      "criteria": ["correct-terminal-state", "persisted-evidence"]
+    },
+    {
+      "path": "task-010/invalidation-matrix.json",
+      "semanticSha256": "36ecaead0fec58f98f5efb7f61c01ceb15fcaa1d13cb6b0acf8a9c5a4f6377ee",
+      "criteria": ["persisted-evidence", "no-two-stage-on-protocol-failure"]
+    },
+    {
+      "path": "task-010/stale-probe-concurrency.json",
+      "semanticSha256": "fe28ac53358d3198f78aeb9b4d70538a3989d0600568946491b18b2cbdefb87b",
+      "criteria": ["persisted-evidence", "no-unhandled-duplicate-calls"]
+    },
+    {
+      "path": "task-010/three-stage-admitted.json",
+      "semanticSha256": "d03d0fc66e712a8d24359abc29d7399e43f45cdb60ef4693b52b31d31749940e",
+      "criteria": ["correct-tool-calls", "persisted-evidence"]
+    },
+    {
+      "path": "task-010/three-stage-partial-failures.json",
+      "semanticSha256": "0d417abafe7a31797b0edbc21c96cbc4737484ab7ae3d9543f2021726ecc2613",
+      "criteria": [
+        "correct-tool-calls",
+        "persisted-evidence",
+        "no-two-stage-on-protocol-failure"
+      ]
+    },
+    {
+      "path": "task-011/no-fallback-replay.json",
+      "semanticSha256": "5f77a2cdbe2b4e662ba548fd02bf510a77688bece7ed8ceea7bb4e0683513ec3",
+      "criteria": [
+        "correct-tool-calls",
+        "correct-terminal-state",
+        "persisted-evidence",
+        "no-unauthorized-reads",
+        "no-two-stage-on-protocol-failure"
+      ]
+    },
+    {
+      "path": "task-012/lifecycle-fixtures.json",
+      "semanticSha256": "adeda5bd5fc5b39865a77c3d04e51352ae0628b84cb4b8c2e207dfb304f66bc6",
+      "criteria": [
+        "correct-tool-calls",
+        "persisted-evidence",
+        "no-unauthorized-reads"
+      ]
+    }
+  ]
+}
