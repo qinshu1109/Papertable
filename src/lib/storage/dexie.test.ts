@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Dexie from "dexie";
 import {
+  appendAgentStep,
+  appendAgentStepWithFailureForTest,
   applyAttentionChanges,
   applyChanges,
   clearWorkspace,
@@ -11,6 +13,7 @@ import {
   deleteProposals,
   deleteReferences,
   loadAttentionState,
+  loadAgentAudit,
   loadWorkspace,
   putAttentionState,
   saveWorkspace,
@@ -19,6 +22,10 @@ import {
 import { diffAttention, diffWorkspace } from "../delta";
 import { recoverInterruptedTurns } from "../context";
 import type { AttentionSnapshot, WorkspaceSnapshot } from "../delta";
+import {
+  AGENT_EVENT_SCHEMA_VERSION,
+  type AppendAgentStepInput,
+} from "../agentEvents";
 
 const snapshot = (): WorkspaceSnapshot => ({
   projects: [{ id: "p", name: "测试项目", pinned: false, updatedAt: 1 }],
@@ -116,6 +123,39 @@ const freshDb = async () => {
   await db.open();
 };
 
+const agentStep = (
+  kind: "exploration-started" | "search-requested",
+  index: number,
+): AppendAgentStepInput => ({
+  runId: "run-1",
+  turnId: "t",
+  schemaVersion: AGENT_EVENT_SCHEMA_VERSION,
+  startedAt: 10,
+  updatedAt: 10 + index,
+  checkpoint: {
+    phase: kind === "exploration-started" ? "exploring" : "searching",
+    objective: "测试事件持久化",
+    executedSearches: kind === "search-requested" ? ["知识图谱"] : [],
+    readChunkIds: [],
+    confirmedCitationChunkIds: [],
+    unresolvedQuestions: [],
+    addedBudget: {},
+  },
+  event: {
+    id: `agent-event-${index}`,
+    schemaVersion: AGENT_EVENT_SCHEMA_VERSION,
+    occurredAt: 10 + index,
+    message:
+      kind === "exploration-started"
+        ? {
+            kind,
+            objective: "测试事件持久化",
+            mode: "two-stage",
+          }
+        : { kind, query: "知识图谱" },
+  },
+});
+
 const v4Schema = {
   projects: "id, updatedAt, pinned",
   cards: "id, projectId, createdAt, trashed",
@@ -193,6 +233,80 @@ test("cold-start streaming recovery persists an interrupted turn before it is re
   assert.equal(turn?.status, "interrupted");
   assert.equal(turn?.streaming, false);
   assert.equal(turn?.content, "已生成");
+});
+
+test("legacy turns stay readable without backfill, then switch to event-sourced audit", async () => {
+  await freshDb();
+  await saveWorkspace(snapshot());
+  await db.turns.update("t", {
+    agentRun: {
+      mode: "two-stage",
+      startedAt: 1,
+      finishedAt: 2,
+      searchQueries: ["旧检索"],
+      hitCount: 1,
+      readChunkIds: [],
+    },
+  });
+
+  assert.deepEqual(await loadAgentAudit("t"), {
+    kind: "legacy",
+    turnId: "t",
+    trace: {
+      mode: "two-stage",
+      startedAt: 1,
+      finishedAt: 2,
+      searchQueries: ["旧检索"],
+      hitCount: 1,
+      readChunkIds: [],
+    },
+  });
+  assert.equal(await db.agentRuns.count(), 0, "legacy read must not backfill");
+  assert.equal(
+    await db.agentEvents.count(),
+    0,
+    "legacy read must not backfill",
+  );
+
+  const persisted = await appendAgentStep(agentStep("exploration-started", 1));
+  assert.equal(persisted.sequence, 1);
+  const audit = await loadAgentAudit("t");
+  assert.equal(audit?.kind, "event-sourced");
+  if (audit?.kind === "event-sourced") {
+    assert.equal(audit.run.lastSequence, 1);
+    assert.equal(audit.events[0].eventType, "exploration-started");
+  }
+
+  await saveWorkspace(snapshot());
+  const afterSnapshot = await loadAgentAudit("t");
+  assert.equal(
+    afterSnapshot?.kind,
+    "event-sourced",
+    "ordinary workspace snapshots must preserve complete audit history",
+  );
+});
+
+test("agent event and run cursor abort together at every IndexedDB transaction boundary", async () => {
+  for (const failurePoint of [
+    "after-run-ensured",
+    "after-event-inserted",
+    "after-run-state-changed",
+  ] as const) {
+    await freshDb();
+    await saveWorkspace(snapshot());
+    await assert.rejects(
+      appendAgentStepWithFailureForTest(
+        agentStep("exploration-started", 1),
+        failurePoint,
+      ),
+      /injected crash/,
+    );
+    db.close();
+    await db.open();
+    assert.equal(await db.agentRuns.count(), 0);
+    assert.equal(await db.agentEvents.count(), 0);
+    assert.equal((await loadAgentAudit("t"))?.kind, "legacy");
+  }
 });
 
 test("incremental saves leave untouched rows in place", async () => {
@@ -496,7 +610,7 @@ test("IndexedDB restores cards, drafts and scroll positions", async () => {
   assert.equal(await loadWorkspace(), null);
 });
 
-test("v4 workspace migrates to v5 corpus tables without touching existing cards", async () => {
+test("v4 workspace migrates through v6 without touching existing cards or backfilling events", async () => {
   // Construct a genuine v4 database before opening the current Dexie class.
   // This guards the real in-browser upgrade path rather than merely checking
   // that a freshly-created v5 database has the new tables.
@@ -541,13 +655,16 @@ test("v4 workspace migrates to v5 corpus tables without touching existing cards"
 
   await db.open();
   const restored = await loadWorkspace();
-  assert.equal(db.verno, 5);
+  assert.equal(db.verno, 6);
   assert.equal(restored?.cards[0]?.id, "legacy-card");
   assert.equal(restored?.cards[0]?.turns[0]?.content, "旧问题");
   assert.equal(await db.noteLibraries.count(), 0);
   assert.equal(await db.noteDocuments.count(), 0);
   assert.equal(await db.noteChunks.count(), 0);
   assert.equal(await db.projectNoteLibraries.count(), 0);
+  assert.equal(await db.agentRuns.count(), 0);
+  assert.equal(await db.agentEvents.count(), 0);
+  assert.equal((await loadAgentAudit("legacy-turn"))?.kind, "legacy");
 });
 
 test("workspace snapshots preserve the independent note corpus and clear-all removes it", async () => {
@@ -607,7 +724,7 @@ test("workspace snapshots preserve the independent note corpus and clear-all rem
   assert.equal(await db.projectNoteLibraries.count(), 0);
 });
 
-test("v5 attention tables survive ordinary workspace snapshots and clear with local data", async () => {
+test("v6 attention tables survive ordinary workspace snapshots and clear with local data", async () => {
   await freshDb();
   await saveWorkspace(snapshot());
   await putAttentionState({
@@ -659,7 +776,7 @@ test("v5 attention tables survive ordinary workspace snapshots and clear with lo
   assert.equal(attention.events.length, 1);
   assert.equal(attention.sessions.length, 1);
   assert.equal(attention.proposals.length, 1);
-  assert.equal(db.verno, 5);
+  assert.equal(db.verno, 6);
   await clearWorkspace();
   const cleared = await loadAttentionState();
   assert.deepEqual(cleared, { events: [], sessions: [], proposals: [] });

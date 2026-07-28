@@ -27,6 +27,15 @@ import {
   stripTurns,
 } from "../delta";
 import type { StorageAdapter } from "./types";
+import {
+  AGENT_EVENT_SCHEMA_VERSION,
+  AGENT_EVENT_TYPES,
+  type AgentAudit,
+  type AgentEventRecord,
+  type AgentRunPhase,
+  type AgentRunRecord,
+  type AppendAgentStepInput,
+} from "../agentEvents";
 
 export type {
   AnchorRecord,
@@ -65,6 +74,8 @@ class PapertableDb extends Dexie {
   noteDocuments!: Table<NoteDocumentRecord, string>;
   noteChunks!: Table<NoteChunk, string>;
   projectNoteLibraries!: Table<ProjectNoteLibraryRecord, [string, string]>;
+  agentRuns!: Table<AgentRunRecord, string>;
+  agentEvents!: Table<AgentEventRecord, string>;
 
   constructor() {
     super("papertable-web-v1");
@@ -135,6 +146,25 @@ class PapertableDb extends Dexie {
         noteDocuments: "id, libraryId, relativePath, versionHash, updatedAt",
         noteChunks: "id, libraryId, documentId, ordinal",
         projectNoteLibraries: "[projectId+libraryId], projectId, libraryId",
+      })
+      .upgrade(() => undefined);
+    // v6 adds the versioned Agent audit log. Existing turns remain untouched;
+    // the read API exposes them as legacy summaries and never backfills rows.
+    this.version(6)
+      .stores({
+        ...schema,
+        interactionEvents:
+          "id, projectId, sessionId, createdAt, type, targetCardId, sourceCardId",
+        sessionBoundaries:
+          "id, projectId, localDate, startedAt, lastActiveAt, endedAt, processedAt",
+        proposals:
+          "id, projectId, sessionId, status, createdAt, expiresAt, purgeAt, candidateKey",
+        noteLibraries: "id, kind, updatedAt",
+        noteDocuments: "id, libraryId, relativePath, versionHash, updatedAt",
+        noteChunks: "id, libraryId, documentId, ordinal",
+        projectNoteLibraries: "[projectId+libraryId], projectId, libraryId",
+        agentRuns: "id, &turnId, updatedAt, phase",
+        agentEvents: "id, runId, &[runId+sequence], occurredAt, eventType",
       })
       .upgrade(() => undefined);
   }
@@ -238,9 +268,155 @@ export async function loadWorkspace(): Promise<WorkspaceSnapshot | null> {
   };
 }
 
+export async function loadAgentAudit(
+  turnId: string,
+): Promise<AgentAudit | null> {
+  const run = await db.agentRuns.where("turnId").equals(turnId).first();
+  if (run) {
+    const events = await db.agentEvents
+      .where("runId")
+      .equals(run.id)
+      .sortBy("sequence");
+    return { kind: "event-sourced", run, events };
+  }
+  const turn = await db.turns.get(turnId);
+  if (!turn) return null;
+  return {
+    kind: "legacy",
+    turnId,
+    trace: turn.agentRun ?? null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 写入：只增不删
 // ---------------------------------------------------------------------------
+
+type AgentAppendFailurePoint =
+  "after-run-ensured" | "after-event-inserted" | "after-run-state-changed";
+
+const AGENT_RUN_PHASES: readonly AgentRunPhase[] = [
+  "exploring",
+  "searching",
+  "reading",
+  "repairing",
+  "retrying",
+  "synthesizing",
+  "terminal",
+];
+
+function validateAgentStep(input: AppendAgentStepInput): void {
+  if (
+    input.schemaVersion !== AGENT_EVENT_SCHEMA_VERSION ||
+    input.event.schemaVersion !== AGENT_EVENT_SCHEMA_VERSION
+  )
+    throw new Error("Unsupported Agent event schema version");
+  if (
+    !AGENT_EVENT_TYPES.includes(input.event.message.kind) ||
+    !AGENT_RUN_PHASES.includes(input.checkpoint.phase)
+  )
+    throw new Error("Unknown Agent event type or run phase");
+  if (
+    input.updatedAt < input.startedAt ||
+    input.event.occurredAt < input.startedAt
+  )
+    throw new Error("Agent step timestamp precedes run start");
+  const terminal = input.event.message.kind === "terminal";
+  if (
+    terminal !== (input.checkpoint.phase === "terminal") ||
+    terminal !== (input.finishedAt !== undefined)
+  )
+    throw new Error(
+      "terminal event, terminal phase and finishedAt must occur together",
+    );
+}
+
+async function appendAgentStepInternal(
+  input: AppendAgentStepInput,
+  failurePoint?: AgentAppendFailurePoint,
+): Promise<AgentEventRecord> {
+  validateAgentStep(input);
+  return enqueue(() =>
+    db.transaction("rw", db.turns, db.agentRuns, db.agentEvents, async () => {
+      if (!(await db.turns.get(input.turnId)))
+        throw new Error(`Agent run references missing turn: ${input.turnId}`);
+      const existing = await db.agentRuns.get(input.runId);
+      if (existing) {
+        if (
+          existing.turnId !== input.turnId ||
+          existing.schemaVersion !== input.schemaVersion ||
+          existing.startedAt !== input.startedAt
+        )
+          throw new Error("Agent run identity does not match existing row");
+        if (existing.phase === "terminal")
+          throw new Error("Terminal Agent run cannot accept another event");
+        if (input.updatedAt < existing.updatedAt)
+          throw new Error("Agent run updatedAt cannot move backwards");
+      } else {
+        await db.agentRuns.add({
+          id: input.runId,
+          turnId: input.turnId,
+          schemaVersion: input.schemaVersion,
+          phase: input.checkpoint.phase,
+          startedAt: input.startedAt,
+          updatedAt: input.updatedAt,
+          ...(input.finishedAt === undefined
+            ? {}
+            : { finishedAt: input.finishedAt }),
+          lastSequence: 0,
+          checkpoint: input.checkpoint,
+        });
+      }
+      if (failurePoint === "after-run-ensured")
+        throw new Error("injected crash after-run-ensured");
+
+      const sequence = (existing?.lastSequence ?? 0) + 1;
+      const event: AgentEventRecord = {
+        id: input.event.id,
+        runId: input.runId,
+        sequence,
+        schemaVersion: input.event.schemaVersion,
+        eventType: input.event.message.kind,
+        occurredAt: input.event.occurredAt,
+        message: input.event.message,
+      };
+      await db.agentEvents.add(event);
+      if (failurePoint === "after-event-inserted")
+        throw new Error("injected crash after-event-inserted");
+
+      await db.agentRuns.put({
+        id: input.runId,
+        turnId: input.turnId,
+        schemaVersion: input.schemaVersion,
+        phase: input.checkpoint.phase,
+        startedAt: input.startedAt,
+        updatedAt: input.updatedAt,
+        ...(input.finishedAt === undefined
+          ? {}
+          : { finishedAt: input.finishedAt }),
+        lastSequence: sequence,
+        checkpoint: input.checkpoint,
+      });
+      if (failurePoint === "after-run-state-changed")
+        throw new Error("injected crash after-run-state-changed");
+      return event;
+    }),
+  );
+}
+
+export async function appendAgentStep(
+  input: AppendAgentStepInput,
+): Promise<AgentEventRecord> {
+  return appendAgentStepInternal(input);
+}
+
+/** @internal deterministic transaction-abort seam for persistence tests. */
+export async function appendAgentStepWithFailureForTest(
+  input: AppendAgentStepInput,
+  failurePoint: AgentAppendFailurePoint,
+): Promise<AgentEventRecord> {
+  return appendAgentStepInternal(input, failurePoint);
+}
 
 async function writeTable<T>(
   table: Table<T, string>,
@@ -505,6 +681,8 @@ export async function importLibrary(input: {
 export const dexieStorage: StorageAdapter = {
   loadWorkspace,
   loadAttentionState,
+  loadAgentAudit,
+  appendAgentStep,
   seedIfEmpty,
   applyChanges,
   applyAttentionChanges,
