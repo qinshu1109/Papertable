@@ -1,7 +1,7 @@
 ---
 id: TASK-007
 title: 协议修复管线（同模型同协议）
-status: in_progress
+status: done
 depends_on: [TASK-004]
 parallelizable: true
 isolation: outputs/task-007/

@@ -2,7 +2,7 @@
 
 - Branch: `task/TASK-007-protocol-repair`
 - Started: `2026-07-28T12:35:24+08:00`
-- Status: `in_progress`
+- Status: `done`
 - WenzMark task ID: `87d16e14-3168-4c84-9466-d58d7378c876`
 
 ## Checkpoints
@@ -51,3 +51,4 @@
 ## Acceptance
 
 - `2026-07-28T13:03:04+08:00` — Supervisor technical acceptance PASS after source review, WenzMark/process/database reconciliation, independent test replay, and the deterministic-audit correction. Keep the task `in_progress` until PR/CI/merge and WenzMark closure are complete.
+- `2026-07-28T13:06:12+08:00` — PR #9 passed `verify` and `rust`, then squash-merged to `feat/readonly-note-harness-alpha` as `39ff889`. WenzMark, Git, task card, and CURRENT were closed together.
