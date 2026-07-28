@@ -840,6 +840,10 @@ function budgetExhaustionRuntime(options: {
   onSearch?: () => void;
 }): AgentRuntime {
   const allowed = chunk("budget-evidence");
+  const unread = {
+    ...chunk("budget-unread-hit"),
+    text: "这条搜索命中尚未通过 read_notes 读取，不能进入最终证据。",
+  };
   let request = 0;
   return baseRuntime({
     stream: (input) => {
@@ -916,9 +920,9 @@ function budgetExhaustionRuntime(options: {
         ]);
       return events([{ type: "done", finishReason: "stop" }]);
     },
-    search: async () => {
+    search: async (input) => {
       options.onSearch?.();
-      return [hit(allowed)];
+      return input.query === "预算证据" ? [hit(allowed)] : [hit(unread)];
     },
     read: async () => [allowed],
   });
@@ -954,6 +958,82 @@ test("exhausted round budget plus successful final synthesis is partial and trun
   const finalRequest = requests[requests.length - 1];
   assert.equal(finalRequest?.toolChoice, "none");
   assert.equal(finalRequest?.tools, undefined);
+  assert.ok(
+    finalRequest?.messages.every(
+      (message) =>
+        message.role !== "tool" &&
+        !(message.role === "assistant" && "toolCalls" in message),
+    ),
+    "finalization must receive a text-only card context",
+  );
+  const finalContext = JSON.stringify(finalRequest?.messages);
+  assert.match(finalContext, /阶段切换：你现在是 Papertable 的最终答案编写器/);
+  assert.match(finalContext, /budget-evidence/);
+  assert.doesNotMatch(finalContext, /budget-unread-hit/);
+  assert.doesNotMatch(finalContext, /尚未通过 read_notes 读取/);
+  assert.doesNotMatch(finalContext, /你必须主动使用只读工具检索这些材料/);
+});
+
+test("transport retry attempts do not consume the remaining semantic round", async () => {
+  let streams = 0;
+  const visible: string[] = [];
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => visible.push(event.text),
+    budgetLimits: { rounds: 1, calls: 2 },
+    runtime: baseRuntime({
+      stream: () => {
+        streams += 1;
+        if (streams === 1)
+          return (async function* () {
+            yield* [] as ProviderStreamEvent[];
+            throw new ProviderError(
+              providerErrorMessage("disconnected"),
+              "disconnected",
+            );
+          })();
+        if (streams === 2)
+          return events([
+            {
+              type: "tool-call-delta",
+              index: 0,
+              id: "search-after-reconnect",
+              name: "search_notes",
+              arguments: '{"query":"重连后的检索"}',
+            },
+            { type: "done", finishReason: "tool_calls" },
+          ]);
+        return events([
+          {
+            type: "token",
+            text: "重连后保留了完整语义轮，并完成最终综合。",
+            channel: "final",
+          },
+          { type: "done", finishReason: "stop" },
+        ]);
+      },
+      search: async () => [],
+    }),
+  });
+
+  assert.equal(streams, 3);
+  assert.deepEqual(outcome.terminal, {
+    result: "partial",
+    reason: "rounds_exhausted",
+  });
+  assert.equal(outcome.trace.budget?.used.rounds, 1);
+  assert.equal(
+    outcome.trace.budget?.records.filter(
+      (record) => record.dimension === "rounds" && record.amount === 1,
+    ).length,
+    1,
+  );
+  assert.deepEqual(visible, ["重连后保留了完整语义轮，并完成最终综合。"]);
 });
 
 test("exhausted budget plus empty synthesis and exhausted repair fails protocol with evidence and no answer", async () => {
@@ -1042,6 +1122,29 @@ test("final synthesis explicitly disables tools and never executes provider tool
   assert.equal(repairedSynthesis?.toolChoice, "none");
   assert.equal(firstSynthesis?.tools, undefined);
   assert.equal(repairedSynthesis?.tools, undefined);
+  const firstEvidence =
+    firstSynthesis?.messages[firstSynthesis.messages.length - 1];
+  const repairedEvidence =
+    repairedSynthesis?.messages[repairedSynthesis.messages.length - 1];
+  assert.equal(firstEvidence?.role, "user");
+  assert.deepEqual(
+    repairedEvidence,
+    firstEvidence,
+    "protocol repair must replay the frozen evidence packet unchanged",
+  );
+  for (const request of [firstSynthesis, repairedSynthesis]) {
+    assert.ok(
+      request?.messages.every(
+        (message) =>
+          message.role !== "tool" &&
+          !(message.role === "assistant" && "toolCalls" in message),
+      ),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(request?.messages),
+      /forbidden-final-search/,
+    );
+  }
   assert.ok(
     failure.trace.errors?.some((message) =>
       message.includes("final-synthesis-returned-tool-call"),
