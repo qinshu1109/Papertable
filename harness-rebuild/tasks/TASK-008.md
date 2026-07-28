@@ -1,7 +1,7 @@
 ---
 id: TASK-008
 title: 续跑与"继续深挖"
-status: in_progress
+status: done
 depends_on: [TASK-003, TASK-005]
 parallelizable: false
 isolation: outputs/task-008/

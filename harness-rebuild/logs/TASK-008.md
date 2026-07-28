@@ -2,7 +2,7 @@
 
 - Branch: `task/TASK-008-resume-run`
 - Started: `2026-07-28T13:10:37+08:00`
-- Status: `in_progress`
+- Status: `done`
 - WenzMark task ID: `073a5c3b-b571-409e-bf04-aee2bbc23022`
 
 ## Checkpoints
@@ -54,4 +54,4 @@
 
 ## Acceptance
 
-Supervisor technical acceptance: PASS. The card remains `in_progress` only until its PR is merged into the integration branch.
+Supervisor technical acceptance: PASS. PR #10 passed CI and was squash-merged into `feat/readonly-note-harness-alpha` as `dcdaba6`; WenzMark was closed as `completed`.
