@@ -1,3 +1,4 @@
+mod attachments;
 mod db;
 mod llm;
 mod notes;
@@ -802,6 +803,114 @@ fn note_library_remove(db: State<Db>, id: String) -> Result<(), notes::Error> {
     with_db!(db, conn, notes::remove_library(conn, &id))
 }
 
+// ---------------------------------------------------------------------------
+// 当前卡片附件
+//
+// 附件快照、索引与 run 级可读集合都使用独立表；这里不复用也不修改 TASK-007
+// 所有的正式资料库 readableIds 校验。模型工具本身没有 cardId/scope 参数，只有宿主
+// 根据运行开始时冻结的卡片作用域调用这些命令。
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn attachment_list(
+    db: State<Db>,
+    card_id: String,
+) -> Result<Vec<attachments::Attachment>, attachments::Error> {
+    with_db!(db, conn, attachments::list(conn, &card_id))
+}
+
+#[tauri::command]
+fn attachment_preflight(
+    db: State<Db>,
+    imports: State<attachments::AttachmentImports>,
+    card_id: String,
+    paths: Vec<String>,
+) -> Result<attachments::AttachmentPreflight, attachments::Error> {
+    with_db!(db, conn, {
+        attachments::preflight(conn, &imports, &card_id, &paths)
+    })
+}
+
+#[tauri::command]
+fn attachment_import(
+    db: State<Db>,
+    imports: State<attachments::AttachmentImports>,
+    store: State<attachments::AttachmentStore>,
+    request: attachments::AttachmentImportRequest,
+    progress: Channel<attachments::AttachmentProgress>,
+) -> Result<attachments::AttachmentImportResult, attachments::Error> {
+    with_db!(db, conn, {
+        attachments::import(conn, &imports, &store, &request, &progress)
+    })
+}
+
+#[tauri::command]
+fn attachment_cancel_import(
+    imports: State<attachments::AttachmentImports>,
+    job_id: String,
+) -> Result<(), attachments::Error> {
+    attachments::cancel(&imports, &job_id)
+}
+
+#[tauri::command]
+fn attachment_remove(
+    db: State<Db>,
+    store: State<attachments::AttachmentStore>,
+    id: String,
+) -> Result<(), attachments::Error> {
+    with_db!(db, conn, attachments::remove(conn, &store, &id))
+}
+
+#[tauri::command]
+fn attachment_promote(
+    db: State<Db>,
+    store: State<attachments::AttachmentStore>,
+    project_id: String,
+    attachment_id: String,
+) -> Result<attachments::Attachment, attachments::Error> {
+    with_db!(db, conn, {
+        attachments::promote(conn, &store, &project_id, &attachment_id)
+    })
+}
+
+#[tauri::command]
+fn attachment_search(
+    db: State<Db>,
+    run_id: String,
+    project_id: String,
+    card_id: String,
+    query: String,
+    limit: usize,
+) -> Result<Vec<notes::PublicNoteHit>, attachments::Error> {
+    with_db!(db, conn, {
+        attachments::search_for_run(conn, &run_id, &project_id, &card_id, &query, limit)
+    })
+}
+
+#[tauri::command]
+fn attachment_read(
+    db: State<Db>,
+    run_id: String,
+    project_id: String,
+    card_id: String,
+    chunk_ids: Vec<String>,
+) -> Result<Vec<notes::PublicNoteChunk>, attachments::Error> {
+    with_db!(db, conn, {
+        attachments::read_for_run(conn, &run_id, &project_id, &card_id, &chunk_ids)
+    })
+}
+
+#[tauri::command]
+fn attachment_resolve_citation(
+    db: State<Db>,
+    project_id: String,
+    citation: notes::CitationResolveRequest,
+) -> Result<notes::PublicCitationResolution, attachments::Error> {
+    with_db!(db, conn, {
+        attachments::resolve_citation(conn, &project_id, &citation)
+    })
+}
+
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -840,6 +949,11 @@ pub fn run() {
             app.manage(SharedDb(shared));
             app.manage(watcher::VaultWatcher::default());
             app.manage(Generations::default());
+            app.manage(attachments::AttachmentImports::default());
+            app.manage(
+                attachments::AttachmentStore::new(dir.join("attachments"))
+                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+            );
 
             let path = llm::config_path(&dir);
             // 不在启动阶段碰系统钥匙串：本应用改为只使用 0600 的本机配置文件，
@@ -897,6 +1011,15 @@ pub fn run() {
             note_library_resolve_citation,
             note_library_rebuild,
             note_library_remove,
+            attachment_list,
+            attachment_preflight,
+            attachment_import,
+            attachment_cancel_import,
+            attachment_remove,
+            attachment_promote,
+            attachment_search,
+            attachment_read,
+            attachment_resolve_citation,
             vault_written_paths,
             vault_conflicts,
             vault_resolve_conflict,

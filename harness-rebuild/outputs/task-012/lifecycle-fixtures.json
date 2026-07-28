@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "taskId": "TASK-012",
+  "wenzMarkId": "3d3858cf-2005-447a-82b5-3116c7afa909",
+  "scope": "single-card-native-attachment-lifecycle",
+  "scenarios": [
+    {
+      "id": "snapshot-import",
+      "source": "file-or-folder",
+      "preflight": {
+        "defaultCountLimit": 25,
+        "defaultByteLimit": 52428800,
+        "hardCountLimit": 500,
+        "hardByteLimit": 536870912,
+        "confirmation": "required-above-default-before-copy"
+      },
+      "result": {
+        "bytes": "application-owned-copy",
+        "sourcePathPersisted": false,
+        "partialSnapshotsOnFailure": 0,
+        "scope": "attachment:<cardId>"
+      }
+    },
+    {
+      "id": "host-frozen-scope",
+      "modelToolParameters": {
+        "search_notes": ["query", "limit"],
+        "read_notes": ["chunkIds"]
+      },
+      "forbiddenModelParameters": [
+        "scope",
+        "cardId",
+        "attachmentCardId",
+        "libraryIds",
+        "path"
+      ],
+      "crossCardSearch": "denied",
+      "crossCardRead": "denied",
+      "guessedChunkRead": "denied"
+    },
+    {
+      "id": "controlled-citation-after-delete",
+      "beforeDelete": "current",
+      "afterDelete": {
+        "state": "missing",
+        "visibleLabel": "原来源已移除",
+        "currentLink": null,
+        "frozenExcerptRetained": true
+      }
+    },
+    {
+      "id": "explicit-promotion",
+      "importPromotesAutomatically": false,
+      "action": "copy-to-project-attachments-library",
+      "formalDocumentCreated": true,
+      "originalAttachmentScopeAfterPromotion": "attachment:<cardId>",
+      "deleteAttachmentRetractsPromotedCopy": false
+    }
+  ]
+}

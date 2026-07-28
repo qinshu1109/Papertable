@@ -148,6 +148,8 @@ export interface AgentRunCheckpoint {
   hostScope?: {
     projectId: string;
     libraryIds: string[];
+    cardId?: string;
+    attachmentScope?: string;
   };
   /** TASK-005 persisted per-run ledger; absent only on pre-TASK-005 rows. */
   budget?: AgentBudgetLedger;

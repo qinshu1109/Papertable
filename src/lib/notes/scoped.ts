@@ -6,6 +6,7 @@ import {
 } from "./tauri";
 import { resolveWebNoteCitation } from "./web";
 import { isConfidentNoteHit } from "./search";
+import { attachments } from "../attachments";
 import type {
   NoteCitationLookup,
   NoteCitationResolution,
@@ -24,44 +25,77 @@ export async function searchProjectNotes(input: {
   runId?: string;
   projectId: string;
   libraryIds: string[];
+  attachmentCardId?: string;
   query: string;
   limit: number;
 }): Promise<NoteHit[]> {
-  if (!input.libraryIds.length || !input.query.trim()) return [];
-  const hits =
-    target === "desktop"
-      ? await searchDesktopNotes(
-          input.runId ?? "",
-          input.projectId,
-          input.query,
-          input.limit,
-        )
-      : await noteLibraries.search({
-          libraryIds: input.libraryIds,
+  if (!input.query.trim()) return [];
+  const [attachmentHits, noteHits] = await Promise.all([
+    input.attachmentCardId
+      ? attachments.search({
+          runId: input.runId,
+          projectId: input.projectId,
+          cardId: input.attachmentCardId,
           query: input.query,
           limit: input.limit,
-        });
-  if (input.query.trim() === "*") return hits;
-  return hits.filter((hit) => isConfidentNoteHit(hit, input.query));
+        })
+      : Promise.resolve([]),
+    input.libraryIds.length
+      ? target === "desktop"
+        ? searchDesktopNotes(
+            input.runId ?? "",
+            input.projectId,
+            input.query,
+            input.limit,
+          )
+        : noteLibraries.search({
+            libraryIds: input.libraryIds,
+            query: input.query,
+            limit: input.limit,
+          })
+      : Promise.resolve([]),
+  ]);
+  const hits = [...attachmentHits, ...noteHits];
+  const unique = [
+    ...new Map(hits.map((hit) => [hit.chunk.id, hit])).values(),
+  ].slice(0, Math.max(1, Math.min(8, input.limit)));
+  if (input.query.trim() === "*") return unique;
+  return unique.filter((hit) => isConfidentNoteHit(hit, input.query));
 }
 
 export async function readProjectNotes(input: {
   runId?: string;
   projectId: string;
   libraryIds: string[];
+  attachmentCardId?: string;
   chunkIds: string[];
 }): Promise<NoteChunk[]> {
-  if (!input.libraryIds.length || !input.chunkIds.length) return [];
-  if (target === "desktop")
-    return readDesktopNotes(
-      input.runId ?? "",
-      input.projectId,
-      input.chunkIds.slice(0, 4),
-    );
-  return noteLibraries.read({
-    libraryIds: input.libraryIds,
-    chunkIds: input.chunkIds.slice(0, 4),
-  });
+  if (!input.chunkIds.length) return [];
+  const requested = [...new Set(input.chunkIds)].slice(0, 4);
+  const attachmentIds = requested.filter((id) => id.startsWith("attachment-"));
+  const noteIds = requested.filter((id) => !id.startsWith("attachment-"));
+  const [attachmentChunks, noteChunks] = await Promise.all([
+    input.attachmentCardId && attachmentIds.length
+      ? attachments.read({
+          runId: input.runId,
+          projectId: input.projectId,
+          cardId: input.attachmentCardId,
+          chunkIds: attachmentIds,
+        })
+      : Promise.resolve([]),
+    input.libraryIds.length && noteIds.length
+      ? target === "desktop"
+        ? readDesktopNotes(input.runId ?? "", input.projectId, noteIds)
+        : noteLibraries.read({
+            libraryIds: input.libraryIds,
+            chunkIds: noteIds,
+          })
+      : Promise.resolve([]),
+  ]);
+  const byId = new Map(
+    [...attachmentChunks, ...noteChunks].map((chunk) => [chunk.id, chunk]),
+  );
+  return requested.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []));
 }
 
 /**
@@ -74,6 +108,11 @@ export async function resolveProjectNoteCitation(input: {
   projectId: string;
   citation: NoteCitationLookup;
 }): Promise<NoteCitationResolution> {
+  if (input.citation.libraryId.startsWith("attachment:"))
+    return attachments.resolveCitation({
+      projectId: input.projectId,
+      citation: input.citation,
+    });
   if (target === "desktop")
     return resolveDesktopNoteCitation(input.projectId, input.citation);
   return resolveWebNoteCitation(input);

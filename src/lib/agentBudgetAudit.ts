@@ -18,6 +18,8 @@ export interface AgentAuditPersistence {
   hostScope?: {
     projectId: string;
     libraryIds: string[];
+    cardId?: string;
+    attachmentScope?: string;
   };
   /** Prevents event-id collisions when one persisted run has several exits. */
   eventIdSuffix?: string;
@@ -89,6 +91,12 @@ async function append(
     nextCheckpoint.hostScope = {
       projectId: persistence.hostScope.projectId,
       libraryIds: [...persistence.hostScope.libraryIds],
+      ...(persistence.hostScope.cardId
+        ? { cardId: persistence.hostScope.cardId }
+        : {}),
+      ...(persistence.hostScope.attachmentScope
+        ? { attachmentScope: persistence.hostScope.attachmentScope }
+        : {}),
     };
   await persistence.appendStep({
     runId: persistence.runId,

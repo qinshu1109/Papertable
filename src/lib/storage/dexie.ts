@@ -12,6 +12,7 @@ import type {
   ViewState,
 } from "../../types";
 import type { NoteChunk, NoteDocument, NoteLibrary } from "../notes/types";
+import type { Attachment } from "../attachments/types";
 import {
   type AnchorRecord,
   type AttentionSnapshot,
@@ -57,6 +58,11 @@ export interface ProjectNoteLibraryRecord {
   libraryId: string;
 }
 
+export interface AttachmentRecord extends Attachment {
+  /** Immutable application-owned snapshot; never a File handle or source path. */
+  bytes: ArrayBuffer;
+}
+
 class PapertableDb extends Dexie {
   projects!: Table<Project, string>;
   cards!: Table<CardRecord, string>;
@@ -76,6 +82,8 @@ class PapertableDb extends Dexie {
   projectNoteLibraries!: Table<ProjectNoteLibraryRecord, [string, string]>;
   agentRuns!: Table<AgentRunRecord, string>;
   agentEvents!: Table<AgentEventRecord, string>;
+  attachments!: Table<AttachmentRecord, string>;
+  attachmentChunks!: Table<NoteChunk, string>;
 
   constructor() {
     super("papertable-web-v1");
@@ -196,6 +204,27 @@ class PapertableDb extends Dexie {
           providerCapabilityTtlMs: 24 * 60 * 60 * 1_000,
         });
       });
+    // v8 is a card-scoped attachment corpus. It is deliberately outside
+    // workspace snapshots and outside the formal note-library stores.
+    this.version(8)
+      .stores({
+        ...schema,
+        interactionEvents:
+          "id, projectId, sessionId, createdAt, type, targetCardId, sourceCardId",
+        sessionBoundaries:
+          "id, projectId, localDate, startedAt, lastActiveAt, endedAt, processedAt",
+        proposals:
+          "id, projectId, sessionId, status, createdAt, expiresAt, purgeAt, candidateKey",
+        noteLibraries: "id, kind, updatedAt",
+        noteDocuments: "id, libraryId, relativePath, versionHash, updatedAt",
+        noteChunks: "id, libraryId, documentId, ordinal",
+        projectNoteLibraries: "[projectId+libraryId], projectId, libraryId",
+        agentRuns: "id, &turnId, updatedAt, phase",
+        agentEvents: "id, runId, &[runId+sequence], occurredAt, eventType",
+        attachments: "id, cardId, scope, createdAt",
+        attachmentChunks: "id, libraryId, documentId, ordinal",
+      })
+      .upgrade(() => undefined);
   }
 }
 

@@ -1131,7 +1131,7 @@ test("IndexedDB restores cards, drafts and scroll positions", async () => {
   assert.equal(await loadWorkspace(), null);
 });
 
-test("v4 workspace migrates through v7 without touching existing cards or backfilling events", async () => {
+test("v4 workspace migrates through v8 without touching existing cards or backfilling events", async () => {
   // Construct a genuine v4 database before opening the current Dexie class.
   // This guards the real in-browser upgrade path rather than merely checking
   // that a freshly-created v5 database has the new tables.
@@ -1189,7 +1189,7 @@ test("v4 workspace migrates through v7 without touching existing cards or backfi
 
   await db.open();
   const restored = await loadWorkspace();
-  assert.equal(db.verno, 7);
+  assert.equal(db.verno, 8);
   assert.equal(restored?.cards[0]?.id, "legacy-card");
   assert.equal(restored?.cards[0]?.turns[0]?.content, "旧问题");
   assert.equal(await db.noteLibraries.count(), 0);
@@ -1198,6 +1198,8 @@ test("v4 workspace migrates through v7 without touching existing cards or backfi
   assert.equal(await db.projectNoteLibraries.count(), 0);
   assert.equal(await db.agentRuns.count(), 0);
   assert.equal(await db.agentEvents.count(), 0);
+  assert.equal(await db.attachments.count(), 0);
+  assert.equal(await db.attachmentChunks.count(), 0);
   assert.equal((await loadAgentAudit("legacy-turn"))?.kind, "legacy");
   assert.deepEqual(restored?.settings.providerCapabilities, []);
   assert.equal(
@@ -1315,7 +1317,7 @@ test("v6 attention tables survive ordinary workspace snapshots and clear with lo
   assert.equal(attention.events.length, 1);
   assert.equal(attention.sessions.length, 1);
   assert.equal(attention.proposals.length, 1);
-  assert.equal(db.verno, 7);
+  assert.equal(db.verno, 8);
   await clearWorkspace();
   const cleared = await loadAttentionState();
   assert.deepEqual(cleared, { events: [], sessions: [], proposals: [] });

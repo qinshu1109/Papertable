@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 10;
+const USER_VERSION: i64 = 11;
 const AGENT_EVENT_SCHEMA_VERSION: i64 = 1;
 const AGENT_EVENT_TYPES: &[&str] = &[
     "exploration-started",
@@ -422,6 +422,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     // FTS 虚表不是 schema.sql 的静态 DDL（需要在 trigram 不可用时降级），所以
     // 即使某个历史库的 user_version 已经写成最新，也在打开时补一次缺失索引。
     ensure_note_fts(conn)?;
+    ensure_attachment_fts(conn)?;
     // 每次打开都要重设：foreign_keys 是 per-connection 的，不随库持久化。
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
     Ok(())
@@ -447,6 +448,29 @@ fn ensure_note_fts(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "CREATE VIRTUAL TABLE note_chunks_fts USING fts5(\
               chunk_id UNINDEXED, library_id UNINDEXED, content, tokenize='unicode61')",
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_attachment_fts(conn: &Connection) -> Result<()> {
+    let exists: Option<String> = conn
+        .query_row(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name = 'attachment_chunks_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if exists.is_some() {
+        return Ok(());
+    }
+    let trigram = "CREATE VIRTUAL TABLE attachment_chunks_fts USING fts5(\
+        chunk_id UNINDEXED, card_id UNINDEXED, content, tokenize='trigram')";
+    if conn.execute_batch(trigram).is_err() {
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE attachment_chunks_fts USING fts5(\
+              chunk_id UNINDEXED, card_id UNINDEXED, content, tokenize='unicode61')",
         )?;
     }
     Ok(())
@@ -1641,6 +1665,7 @@ pub fn clear_all(conn: &mut Connection) -> Result<()> {
         tx.execute(&format!("DELETE FROM {table}"), [])?;
     }
     tx.execute("DELETE FROM note_chunks_fts", [])?;
+    tx.execute("DELETE FROM attachment_chunks_fts", [])?;
     tx.commit()?;
     Ok(())
 }
@@ -2014,7 +2039,16 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, USER_VERSION);
+        let attachment_allowlist: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'agent_attachment_search_allowlist'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(attachment_allowlist.contains("attachment_chunks"));
         let allowlist: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_master
@@ -2095,7 +2129,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, USER_VERSION);
         let run_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM agent_runs", [], |row| row.get(0))
             .unwrap();
@@ -2115,18 +2149,20 @@ mod tests {
     #[test]
     fn latest_version_repairs_a_missing_rebuildable_fts_index() {
         let conn = open_in_memory().unwrap();
-        conn.execute_batch("DROP TABLE note_chunks_fts").unwrap();
+        conn.execute_batch("DROP TABLE note_chunks_fts; DROP TABLE attachment_chunks_fts")
+            .unwrap();
         conn.execute_batch(&format!("PRAGMA user_version = {USER_VERSION}"))
             .unwrap();
         migrate(&conn).unwrap();
         let exists: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'note_chunks_fts'",
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE name IN ('note_chunks_fts', 'attachment_chunks_fts')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(exists, 1);
+        assert_eq!(exists, 2);
     }
 
     #[test]

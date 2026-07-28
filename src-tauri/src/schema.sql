@@ -1,4 +1,4 @@
--- Papertable · SQLite schema (user_version = 10)
+-- Papertable · SQLite schema (user_version = 11)
 --
 -- 列的取舍只有一条判据：当且仅当字段是 (a) 外键、(b) ORDER BY 键、
 -- (c) 按项目删除的 WHERE 键、(d) Rust 侧 vault 写入器需要解释的字段，
@@ -256,3 +256,53 @@ CREATE TABLE IF NOT EXISTS project_note_libraries (
   library_id TEXT NOT NULL REFERENCES note_libraries(id) ON DELETE CASCADE,
   PRIMARY KEY(project_id, library_id)
 );
+
+-- v11：当前卡片附件。原始字节快照位于 app_data_dir/attachments，数据库只保存
+-- 应用内相对路径；绝不保存导入源绝对路径。附件与正式 note library 完全分表。
+CREATE TABLE IF NOT EXISTS attachments (
+  id                   TEXT PRIMARY KEY,
+  card_id              TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+  scope                TEXT NOT NULL,
+  name                 TEXT NOT NULL,
+  relative_path        TEXT NOT NULL,
+  mime_type            TEXT NOT NULL,
+  byte_size            INTEGER NOT NULL CHECK(byte_size >= 0),
+  sha256                TEXT NOT NULL,
+  storage_path          TEXT NOT NULL UNIQUE,
+  indexed               INTEGER NOT NULL DEFAULT 0,
+  created_at            INTEGER NOT NULL,
+  promoted_library_id   TEXT,
+  promoted_document_id  TEXT,
+  CHECK(scope = 'attachment:' || card_id)
+);
+CREATE INDEX IF NOT EXISTS attachments_card ON attachments(card_id, created_at);
+
+CREATE TABLE IF NOT EXISTS attachment_chunks (
+  id            TEXT PRIMARY KEY,
+  attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+  card_id       TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+  scope         TEXT NOT NULL,
+  ordinal       INTEGER NOT NULL,
+  heading_path  TEXT NOT NULL,
+  content       TEXT NOT NULL,
+  char_start    INTEGER NOT NULL,
+  char_end      INTEGER NOT NULL,
+  version_hash  TEXT NOT NULL,
+  UNIQUE(attachment_id, ordinal),
+  CHECK(scope = 'attachment:' || card_id)
+);
+CREATE INDEX IF NOT EXISTS attachment_chunks_card
+  ON attachment_chunks(card_id, ordinal);
+CREATE INDEX IF NOT EXISTS attachment_chunks_attachment
+  ON attachment_chunks(attachment_id, ordinal);
+
+-- 与 TASK-007 的 agent_note_search_allowlist 平行而不修改它。附件读取只能使用同一
+-- active run、同一 card 的附件搜索结果。
+CREATE TABLE IF NOT EXISTS agent_attachment_search_allowlist (
+  run_id   TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+  card_id  TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+  chunk_id TEXT NOT NULL REFERENCES attachment_chunks(id) ON DELETE CASCADE,
+  PRIMARY KEY(run_id, chunk_id)
+);
+CREATE INDEX IF NOT EXISTS agent_attachment_allowlist_card
+  ON agent_attachment_search_allowlist(card_id, run_id);
