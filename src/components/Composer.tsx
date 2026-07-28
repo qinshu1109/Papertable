@@ -15,6 +15,13 @@ import {
   XCircle,
 } from "lucide-react";
 import { useStore } from "../store";
+import { attachmentTarget } from "../lib/attachments";
+
+const formatBytes = (bytes: number) => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+};
 
 export function Composer({
   onLocate,
@@ -44,6 +51,16 @@ export function Composer({
     agentMode,
     noteLibraries,
     boundNoteLibraryIds,
+    attachments,
+    attachmentImport,
+    attachmentConfirmation,
+    attachmentDragActive,
+    chooseAttachmentFiles,
+    confirmAttachmentImport,
+    dismissAttachmentConfirmation,
+    cancelAttachmentImport,
+    removeAttachment,
+    promoteAttachment,
   } = useStore();
   const [modelOpen, setModelOpen] = useState(false);
   const [ctxOpen, setCtxOpen] = useState(false);
@@ -61,6 +78,7 @@ export function Composer({
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const contextPanelRef = useRef<HTMLDivElement>(null);
   const moreMenuRef = useRef<HTMLDivElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   // Debounce only the same card's send button. A user can deliberately move
   // to another project while the first card is streaming; that second card
   // must be allowed to start its own independent background generation.
@@ -275,7 +293,150 @@ export function Composer({
 
   return (
     <div className="composer-wrap" ref={wrapRef}>
+      {attachmentDragActive && (
+        <div className="attachment-drop-overlay" role="status">
+          松开即可快照到当前卡片
+          <small>支持文件与文件夹；原文件不会被移动或改写</small>
+        </div>
+      )}
+      {attachmentConfirmation && (
+        <div className="attachment-confirm-backdrop" role="presentation">
+          <section
+            className="attachment-confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-label="确认超限附件导入"
+          >
+            <h3>附件超过默认限制</h3>
+            <p>
+              共 {attachmentConfirmation.preflight.totalCount} 项，
+              {formatBytes(attachmentConfirmation.preflight.totalBytes)}
+              。默认限制为 {attachmentConfirmation.preflight.countLimit} 项 /
+              {formatBytes(attachmentConfirmation.preflight.byteLimit)}。
+            </p>
+            <p>
+              继续后会先复制到 Papertable 自有存储，再建立当前卡片专属索引。
+            </p>
+            <div className="attachment-confirm-actions">
+              <button className="btn" onClick={dismissAttachmentConfirmation}>
+                取消
+              </button>
+              <button
+                className="btn primary"
+                onClick={() => void confirmAttachmentImport()}
+              >
+                确认并继续
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       <div className="composer">
+        <input
+          ref={attachmentInputRef}
+          className="sr-only"
+          type="file"
+          multiple
+          data-testid="attachment-file-input"
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            event.target.value = "";
+            void chooseAttachmentFiles(files);
+          }}
+        />
+        {(attachments.length > 0 || attachmentImport) && (
+          <section className="attachment-strip" aria-label="当前卡片附件">
+            <div className="attachment-strip-head">
+              <span>
+                <Paperclip size={12} /> 当前卡片附件 {attachments.length}
+              </span>
+              <small>作用域 attachment:{currentCardId}</small>
+            </div>
+            {attachments.map((attachment) => (
+              <div
+                className="attachment-item"
+                key={attachment.id}
+                data-attachment-id={attachment.id}
+              >
+                <span
+                  className="attachment-name"
+                  title={attachment.relativePath}
+                >
+                  {attachment.relativePath}
+                </span>
+                <span>{formatBytes(attachment.byteSize)}</span>
+                <span>{attachment.indexed ? "可检索" : "仅快照"}</span>
+                {attachment.promotedLibraryId ? (
+                  <span className="attachment-promoted">已提升</span>
+                ) : (
+                  <button
+                    className="chip-btn"
+                    onClick={() => void promoteAttachment(attachment.id)}
+                    aria-label={`提升附件：${attachment.name}`}
+                  >
+                    提升到项目资料库
+                  </button>
+                )}
+                <button
+                  className="icon-btn"
+                  onClick={() => void removeAttachment(attachment.id)}
+                  aria-label={`删除附件：${attachment.name}`}
+                  title="删除附件；历史回答保留冻结摘录"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            ))}
+            {attachmentImport && (
+              <div
+                className={`attachment-progress ${attachmentImport.phase}`}
+                role="status"
+                aria-live="polite"
+              >
+                <div>
+                  <span>
+                    {attachmentImport.phase === "complete"
+                      ? "附件快照完成"
+                      : attachmentImport.phase === "cancelled"
+                        ? "附件导入已取消"
+                        : attachmentImport.phase === "error"
+                          ? "附件导入失败"
+                          : attachmentImport.phase === "indexing"
+                            ? "正在建立附件索引"
+                            : "正在复制附件"}
+                  </span>
+                  <span>
+                    {attachmentImport.completedCount}/
+                    {attachmentImport.totalCount} ·{" "}
+                    {formatBytes(attachmentImport.completedBytes)}/
+                    {formatBytes(attachmentImport.totalBytes)}
+                  </span>
+                </div>
+                <progress
+                  max={Math.max(1, attachmentImport.totalBytes)}
+                  value={attachmentImport.completedBytes}
+                />
+                {attachmentImport.currentItem && (
+                  <small>{attachmentImport.currentItem}</small>
+                )}
+                {attachmentImport.error && (
+                  <small className="attachment-error">
+                    {attachmentImport.error}
+                  </small>
+                )}
+                {(attachmentImport.phase === "copying" ||
+                  attachmentImport.phase === "indexing") && (
+                  <button
+                    className="chip-btn"
+                    onClick={() => void cancelAttachmentImport()}
+                  >
+                    取消导入
+                  </button>
+                )}
+              </div>
+            )}
+          </section>
+        )}
         {references.length > 0 && (
           <div className="ref-strip">
             {references.map((reference) => (
@@ -372,11 +533,23 @@ export function Composer({
                 <div className="ctx-line">
                   <Layers size={13} color="var(--ctx)" />
                   <span>
-                    {boundNoteLibraryIds.length
-                      ? availableBoundLibraries.length
-                        ? `已绑定 ${boundNoteLibraryIds.length} 个只读资料库 · 当前可用 ${availableBoundLibraries.length} 个 · ${agentMode === "native-tools" ? "原生工具" : "双阶段检索"}`
-                        : `已绑定 ${boundNoteLibraryIds.length} 个只读资料库，但当前均不可用；本轮不会检索笔记。`
-                      : "当前项目未绑定资料库；本轮不会检索笔记。"}
+                    {attachments.length || boundNoteLibraryIds.length
+                      ? [
+                          attachments.length
+                            ? `当前卡片附件 ${attachments.length} 项`
+                            : "",
+                          boundNoteLibraryIds.length
+                            ? availableBoundLibraries.length
+                              ? `只读资料库 ${boundNoteLibraryIds.length} 个（可用 ${availableBoundLibraries.length} 个）`
+                              : `只读资料库 ${boundNoteLibraryIds.length} 个（当前不可用）`
+                            : "",
+                          agentMode === "native-tools"
+                            ? "原生工具"
+                            : "双阶段检索",
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")
+                      : "当前卡片没有附件，项目也未绑定资料库；本轮不会检索外部材料。"}
                   </span>
                 </div>
                 {latestAgentRun && (
@@ -577,11 +750,14 @@ export function Composer({
                 className="icon-btn"
                 title="导入附件"
                 disabled={!hasCurrentCard}
-                onClick={() =>
-                  showToast({
-                    text: "本轮可通过左侧「导入笔记」导入 Markdown、Canvas 或项目包。",
-                  })
-                }
+                onClick={() => {
+                  if (attachmentTarget === "web")
+                    attachmentInputRef.current?.click();
+                  else
+                    showToast({
+                      text: "桌面版请把文件或文件夹直接拖到当前卡片；松手前不会导入。",
+                    });
+                }}
               >
                 <Paperclip size={16} />
               </button>

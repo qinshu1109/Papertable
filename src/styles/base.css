@@ -3644,3 +3644,155 @@ textarea {
   font: 12px/1.55 var(--mono);
   white-space: pre-wrap;
 }
+.attachment-drop-overlay {
+  position: fixed;
+  inset: 14px;
+  z-index: 120;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  color: var(--ink);
+  font-weight: 700;
+  text-align: center;
+  pointer-events: none;
+}
+
+.attachment-drop-overlay small {
+  color: var(--ink-2);
+  font-weight: 400;
+}
+
+.attachment-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 125;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(20 17 14 / 45%);
+}
+
+.attachment-confirm {
+  width: min(460px, 100%);
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--sh-pop);
+}
+
+.attachment-confirm h3 {
+  margin: 0 0 10px;
+}
+
+.attachment-confirm p {
+  color: var(--ink-2);
+  line-height: 1.65;
+}
+
+.attachment-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.attachment-strip {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card) 88%, var(--accent) 4%);
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.attachment-strip-head,
+.attachment-item,
+.attachment-progress > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.attachment-strip-head {
+  justify-content: space-between;
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+.attachment-strip-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 700;
+}
+
+.attachment-strip-head small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attachment-item {
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.attachment-name {
+  min-width: 80px;
+  flex: 1;
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-promoted {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.attachment-progress {
+  display: grid;
+  gap: 5px;
+  padding: 6px;
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+.attachment-progress > div {
+  justify-content: space-between;
+}
+
+.attachment-progress progress {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--accent);
+}
+
+.attachment-error {
+  color: var(--danger);
+}
+
+@media (max-width: 680px) {
+  .attachment-item {
+    flex-wrap: wrap;
+  }
+
+  .attachment-name {
+    flex-basis: 55%;
+  }
+
+  .attachment-strip-head small {
+    display: none;
+  }
+}

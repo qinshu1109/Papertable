@@ -40,6 +40,7 @@ export function NoteSourcePreview({
   onClose: () => void;
   resolveCitation?: NoteCitationResolver;
 }) {
+  const isAttachment = citation.libraryId.startsWith("attachment:");
   const [content, setContent] = useState(citation.excerpt);
   const [state, setState] = useState<
     | "loading"
@@ -110,7 +111,10 @@ export function NoteSourcePreview({
         : state === "updated"
           ? "来源已更新；保留当时引用并展示当前版本"
           : state === "missing"
-            ? reason || "原笔记已删除或不再位于该资料库。"
+            ? reason ||
+              (isAttachment
+                ? "原来源已移除"
+                : "原笔记已删除或不再位于该资料库。")
             : state === "library-unavailable"
               ? reason || "资料库当前不可用或未绑定到此项目。"
               : reason || "暂时无法验证当前资料。";
@@ -124,7 +128,9 @@ export function NoteSourcePreview({
     >
       <div className="note-source-head">
         <FileText size={15} />
-        <span className="temp-badge">临时来源卡</span>
+        <span className="temp-badge">
+          {isAttachment ? "附件来源快照" : "临时来源卡"}
+        </span>
         <b>{citation.title}</b>
         <button
           className="icon-btn"
@@ -144,7 +150,11 @@ export function NoteSourcePreview({
         )}
         {state === "current" && <span>来源未变更</span>}
         {state === "updated" && <span className="warn">来源已更新</span>}
-        {state === "missing" && <span className="warn">原笔记已删除</span>}
+        {state === "missing" && (
+          <span className="warn">
+            {isAttachment ? "原来源已移除" : "原笔记已删除"}
+          </span>
+        )}
         {state === "library-unavailable" && (
           <span className="warn">资料库当前不可用</span>
         )}

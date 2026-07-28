@@ -1351,6 +1351,111 @@ test("a read-only library uses bounded tools, renders a controlled citation, and
   ).toBeVisible();
 });
 
+test("a card attachment stays scoped, promotes explicitly, and keeps frozen evidence after deletion", async ({
+  page,
+}) => {
+  const streams: Array<{ tools?: unknown[] }> = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/llm/stream"))
+      streams.push(request.postDataJSON());
+  });
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await page.getByTestId("attachment-file-input").setInputFiles(
+    Array.from({ length: 26 }, (_, index) => ({
+      name: `limit-${index}.txt`,
+      mimeType: "text/plain",
+      buffer: Buffer.from(`${index}`),
+    })),
+  );
+  const confirmation = page.getByRole("dialog", {
+    name: "确认超限附件导入",
+  });
+  await expect(confirmation).toContainText("共 26 项");
+  await confirmation.screenshot({
+    path: "harness-rebuild/outputs/task-012/screenshots/limit-confirmation.png",
+  });
+  await confirmation.getByRole("button", { name: "取消" }).click();
+  await expect(confirmation).toHaveCount(0);
+
+  await page.getByTestId("attachment-file-input").setInputFiles({
+    name: "附件航线.md",
+    mimeType: "text/markdown",
+    buffer: Buffer.from(
+      "# 附件航线\n\n唯一附件事实是 ORBIT-ATTACHMENT-E2E-42。",
+    ),
+  });
+
+  const strip = page.getByRole("region", { name: "当前卡片附件" });
+  await expect(strip).toContainText("附件航线.md");
+  await expect(strip).toContainText("可检索");
+  await expect(strip).toContainText(/attachment:/);
+  const separatedBeforePromotion = await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("papertable-web-v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const tx = database.transaction(
+      ["attachments", "attachmentChunks", "noteDocuments"],
+      "readonly",
+    );
+    const count = (name: string) =>
+      new Promise<number>((resolve, reject) => {
+        const request = tx.objectStore(name).count();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    const result = {
+      attachments: await count("attachments"),
+      chunks: await count("attachmentChunks"),
+      noteDocuments: await count("noteDocuments"),
+    };
+    database.close();
+    return result;
+  });
+  expect(separatedBeforePromotion).toEqual({
+    attachments: 1,
+    chunks: 1,
+    noteDocuments: 0,
+  });
+  await strip.screenshot({
+    path: "harness-rebuild/outputs/task-012/screenshots/imported-card-scope.png",
+  });
+
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("ORBIT-ATTACHMENT-E2E-42");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText("我已阅读本轮检索到的资料")).toBeVisible();
+  const citation = page.getByLabel("笔记引用").last();
+  await expect(citation).toBeVisible();
+  const serializedTools = JSON.stringify(streams[0]?.tools ?? []);
+  expect(serializedTools).not.toContain("attachmentCardId");
+  expect(serializedTools).not.toContain('"scope"');
+  expect(serializedTools).not.toContain("libraryIds");
+
+  await strip.getByRole("button", { name: "提升附件：附件航线.md" }).click();
+  await expect(strip).toContainText("已提升");
+  await expect(strip).toContainText(/attachment:/);
+  await strip.screenshot({
+    path: "harness-rebuild/outputs/task-012/screenshots/explicit-promotion.png",
+  });
+
+  await strip.getByRole("button", { name: "删除附件：附件航线.md" }).click();
+  await expect(
+    strip.getByRole("button", { name: "删除附件：附件航线.md" }),
+  ).toHaveCount(0);
+  await expect(strip).toContainText("当前卡片附件 0");
+  await citation.getByRole("button").click();
+  const source = page.getByRole("dialog", { name: /笔记来源：附件航线/ });
+  await expect(source).toContainText("原来源已移除");
+  await expect(source).toContainText("ORBIT-ATTACHMENT-E2E-42");
+  await source.screenshot({
+    path: "harness-rebuild/outputs/task-012/screenshots/deleted-source-frozen-excerpt.png",
+  });
+});
+
 test("继续深挖 adds budget and resumes the persisted run after reload", async ({
   page,
 }) => {

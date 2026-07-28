@@ -619,6 +619,80 @@ test("native tool loop only cites chunks it actually searched and read", async (
   assert.doesNotMatch(rendered.content, /\[\[source:/);
 });
 
+test("attachment scope is host-frozen and cannot be passed or expanded by model tool JSON", async () => {
+  const requests: Parameters<AgentRuntime["stream"]>[0][] = [];
+  const searches: Parameters<AgentRuntime["search"]>[0][] = [];
+  let phase = 0;
+  await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: [],
+    attachmentCardId: "card-frozen",
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: () => undefined,
+    runtime: baseRuntime({
+      stream: (input) => {
+        requests.push(input);
+        phase += 1;
+        if (phase === 1)
+          return events([
+            {
+              type: "tool-call-delta",
+              index: 0,
+              id: "search-attachment",
+              name: "search_notes",
+            },
+            {
+              type: "tool-call-delta",
+              index: 0,
+              arguments:
+                '{"query":"唯一事实","scope":"attachment:card-other","cardId":"card-other","libraryIds":["secret"],"limit":8}',
+            },
+            { type: "done", finishReason: "tool_calls" },
+          ]);
+        return events([
+          {
+            type: "token",
+            text: "已完成当前卡片附件检索。",
+            channel: "final",
+          },
+          { type: "done" },
+        ]);
+      },
+      search: async (input) => {
+        searches.push(input);
+        return [];
+      },
+    }),
+  });
+
+  const tools = requests[0]?.tools ?? [];
+  const searchTool = tools.find(
+    (tool) => tool.function.name === "search_notes",
+  );
+  const readTool = tools.find((tool) => tool.function.name === "read_notes");
+  assert.deepEqual(
+    Object.keys(searchTool?.function.parameters.properties ?? {}).sort(),
+    ["limit", "query"],
+  );
+  assert.deepEqual(
+    Object.keys(readTool?.function.parameters.properties ?? {}).sort(),
+    ["chunkIds"],
+  );
+  assert.equal(JSON.stringify(tools).includes("attachmentCardId"), false);
+  assert.equal(JSON.stringify(tools).includes('"scope"'), false);
+  assert.equal(searches.length, 1);
+  assert.deepEqual(searches[0], {
+    projectId: "project-a",
+    libraryIds: [],
+    attachmentCardId: "card-frozen",
+    query: "唯一事实",
+    limit: 8,
+  });
+});
+
 test("native search metadata does not force a read before the model chooses one", async () => {
   const allowed = chunk("search-only");
   const requests: Parameters<AgentRuntime["stream"]>[0][] = [];

@@ -317,6 +317,10 @@ export async function claimAgentContinuation(input: {
     hostScope: {
       projectId: scope.projectId,
       libraryIds: [...scope.libraryIds],
+      ...(scope.cardId ? { cardId: scope.cardId } : {}),
+      ...(scope.attachmentScope
+        ? { attachmentScope: scope.attachmentScope }
+        : {}),
     },
     eventIdSuffix: `resume-${audit.run.lastSequence}`,
     objective: audit.run.checkpoint.objective,

@@ -147,6 +147,14 @@ import type {
   ViewState,
 } from "./types";
 import type { IndexReport, NoteLibrary } from "./lib/notes";
+import {
+  attachmentScope,
+  attachmentTarget,
+  attachments,
+  type Attachment,
+  type AttachmentPreflight,
+  type AttachmentProgress,
+} from "./lib/attachments";
 
 const uid = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 const defaultSettings: AppSettings = {
@@ -409,6 +417,14 @@ interface Toast {
   onAction?: () => void;
 }
 
+type AttachmentImportSource =
+  { kind: "web"; files: File[] } | { kind: "desktop"; paths: string[] };
+
+interface AttachmentConfirmation {
+  preflight: AttachmentPreflight;
+  source: AttachmentImportSource;
+}
+
 interface Ctx {
   projects: Project[];
   activeProjectId: string;
@@ -446,6 +462,10 @@ interface Ctx {
   setProviderCapabilityTtlMs: (ttlMs: number) => void;
   noteLibraries: NoteLibrary[];
   boundNoteLibraryIds: string[];
+  attachments: Attachment[];
+  attachmentImport: AttachmentProgress | null;
+  attachmentConfirmation: AttachmentConfirmation | null;
+  attachmentDragActive: boolean;
 
   cardById: (id: string) => Card | undefined;
   setActiveProject: (id: string) => void;
@@ -495,6 +515,12 @@ interface Ctx {
   importNoteLibrary: (files: File[], name?: string) => Promise<IndexReport>;
   setProjectNoteLibraries: (libraryIds: string[]) => Promise<void>;
   removeNoteLibrary: (id: string) => Promise<void>;
+  chooseAttachmentFiles: (files: File[]) => Promise<void>;
+  confirmAttachmentImport: () => Promise<void>;
+  dismissAttachmentConfirmation: () => void;
+  cancelAttachmentImport: () => Promise<void>;
+  removeAttachment: (id: string) => Promise<void>;
+  promoteAttachment: (id: string) => Promise<void>;
   importFiles: (format: ImportInput["format"], files: File[]) => Promise<void>;
   exportProject: (format: "md-dir" | "canvas" | "bundle") => Promise<void>;
   exportAllBackup: () => Promise<void>;
@@ -598,6 +624,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   /** 资料库与卡片工作区完全分表；这里只缓存 UI 视图与当前项目的已绑定范围。 */
   const [noteLibraryList, setNoteLibraryList] = useState<NoteLibrary[]>([]);
   const [boundNoteLibraryIds, setBoundNoteLibraryIds] = useState<string[]>([]);
+  const [currentAttachments, setCurrentAttachments] = useState<Attachment[]>(
+    [],
+  );
+  const [attachmentImport, setAttachmentImport] =
+    useState<AttachmentProgress | null>(null);
+  const [attachmentConfirmation, setAttachmentConfirmation] =
+    useState<AttachmentConfirmation | null>(null);
+  const [attachmentDragActive, setAttachmentDragActive] = useState(false);
+  const attachmentAbortRef = useRef<AbortController | null>(null);
   const vaultTimer = useRef<number | null>(null);
   const [streamingTurnsByCard, setStreamingTurnsByCard] = useState<
     Record<string, string>
@@ -1136,6 +1171,231 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [refreshNoteLibraries, showToast],
   );
 
+  const refreshAttachments = useCallback(async (cardId: string) => {
+    const rows = await attachments.list(cardId);
+    if (latestRef.current.view.currentCardId === cardId)
+      setCurrentAttachments(rows);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated || !hasCurrentCard) {
+      setCurrentAttachments([]);
+      return;
+    }
+    void refreshAttachments(currentCardId).catch(() =>
+      setCurrentAttachments([]),
+    );
+  }, [currentCardId, hasCurrentCard, hydrated, refreshAttachments]);
+
+  const runAttachmentImport = useCallback(
+    async (
+      preflight: AttachmentPreflight,
+      source: AttachmentImportSource,
+      confirmed: boolean,
+    ) => {
+      const controller = new AbortController();
+      attachmentAbortRef.current = controller;
+      const onProgress = (next: AttachmentProgress) =>
+        setAttachmentImport(next);
+      setAttachmentConfirmation(null);
+      setAttachmentImport({
+        schemaVersion: 1,
+        jobId: preflight.jobId,
+        phase: "copying",
+        completedCount: 0,
+        totalCount: preflight.totalCount,
+        completedBytes: 0,
+        totalBytes: preflight.totalBytes,
+      });
+      try {
+        const result =
+          source.kind === "web"
+            ? await attachments.importFiles({
+                preflight,
+                files: source.files,
+                confirmed,
+                signal: controller.signal,
+                onProgress,
+              })
+            : await attachments.importPaths({
+                preflight,
+                paths: source.paths,
+                confirmed,
+                onProgress,
+              });
+        await refreshAttachments(preflight.cardId);
+        showToast({
+          text: `已快照 ${result.attachments.length} 个附件到当前卡片；原文件不会再被读取或修改。`,
+        });
+      } catch (error) {
+        const cancelled =
+          controller.signal.aborted ||
+          (error instanceof Error && /取消/.test(error.message));
+        setAttachmentImport({
+          schemaVersion: 1,
+          jobId: preflight.jobId,
+          phase: cancelled ? "cancelled" : "error",
+          completedCount: 0,
+          totalCount: preflight.totalCount,
+          completedBytes: 0,
+          totalBytes: preflight.totalBytes,
+          error: cancelled
+            ? "附件导入已取消，未保留部分快照。"
+            : error instanceof Error
+              ? error.message
+              : "附件导入失败，未保留部分快照。",
+        });
+        if (!cancelled)
+          showToast({
+            text:
+              error instanceof Error
+                ? error.message
+                : "附件导入失败，未保留部分快照。",
+          });
+      } finally {
+        attachmentAbortRef.current = null;
+      }
+    },
+    [refreshAttachments, showToast],
+  );
+
+  const prepareAttachmentImport = useCallback(
+    async (source: AttachmentImportSource) => {
+      const cardId = latestRef.current.view.currentCardId;
+      const card = latestRef.current.cards.find(
+        (candidate) => candidate.id === cardId && !candidate.trashed,
+      );
+      if (!card) {
+        showToast({ text: "请先打开一张可用卡片，再导入附件。" });
+        return;
+      }
+      try {
+        const preflight =
+          source.kind === "web"
+            ? await attachments.preflightFiles(cardId, source.files)
+            : await attachments.preflightPaths(cardId, source.paths);
+        if (preflight.requiresConfirmation) {
+          setAttachmentConfirmation({ preflight, source });
+          return;
+        }
+        await runAttachmentImport(preflight, source, false);
+      } catch (error) {
+        showToast({
+          text: error instanceof Error ? error.message : "无法检查待导入附件。",
+        });
+      }
+    },
+    [runAttachmentImport, showToast],
+  );
+
+  const chooseAttachmentFiles = useCallback(
+    async (files: File[]) => {
+      if (!files.length) return;
+      await prepareAttachmentImport({ kind: "web", files });
+    },
+    [prepareAttachmentImport],
+  );
+
+  const confirmAttachmentImport = useCallback(async () => {
+    const pending = attachmentConfirmation;
+    if (!pending) return;
+    await runAttachmentImport(pending.preflight, pending.source, true);
+  }, [attachmentConfirmation, runAttachmentImport]);
+
+  const dismissAttachmentConfirmation = useCallback(
+    () => setAttachmentConfirmation(null),
+    [],
+  );
+
+  const cancelAttachmentImport = useCallback(async () => {
+    const jobId = attachmentImport?.jobId;
+    attachmentAbortRef.current?.abort();
+    if (jobId) await attachments.cancel(jobId).catch(() => undefined);
+  }, [attachmentImport?.jobId]);
+
+  const removeAttachment = useCallback(
+    async (id: string) => {
+      try {
+        await attachments.remove(id);
+        await refreshAttachments(currentCardId);
+        showToast({
+          text: "附件已删除；历史回答保留当时摘录并标记“原来源已移除”。",
+        });
+      } catch (error) {
+        showToast({
+          text:
+            error instanceof Error
+              ? error.message
+              : "附件删除失败，当前快照仍保留。",
+        });
+      }
+    },
+    [currentCardId, refreshAttachments, showToast],
+  );
+
+  const promoteAttachment = useCallback(
+    async (id: string) => {
+      try {
+        await attachments.promote({
+          projectId: activeProjectId,
+          attachmentId: id,
+        });
+        await Promise.all([
+          refreshAttachments(currentCardId),
+          refreshNoteLibraries(),
+        ]);
+        showToast({
+          text: "已复制到项目附件资料库；原附件仍保持当前卡片作用域。",
+        });
+      } catch (error) {
+        showToast({
+          text:
+            error instanceof Error
+              ? error.message
+              : "附件提升失败；原附件作用域未改变。",
+        });
+      }
+    },
+    [
+      activeProjectId,
+      currentCardId,
+      refreshAttachments,
+      refreshNoteLibraries,
+      showToast,
+    ],
+  );
+
+  useEffect(() => {
+    if (!hydrated || attachmentTarget !== "desktop") return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) =>
+        getCurrentWebview().onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === "enter" || payload.type === "over") {
+            setAttachmentDragActive(true);
+            return;
+          }
+          setAttachmentDragActive(false);
+          if (payload.type === "drop" && payload.paths.length)
+            void prepareAttachmentImport({
+              kind: "desktop",
+              paths: payload.paths,
+            });
+        }),
+      )
+      .then((dispose) => {
+        if (cancelled) dispose();
+        else unlisten = dispose;
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [hydrated, prepareAttachmentImport]);
+
   const ensureProviderCapability = useCallback(
     async (
       force = false,
@@ -1538,7 +1798,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         turnId: aiId,
         appendStep: appendAgentStep,
         hostScope: undefined as
-          { projectId: string; libraryIds: string[] } | undefined,
+          | {
+              projectId: string;
+              libraryIds: string[];
+              cardId?: string;
+              attachmentScope?: string;
+            }
+          | undefined,
         eventIdSuffix: undefined as string | undefined,
         objective: undefined as string | undefined,
       };
@@ -1632,6 +1898,20 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         const scopeLibraryIds = input.resumeTurnId
           ? (frozenLibraryIds ?? [])
           : currentlyBoundLibraryIds;
+        const frozenAttachmentCardId =
+          resumeAudit?.kind === "event-sourced" &&
+          resumeAudit.run.checkpoint.hostScope?.attachmentScope ===
+            attachmentScope(resumeAudit.run.checkpoint.hostScope?.cardId ?? "")
+            ? resumeAudit.run.checkpoint.hostScope.cardId
+            : undefined;
+        const attachmentRows = input.resumeTurnId
+          ? []
+          : await attachments.list(input.cardId);
+        const attachmentCardId = input.resumeTurnId
+          ? frozenAttachmentCardId
+          : attachmentRows.length
+            ? input.cardId
+            : undefined;
         const libraries = scopeLibraryIds.length
           ? await noteLibraries.listLibraries()
           : [];
@@ -1659,7 +1939,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }
         }
         const allBoundLibrariesUnavailable =
-          scopeLibraryIds.length > 0 && libraryIds.length === 0;
+          scopeLibraryIds.length > 0 &&
+          libraryIds.length === 0 &&
+          !attachmentCardId;
         const scopeWarning = noteScopeWarning(
           unavailableLibraries,
           libraryIds.length > 0,
@@ -1667,12 +1949,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         const libraryScopes = libraries
           .filter((library) => libraryIds.includes(library.id))
           .map((library) => ({ id: library.id, name: library.name }));
+        if (attachmentCardId)
+          libraryScopes.unshift({
+            id: attachmentScope(attachmentCardId),
+            name: "当前卡片附件",
+          });
         // 普通卡片聊天不需要先花一次真实模型请求探测工具能力。只有本轮仍有
         // 可用只读资料库时才进入 Harness；不可用范围也不能触发探测请求。
-        const capability = libraryIds.length
-          ? await ensureProviderCapability()
-          : undefined;
-        if (libraryIds.length && !isCapabilityAdmitted(capability))
+        const capability =
+          libraryIds.length || attachmentCardId
+            ? await ensureProviderCapability()
+            : undefined;
+        if (
+          (libraryIds.length || attachmentCardId) &&
+          !isCapabilityAdmitted(capability)
+        )
           throw new Error(
             `Agent 模式不可用：${
               capability?.unavailableReason ??
@@ -1728,6 +2019,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           agentAudit.hostScope = {
             projectId: target.projectId,
             libraryIds: [...libraryIds],
+            ...(attachmentCardId
+              ? {
+                  cardId: attachmentCardId,
+                  attachmentScope: attachmentScope(attachmentCardId),
+                }
+              : {}),
           };
         }
         const builtForRun = withNoteScopeAvailabilityNotice(
@@ -1738,6 +2035,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           built: builtForRun,
           projectId: target.projectId,
           libraryIds,
+          attachmentCardId,
           libraryScopes,
           capability,
           resume,
@@ -3593,6 +3891,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setProviderCapabilityTtlMs,
       noteLibraries: noteLibraryList,
       boundNoteLibraryIds,
+      attachments: currentAttachments,
+      attachmentImport,
+      attachmentConfirmation,
+      attachmentDragActive,
       cardById,
       setActiveProject,
       renameProject,
@@ -3628,6 +3930,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       importNoteLibrary,
       setProjectNoteLibraries,
       removeNoteLibrary,
+      chooseAttachmentFiles,
+      confirmAttachmentImport,
+      dismissAttachmentConfirmation,
+      cancelAttachmentImport,
+      removeAttachment,
+      promoteAttachment,
       importFiles,
       exportProject,
       exportAllBackup,
@@ -3689,6 +3997,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setProviderCapabilityTtlMs,
       noteLibraryList,
       boundNoteLibraryIds,
+      currentAttachments,
+      attachmentImport,
+      attachmentConfirmation,
+      attachmentDragActive,
       cardById,
       setActiveProject,
       renameProject,
@@ -3724,6 +4036,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       importNoteLibrary,
       setProjectNoteLibraries,
       removeNoteLibrary,
+      chooseAttachmentFiles,
+      confirmAttachmentImport,
+      dismissAttachmentConfirmation,
+      cancelAttachmentImport,
+      removeAttachment,
+      promoteAttachment,
       importFiles,
       exportProject,
       exportAllBackup,
