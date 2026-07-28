@@ -1,7 +1,7 @@
 ---
 id: TASK-005
 title: 预算账本对象化与产品化
-status: in_progress
+status: done
 depends_on: [TASK-004]
 parallelizable: true
 isolation: outputs/task-005/
