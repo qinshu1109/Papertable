@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "scenario": "task-002-terminal-copy-with-task-005-budget",
+  "legalStates": [
+    { "result": "completed", "reason": "none", "truncated": false },
+    {
+      "result": "partial",
+      "reason": "rounds_exhausted",
+      "truncated": true
+    },
+    {
+      "result": "partial",
+      "reason": "calls_exhausted",
+      "truncated": true
+    },
+    {
+      "result": "partial",
+      "reason": "wall_exhausted",
+      "truncated": true
+    },
+    {
+      "result": "partial",
+      "reason": "tokens_exhausted",
+      "truncated": true
+    },
+    { "result": "partial", "reason": "no_progress", "truncated": false },
+    {
+      "result": "refused",
+      "reason": "insufficient_evidence",
+      "truncated": false
+    },
+    {
+      "result": "failed",
+      "reason": "protocol_error",
+      "truncated": false
+    },
+    { "result": "failed", "reason": "none", "truncated": false },
+    { "result": "aborted", "reason": "user_abort", "truncated": false }
+  ],
+  "budget": {
+    "limits": {
+      "rounds": 4,
+      "calls": 8,
+      "wallMs": 120000,
+      "tokens": 32000
+    },
+    "used": {
+      "rounds": 2,
+      "calls": 3,
+      "wallMs": 15000,
+      "tokens": null
+    },
+    "remaining": {
+      "rounds": 2,
+      "calls": 5,
+      "wallMs": 105000,
+      "tokens": null
+    },
+    "tokenReporting": "unreported"
+  },
+  "assert": {
+    "resultAxisVisible": true,
+    "reasonAxisVisible": true,
+    "acceptedTask002CopyUsed": true,
+    "unknownTokenUsageNeverFabricated": true
+  }
+}

@@ -246,6 +246,7 @@ export interface Card {
     | "manual"
     | "selection"
     | "concept-promotion"
+    | "trajectory-promotion"
     | "proposal"
     | "question-reroute";
   /** 提案物化后的回溯关系；Proposal 本身绝不进入卡片上下文。 */

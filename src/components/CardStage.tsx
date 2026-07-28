@@ -32,6 +32,11 @@ import type { Card, NoteCitation, Turn } from "../types";
 import type { TempCard } from "./ConceptPreview";
 import { TempCardLayer } from "./TempCardLayer";
 import { NoteSourcePreview } from "./NoteSourcePreview";
+import { AgentTimeline } from "./AgentTimeline";
+import type {
+  AgentTimelineNode,
+  TrajectoryPromotionDraft,
+} from "../lib/agentTimeline";
 
 const spring = {
   type: "spring" as const,
@@ -917,6 +922,20 @@ export function CardStage() {
                     }}
                     onRetry={retryLast}
                     onContinue={() => continueAgentRun(turn.id)}
+                    onPromoteTrajectory={(_node, draft) => {
+                      createCard({
+                        type: "child",
+                        sourceCardId: card.id,
+                        sourceTurnId: turn.id,
+                        sourceText: draft.sourceText,
+                        sourceBlockText: draft.sourceBlockText,
+                        title: draft.title,
+                        origin: "trajectory-promotion",
+                      });
+                      showToast({
+                        text: "已通过继承关系提升为真实卡片；轨迹仍不具引用资格。",
+                      });
+                    }}
                     onCitation={setNoteSource}
                     onOpenLongTurn={(turnId) => setLongTurnId(turnId)}
                     copied={copied === turn.id}
@@ -1174,6 +1193,7 @@ function TurnBlock({
   onEditQuestion,
   onRetry,
   onContinue,
+  onPromoteTrajectory,
   onCitation,
   onOpenLongTurn,
   copied,
@@ -1193,6 +1213,10 @@ function TurnBlock({
   onEditQuestion: (text: string) => void;
   onRetry: () => void;
   onContinue: () => void;
+  onPromoteTrajectory: (
+    node: AgentTimelineNode,
+    draft: TrajectoryPromotionDraft,
+  ) => void;
   onCitation: (citation: NoteCitation) => void;
   onOpenLongTurn: (turnId: string) => void;
   copied: boolean;
@@ -1345,6 +1369,12 @@ function TurnBlock({
           )}
         </div>
       </div>
+
+      <AgentTimeline
+        turnId={turn.id}
+        streaming={streaming}
+        onPromote={onPromoteTrajectory}
+      />
 
       {streaming && turn.content.length === 0 && (
         <div className="thinking" role="status" aria-live="polite">

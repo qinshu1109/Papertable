@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "scenario": "trajectory-node-promotion-without-authority-escalation",
+  "promotion": {
+    "cardOrigin": "trajectory-promotion",
+    "relationType": "child",
+    "contextPolicy": "topic-and-selection",
+    "sourceTurnId": "source-agent-turn",
+    "sourceText": "探索轨迹 · 步骤 5",
+    "sourceBlockText": "持久化 Agent 轨迹回链：run run-1 · event event-5 · 读取完成",
+    "seedTurns": []
+  },
+  "forbiddenInPromotedCardAndRelation": [
+    "search query",
+    "search snippet",
+    "read source text",
+    "hidden reasoning",
+    "absolute Vault path",
+    "protocol payload",
+    "NoteCitation",
+    "ReferenceChip",
+    "SourceAnchor"
+  ],
+  "assert": {
+    "realCardCreated": true,
+    "explicitInheritRelationCreated": true,
+    "traceBacklinkPreserved": true,
+    "factsCopied": false,
+    "citationAuthorityGranted": false,
+    "explicitReferenceEntryPointExposed": false,
+    "readCompletedRemainsOnlyCitationAuthority": true
+  }
+}

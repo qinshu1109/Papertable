@@ -8,7 +8,7 @@ async function workspaceCounts(page: import("@playwright/test").Page) {
       request.onerror = () => reject(request.error);
     });
     const tx = db.transaction(
-      ["cards", "edges", "snapshots", "proposals", "turns"],
+      ["cards", "edges", "snapshots", "proposals", "turns", "references"],
       "readonly",
     );
     const count = (name: string) =>
@@ -32,6 +32,16 @@ async function workspaceCounts(page: import("@playwright/test").Page) {
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
+    const edges = await new Promise<unknown[]>((resolve, reject) => {
+      const request = tx.objectStore("edges").getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const references = await new Promise<unknown[]>((resolve, reject) => {
+      const request = tx.objectStore("references").getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
     const [cardCount, edgeCount, snapshotCount] = await Promise.all([
       count("cards"),
       count("edges"),
@@ -45,6 +55,8 @@ async function workspaceCounts(page: import("@playwright/test").Page) {
       proposals,
       cards,
       turns,
+      edges,
+      references,
     };
   });
 }
@@ -416,6 +428,223 @@ async function seedSameRunResumeFixture(page: import("@playwright/test").Page) {
       tx.onerror = () => reject(tx.error);
       tx.onabort = () =>
         reject(tx.error ?? new Error("无法写入同 run 续跑夹具"));
+    });
+    db.close();
+  });
+}
+
+async function seedTerminalVisibilityFixtures(
+  page: import("@playwright/test").Page,
+) {
+  await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("papertable-web-v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(
+        ["view", "turns", "agentRuns", "agentEvents"],
+        "readwrite",
+      );
+      const viewRequest = tx.objectStore("view").get("main");
+      viewRequest.onsuccess = () => {
+        const cardId = viewRequest.result?.currentCardId;
+        if (!cardId) return tx.abort();
+        const now = Date.now();
+        const budget = {
+          schemaVersion: 1,
+          limits: { rounds: 4, calls: 8, wallMs: 120_000, tokens: 32_000 },
+          used: { rounds: 1, calls: 1, wallMs: 500, tokens: null },
+          remaining: {
+            rounds: 3,
+            calls: 7,
+            wallMs: 119_500,
+            tokens: null,
+          },
+          tokenReporting: {
+            state: "unreported",
+            reportedTokens: 0,
+            reportedRequests: 0,
+            unreportedRequests: 1,
+          },
+          records: [],
+        };
+        const fixtures = [
+          {
+            turnId: "e2e-protocol-failed",
+            runId: "e2e-run-protocol",
+            status: "error",
+            content: "协议失败前没有生成答案。",
+            phase: "terminal",
+            terminal: { result: "failed", reason: "protocol_error" },
+            messages: [
+              {
+                kind: "exploration-started",
+                objective: "验证协议修复展示",
+                mode: "native-tools",
+              },
+              {
+                kind: "protocol-repaired",
+                issue: "deterministic-tool-protocol-cleanup",
+                action: "NFKC normalization",
+                deterministic: true,
+              },
+              {
+                kind: "protocol-repaired",
+                issue: "ambiguous tool payload",
+                action: "ambiguous-payload-requires-same-model-resend",
+                deterministic: false,
+              },
+              {
+                kind: "retry",
+                attempt: 1,
+                reason: "provider-empty-response",
+              },
+              {
+                kind: "terminal",
+                terminal: { result: "failed", reason: "protocol_error" },
+                citations: [],
+                unresolvedQuestions: [],
+              },
+            ],
+          },
+          {
+            turnId: "e2e-no-progress",
+            runId: "e2e-run-no-progress",
+            status: "complete",
+            content: "基于现有证据给出部分结果。",
+            phase: "terminal",
+            terminal: { result: "partial", reason: "no_progress" },
+            messages: [
+              {
+                kind: "duplicate-call-detected",
+                signature: "hidden-signature",
+                occurrences: 3,
+              },
+              {
+                kind: "terminal",
+                terminal: { result: "partial", reason: "no_progress" },
+                answer: "基于现有证据给出部分结果。",
+                citations: [],
+                unresolvedQuestions: [],
+              },
+            ],
+          },
+          {
+            turnId: "e2e-interrupted",
+            runId: "e2e-run-interrupted",
+            status: "interrupted",
+            content: "中断前可见内容。",
+            phase: "interrupted",
+            messages: [
+              {
+                kind: "exploration-started",
+                objective: "验证中断展示",
+                mode: "native-tools",
+              },
+              {
+                kind: "retry",
+                attempt: 0,
+                reason: "interrupted-recovery",
+              },
+            ],
+          },
+          {
+            turnId: "e2e-refused",
+            runId: "e2e-run-refused",
+            status: "complete",
+            content: "证据不足，未生成无来源结论。",
+            phase: "terminal",
+            terminal: {
+              result: "refused",
+              reason: "insufficient_evidence",
+            },
+            messages: [
+              {
+                kind: "terminal",
+                terminal: {
+                  result: "refused",
+                  reason: "insufficient_evidence",
+                },
+                answer: "证据不足，未生成无来源结论。",
+                citations: [],
+                unresolvedQuestions: [],
+              },
+            ],
+          },
+        ];
+        fixtures.forEach((fixture, fixtureIndex) => {
+          const createdAt = now + fixtureIndex + 1;
+          tx.objectStore("turns").put({
+            id: fixture.turnId,
+            cardId,
+            role: "ai",
+            content: fixture.content,
+            createdAt,
+            status: fixture.status,
+            model: "papertable-test-model",
+            ...(fixture.terminal
+              ? {
+                  agentRun: {
+                    mode: "native-tools",
+                    startedAt: createdAt,
+                    finishedAt: createdAt + 10,
+                    searchQueries: [],
+                    hitCount: 0,
+                    readChunkIds: [],
+                    terminal: fixture.terminal,
+                    budget,
+                  },
+                }
+              : {}),
+          });
+          const checkpoint = {
+            phase: fixture.phase,
+            objective: "验证终态展示",
+            executedSearches: [],
+            readChunkIds: [],
+            confirmedCitationChunkIds: [],
+            unresolvedQuestions: [],
+            addedBudget: {},
+            budget,
+            ...(fixture.terminal
+              ? {
+                  terminal: fixture.terminal,
+                  stopReason: fixture.terminal.reason,
+                }
+              : {}),
+          };
+          tx.objectStore("agentRuns").put({
+            id: fixture.runId,
+            turnId: fixture.turnId,
+            schemaVersion: 1,
+            phase: fixture.phase,
+            startedAt: createdAt,
+            updatedAt: createdAt + fixture.messages.length,
+            ...(fixture.phase === "terminal"
+              ? { finishedAt: createdAt + fixture.messages.length }
+              : {}),
+            lastSequence: fixture.messages.length,
+            checkpoint,
+          });
+          fixture.messages.forEach((message, index) =>
+            tx.objectStore("agentEvents").put({
+              id: `${fixture.runId}-event-${index + 1}`,
+              runId: fixture.runId,
+              sequence: index + 1,
+              schemaVersion: 1,
+              eventType: message.kind,
+              occurredAt: createdAt + index,
+              message,
+            }),
+          );
+        });
+      };
+      viewRequest.onerror = () => tx.abort();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error("无法写入终态展示夹具"));
     });
     db.close();
   });
@@ -976,8 +1205,22 @@ test("继续深挖 adds budget and resumes the persisted run after reload", asyn
   await status.getByRole("button", { name: "继续深挖" }).click();
   await expect(page.getByText("正在继续深挖同一轮…")).toBeVisible();
   await expect(
+    page.getByTestId("agent-presentation-e2e-resumable-turn"),
+  ).toContainText("追加预算");
+  await expect(
     page.getByText("我已阅读本轮检索到的资料，并据此给出回答。"),
   ).toBeVisible();
+  const completedPresentation = page.getByTestId(
+    "agent-presentation-e2e-resumable-turn",
+  );
+  await expect(completedPresentation).toContainText("已完成");
+  await expect(completedPresentation).toContainText("正常结束");
+  await completedPresentation.locator(".agent-terminal-banner").screenshot({
+    path: "harness-rebuild/outputs/task-009/screenshots/completed-terminal-banner.png",
+  });
+  await completedPresentation.screenshot({
+    path: "harness-rebuild/outputs/task-009/screenshots/live-continuation-completed.png",
+  });
   await expect.poll(() => agentRequests.length).toBeGreaterThanOrEqual(2);
 
   const firstMessages = agentRequests[0]?.messages ?? [];
@@ -1068,9 +1311,172 @@ test("继续深挖 adds budget and resumes the persisted run after reload", asyn
   await expect(
     page.getByText("我已阅读本轮检索到的资料，并据此给出回答。"),
   ).toBeVisible();
+  await expect(
+    page.getByTestId("agent-presentation-e2e-resumable-turn"),
+  ).toContainText("已完成");
   await expect(page.getByTestId("agent-resume-e2e-resumable-turn")).toHaveCount(
     0,
   );
+});
+
+test("persisted Agent events render after reload, expand safely, and promote through an inherit relation", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await seedSameRunResumeFixture(page);
+  await page.reload();
+
+  const presentation = page.getByTestId(
+    "agent-presentation-e2e-resumable-turn",
+  );
+  await expect(presentation).toBeVisible();
+  await expect(presentation).toContainText("部分完成");
+  await expect(presentation).toContainText("工具轮次预算耗尽");
+  await expect(presentation).toContainText(
+    "已基于现有证据给出部分结果；工具轮次预算已耗尽。",
+  );
+  await expect(presentation).toContainText("过程已截断");
+  await expect(presentation).toContainText("6 个持久化步骤");
+  const budget = page.getByTestId("agent-budget-e2e-resumable-turn");
+  await expect(budget).toContainText("轮次");
+  await expect(budget).toContainText("120.0 秒");
+  await expect(budget).toContainText("未报告");
+  await presentation.locator(".agent-terminal-banner").screenshot({
+    path: "harness-rebuild/outputs/task-009/screenshots/partial-terminal-banner.png",
+  });
+  await budget.screenshot({
+    path: "harness-rebuild/outputs/task-009/screenshots/partial-budget-ledger.png",
+  });
+
+  const searchCompleted = page.getByTestId("agent-event-3");
+  await expect(searchCompleted).toContainText("1 个命中");
+  const readCompleted = page.getByTestId("agent-event-5");
+  await readCompleted.getByRole("button", { name: /读取完成/ }).click();
+  await expect(readCompleted.getByLabel("已读取来源详情")).toContainText(
+    "验收资料/海蓝计划.md",
+  );
+  await expect(readCompleted.getByLabel("已读取来源详情")).toContainText(
+    "ORBIT-97",
+  );
+  await expect(
+    presentation.getByRole("button", { name: /引用|加入引用/ }),
+  ).toHaveCount(0);
+  await expect(
+    presentation.getByRole("button", { name: /提升为卡片/ }),
+  ).toHaveCount(6);
+  await presentation.screenshot({
+    path: "harness-rebuild/outputs/task-009/screenshots/persisted-partial-timeline.png",
+  });
+
+  const before = await workspaceCounts(page);
+  await readCompleted.getByRole("button", { name: "提升为卡片" }).click();
+  await expect(
+    page.getByRole("heading", {
+      name: "探索轨迹 · 步骤 5 · 读取完成",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("探索轨迹 · 步骤 5", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("已通过继承关系提升为真实卡片；轨迹仍不具引用资格。"),
+  ).toBeVisible();
+  await page.waitForTimeout(650);
+
+  const after = await workspaceCounts(page);
+  expect(after.cardCount).toBe(before.cardCount + 1);
+  expect(after.edgeCount).toBe(before.edgeCount + 1);
+  expect(after.snapshotCount).toBe(before.snapshotCount + 1);
+  expect(after.references).toHaveLength(before.references.length);
+  const promoted = (
+    after.cards as Array<{
+      id?: string;
+      title?: string;
+      origin?: string;
+      answerMode?: string;
+    }>
+  ).find((card) => card.title === "探索轨迹 · 步骤 5 · 读取完成");
+  expect(promoted).toEqual(
+    expect.objectContaining({
+      origin: "trajectory-promotion",
+    }),
+  );
+  expect(
+    (after.turns as Array<{ cardId?: string }>).filter(
+      (turn) => turn.cardId === promoted?.id,
+    ),
+  ).toHaveLength(0);
+  const relation = (
+    after.edges as Array<{
+      type?: string;
+      sourceCardId?: string;
+      targetCardId?: string;
+      sourceTurnId?: string;
+      sourceText?: string;
+      sourceBlockText?: string;
+      contextPolicy?: string;
+    }>
+  ).find((edge) => edge.targetCardId === promoted?.id);
+  expect(relation).toEqual(
+    expect.objectContaining({
+      type: "child",
+      sourceTurnId: "e2e-resumable-turn",
+      sourceText: "探索轨迹 · 步骤 5",
+      contextPolicy: "topic-and-selection",
+    }),
+  );
+  expect(relation?.sourceBlockText).toContain(
+    "run e2e-same-run · event e2e-resume-event-5",
+  );
+  expect(JSON.stringify({ promoted, relation })).not.toContain("ORBIT-97");
+  expect(JSON.stringify({ promoted, relation })).not.toContain(
+    "验收资料/海蓝计划.md",
+  );
+});
+
+test("repair, no-progress, interruption, refusal, and failure stay visibly distinct", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await seedTerminalVisibilityFixtures(page);
+  await page.reload();
+
+  const failed = page.getByTestId("agent-presentation-e2e-protocol-failed");
+  await expect(failed).toContainText("失败");
+  await expect(failed).toContainText("模型协议修复失败");
+  await expect(failed).toContainText(
+    "模型协议修复未成功，未生成可能失真的答案；已保留本轮证据与轨迹。",
+  );
+  await expect(failed).toContainText("确定性协议修复");
+  await expect(failed).toContainText("模型重发修复");
+  await expect(failed).toContainText("重试 1 次");
+
+  const noProgress = page.getByTestId("agent-presentation-e2e-no-progress");
+  await expect(noProgress).toContainText("部分完成");
+  await expect(noProgress).toContainText("继续探索无新进展");
+  await expect(noProgress).not.toContainText("过程已截断");
+
+  const interrupted = page.getByTestId("agent-presentation-e2e-interrupted");
+  await expect(interrupted).toContainText("已中断");
+  await expect(interrupted).toContainText("完整步骤边界中断");
+  await expect(interrupted).toContainText("可继续深挖");
+
+  const refused = page.getByTestId("agent-presentation-e2e-refused");
+  await expect(refused).toContainText("已拒答");
+  await expect(refused).toContainText("证据不足");
+  await expect(refused).toContainText(
+    "现有材料不足以支持可靠回答，因此本轮未生成无来源结论。",
+  );
+
+  await failed.screenshot({
+    path: "harness-rebuild/outputs/task-009/screenshots/protocol-repair-failure.png",
+  });
+  await failed.locator(".agent-terminal-banner").screenshot({
+    path: "harness-rebuild/outputs/task-009/screenshots/failed-terminal-banner.png",
+  });
 });
 
 test("390px keeps read-only Harness citations reachable without horizontal overflow", async ({
