@@ -82,3 +82,4 @@
 - `2026-07-28T16:27:00+08:00` — Supervisor independently reconciled WenzMark (`awaitingAcceptance`, exit `0`), the task log, branch, unstaged diff, protected QA files, and the objective verify criteria.
 - Independently reran `pnpm verify`, `pnpm test:e2e`, the L2 workspace validator, and `git diff --check`: 214 JS/TS/server tests, 93 Rust tests, 36 Playwright cases, and workspace validation all passed.
 - Reviewed the native per-run/card attachment allowlist, host-frozen checkpoint scope, scope-free model schemas, staged snapshot cleanup, explicit copy-only promotion, Web/Dexie separation, and deleted-source frozen citation behavior. Accepted for PR; the task card remains `in_progress` until merge closure.
+- `2026-07-28T16:31:00+08:00` — PR #14 CI passed (Rust and verify), squash-merged to `feat/readonly-note-harness-alpha` as `e7bde732b1f04d78a5541d5b441f39a4faa0630a`; TASK-012 and WenzMark closed as completed.

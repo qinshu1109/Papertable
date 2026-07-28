@@ -1,7 +1,7 @@
 ---
 id: TASK-012
 title: 拖放附件全生命周期（独立并行线）
-status: in_progress
+status: done
 depends_on: [TASK-003]
 parallelizable: true
 isolation: outputs/task-012/
