@@ -394,9 +394,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         if version < 7 && !has_column(conn, "turns", "agent_phase")? {
             conn.execute("ALTER TABLE turns ADD COLUMN agent_phase TEXT", [])?;
         }
-        // v10 capability cache rows used booleans plus a two-stage fallback.
-        // They cannot prove TASK-010 admission and must be invalidated rather
-        // than guessed into the new three-stage schema.
+        // Pre-v10 capability rows cannot prove all three admission stages and
+        // must be invalidated rather than guessed into the current schema.
         if version < 10 {
             let raw: Option<String> = conn
                 .query_row("SELECT doc FROM settings WHERE id = 'app'", [], |row| {

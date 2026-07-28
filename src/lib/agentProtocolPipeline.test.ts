@@ -88,7 +88,11 @@ function runtime(overrides: Partial<AgentRuntime> = {}): AgentRuntime {
 
 async function injectedFailure(code: ProviderErrorCode) {
   let requests = 0;
+  let reprobes = 0;
+  let searches = 0;
+  let reads = 0;
   const delays: number[] = [];
+  const visible: string[] = [];
   const appended: AppendAgentStepInput[] = [];
   let failure: AgentRunFailure | undefined;
   try {
@@ -99,7 +103,7 @@ async function injectedFailure(code: ProviderErrorCode) {
       capability: nativeCapability,
       signal: new AbortController().signal,
       onPhase: () => undefined,
-      onToken: () => undefined,
+      onToken: (event) => visible.push(event.text),
       budgetLimits: { rounds: 10 },
       audit: {
         runId: `run-${code}`,
@@ -109,7 +113,10 @@ async function injectedFailure(code: ProviderErrorCode) {
         },
       },
       protocolRecovery: {
-        invalidateAndReprobe: async () => nativeCapability,
+        invalidateAndReprobe: async () => {
+          reprobes += 1;
+          return nativeCapability;
+        },
       },
       runtime: runtime({
         stream: () => {
@@ -119,13 +126,30 @@ async function injectedFailure(code: ProviderErrorCode) {
         sleep: async (delayMs) => {
           delays.push(delayMs);
         },
+        search: async () => {
+          searches += 1;
+          return [];
+        },
+        read: async () => {
+          reads += 1;
+          return [];
+        },
       }),
     });
   } catch (cause) {
     assert.ok(cause instanceof AgentRunFailure);
     failure = cause;
   }
-  return { requests, delays, appended, failure };
+  return {
+    requests,
+    reprobes,
+    searches,
+    reads,
+    delays,
+    visible,
+    appended,
+    failure,
+  };
 }
 
 test("401/configuration failures never retry", async () => {
@@ -206,7 +230,7 @@ test("empty response retries twice per request then enters bounded protocol repa
   );
 });
 
-test("invalid provider response enters protocol repair without raw transport retry", async () => {
+test("invalid provider response exhausts same-protocol repair without host retrieval or answer", async () => {
   const result = await injectedFailure("invalid-response");
   assert.equal(
     result.appended.filter((step) => step.event.message.kind === "retry")
@@ -217,6 +241,10 @@ test("invalid provider response enters protocol repair without raw transport ret
     result: "failed",
     reason: "protocol_error",
   });
+  assert.equal(result.reprobes, 1);
+  assert.equal(result.searches, 0);
+  assert.equal(result.reads, 0);
+  assert.deepEqual(result.visible, []);
 });
 
 test("ambiguous streamed payload asks the same model to resend a complete legal call", async () => {
@@ -476,7 +504,7 @@ test("capability invalidation and re-probe precede retry from the stable checkpo
   );
 });
 
-test("no heuristic completion executes and protocol_error appears only after repair exhaustion", async () => {
+test("repair exhaustion fails closed without heuristic completion or host retrieval", async () => {
   let searches = 0;
   let streams = 0;
   let failure: AgentRunFailure | undefined;

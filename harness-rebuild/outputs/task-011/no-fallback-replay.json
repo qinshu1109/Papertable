@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "scenario": "native-agent-no-downgrade-admission-and-repair",
+  "scenarios": [
+    {
+      "trigger": "probe-failure",
+      "action": "fail-closed-before-provider-or-host-retrieval",
+      "hostSearchCalls": 0,
+      "downgradedWorkflowCalls": 0,
+      "terminal": { "result": "failed", "reason": "protocol_error" }
+    },
+    {
+      "trigger": "unknown-capability",
+      "action": "fail-closed-before-provider-or-host-retrieval",
+      "hostSearchCalls": 0,
+      "downgradedWorkflowCalls": 0,
+      "terminal": { "result": "failed", "reason": "protocol_error" }
+    },
+    {
+      "trigger": "adapter-mismatch",
+      "action": "reprobe-before-admission-or-fail-closed",
+      "hostSearchCalls": 0,
+      "downgradedWorkflowCalls": 0,
+      "terminal": { "result": "failed", "reason": "protocol_error" }
+    },
+    {
+      "trigger": "provider-invalid-response",
+      "action": "bounded-same-endpoint-model-protocol-repair-then-fail-closed",
+      "hostSearchCalls": 0,
+      "downgradedWorkflowCalls": 0,
+      "terminal": { "result": "failed", "reason": "protocol_error" }
+    },
+    {
+      "trigger": "protocol-repair-exhausted",
+      "action": "fail-closed-with-preserved-audit-evidence",
+      "hostSearchCalls": 0,
+      "downgradedWorkflowCalls": 0,
+      "terminal": { "result": "failed", "reason": "protocol_error" }
+    }
+  ],
+  "historicalReplay": {
+    "fixture": "../task-004/legacy-exit-matrix.json",
+    "purpose": "inert pre-state-machine migration history",
+    "executable": false,
+    "callable": false
+  }
+}

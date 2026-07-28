@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   AgentRunFailure,
@@ -90,7 +91,7 @@ function baseRuntime(overrides: Partial<AgentRuntime> = {}): AgentRuntime {
   };
 }
 
-test("failed capability probe refuses Agent admission without two-stage search or answer", async () => {
+test("failed capability probe refuses Agent admission without provider or host retrieval", async () => {
   const searches: Array<{
     projectId: string;
     libraryIds: string[];
@@ -165,7 +166,50 @@ test("sources-only root cards refuse locally when no material is bound", async (
   assert.equal(outcome.trace.retrievalUnavailable, true);
 });
 
-test("unknown capability cannot execute the legacy inventory workflow", async () => {
+test("ordinary no-library chat remains a single deterministic provider stream", async () => {
+  let streams = 0;
+  let searches = 0;
+  let reads = 0;
+  let completions = 0;
+  const visible: string[] = [];
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: [],
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => visible.push(event.text),
+    runtime: baseRuntime({
+      complete: async () => {
+        completions += 1;
+        return { content: "不得调用", toolCalls: [] };
+      },
+      stream: async function* (input) {
+        streams += 1;
+        assert.equal(input.tools, undefined);
+        yield { type: "token", text: "普通聊天回答。", channel: "final" };
+        yield { type: "done", finishReason: "stop" };
+      },
+      search: async () => {
+        searches += 1;
+        return [];
+      },
+      read: async () => {
+        reads += 1;
+        return [];
+      },
+    }),
+  });
+
+  assert.deepEqual(outcome.terminal, { result: "completed", reason: "none" });
+  assert.deepEqual(visible, ["普通聊天回答。"]);
+  assert.equal(streams, 1);
+  assert.equal(completions, 0);
+  assert.equal(searches, 0);
+  assert.equal(reads, 0);
+});
+
+test("unknown capability cannot execute any library workflow", async () => {
   const allowed = chunk("inventory-chunk");
   const searches: string[] = [];
   const reads: string[][] = [];
@@ -216,7 +260,6 @@ test("unknown capability cannot execute the legacy inventory workflow", async ()
         projectId: "project-a",
         libraryIds: ["library-a"],
         libraryScopes: [{ id: "library-a", name: "知识教练" }],
-        capability: capability("unavailable"),
         signal: new AbortController().signal,
         onPhase: () => undefined,
         onToken: (event) => visible.push(event.text),
@@ -227,6 +270,56 @@ test("unknown capability cannot execute the legacy inventory workflow", async ()
   assert.deepEqual(searches, []);
   assert.deepEqual(reads, []);
   assert.deepEqual(visible, []);
+});
+
+test("adapter mismatch fails admission before provider, search, or read", async () => {
+  let providerCalls = 0;
+  let searches = 0;
+  let reads = 0;
+  await assert.rejects(
+    () =>
+      runAgentTurn({
+        built: built("general"),
+        projectId: "project-a",
+        libraryIds: ["library-a"],
+        capability: {
+          ...capability("native-tools"),
+          protocolAdapterVersion: "obsolete-adapter",
+        },
+        signal: new AbortController().signal,
+        onPhase: () => undefined,
+        onToken: () => undefined,
+        runtime: baseRuntime({
+          complete: async () => {
+            providerCalls += 1;
+            return { content: "", toolCalls: [] };
+          },
+          stream: () => {
+            providerCalls += 1;
+            return events([]);
+          },
+          search: async () => {
+            searches += 1;
+            return [];
+          },
+          read: async () => {
+            reads += 1;
+            return [];
+          },
+        }),
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentRunFailure);
+      assert.deepEqual(error.terminal, {
+        result: "failed",
+        reason: "protocol_error",
+      });
+      return true;
+    },
+  );
+  assert.equal(providerCalls, 0);
+  assert.equal(searches, 0);
+  assert.equal(reads, 0);
 });
 
 test("native tool loop rejects guessed chunk ids without calling read", async () => {
@@ -324,7 +417,7 @@ test("native tool loop rejects guessed chunk ids without calling read", async ()
   );
 });
 
-test("native sources-only no-tool prose enters protocol repair without invoking H fallback", async () => {
+test("native sources-only no-tool prose enters protocol repair without host search", async () => {
   let searches = 0;
   let reads = 0;
   const visible: string[] = [];
@@ -377,12 +470,12 @@ test("native sources-only no-tool prose enters protocol repair without invoking 
   assert.equal(
     searches,
     0,
-    "the disabled H path must not manufacture a lexical host search",
+    "protocol failure must not manufacture a host search",
   );
   assert.equal(reads, 0);
 });
 
-test("bound scope is visible but ignored forced search never invokes host fallback", async () => {
+test("bound scope is visible but an ignored forced search never invokes host search", async () => {
   const requests: Parameters<AgentRuntime["stream"]>[0][] = [];
   const queries: string[] = [];
   const runtime = baseRuntime({
@@ -426,57 +519,6 @@ test("bound scope is visible but ignored forced search never invokes host fallba
   );
   assert.match(system?.content ?? "", /可检索范围：知识教练/);
   assert.deepEqual(queries, []);
-});
-
-test("legacy H-path search metadata invocation stays disabled", async () => {
-  const allowed = chunk("fallback-search-only");
-  let reads = 0;
-  let calls = 0;
-  const systems: string[] = [];
-  let searches = 0;
-  await assert.rejects(() =>
-    runAgentTurn({
-      built: built("sources-only"),
-      projectId: "project-a",
-      libraryIds: ["library-a"],
-      capability: capability("native-tools"),
-      signal: new AbortController().signal,
-      onPhase: () => undefined,
-      onToken: () => undefined,
-      runtime: baseRuntime({
-        stream: (input) => {
-          calls += 1;
-          systems.push(
-            input.messages
-              .filter((message) => message.role === "system")
-              .map((message) => message.content)
-              .join("\n"),
-          );
-          return events([
-            {
-              type: "token",
-              text: calls === 1 ? "网关忽略工具。" : "找到一个命中。",
-              channel: "final",
-            },
-            { type: "done" },
-          ]);
-        },
-        search: async () => {
-          searches += 1;
-          return [hit(allowed)];
-        },
-        read: async () => {
-          reads += 1;
-          return [allowed];
-        },
-      }),
-    }),
-  );
-
-  assert.equal(searches, 0);
-  assert.equal(reads, 0);
-  assert.ok(calls >= 2, "same-protocol repair may request a legal resend");
-  assert.doesNotMatch(systems.join("\n"), /搜索元数据与命中摘要/);
 });
 
 test("native tool loop only cites chunks it actually searched and read", async () => {
@@ -720,7 +762,7 @@ function budgetExhaustionRuntime(options: {
   });
 }
 
-test("exhausted round budget plus successful final synthesis is partial and marks K truncated", async () => {
+test("exhausted round budget plus successful final synthesis is partial and truncated", async () => {
   const visible: string[] = [];
   const outcome = await runAgentTurn({
     built: built("general"),
@@ -1115,3 +1157,56 @@ for (const scenario of [
     assert.deepEqual(visible, []);
   });
 }
+
+test("TASK-011 schema-v1 replay evidence records only fail-closed native outcomes", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL(
+        "../../harness-rebuild/outputs/task-011/no-fallback-replay.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as {
+    schemaVersion: number;
+    scenarios: Array<{
+      trigger: string;
+      hostSearchCalls: number;
+      downgradedWorkflowCalls: number;
+      terminal: { result: string; reason: string };
+    }>;
+    historicalReplay: {
+      fixture: string;
+      purpose: string;
+      executable: boolean;
+      callable: boolean;
+    };
+  };
+
+  assert.equal(fixture.schemaVersion, 1);
+  assert.deepEqual(
+    fixture.scenarios.map((scenario) => scenario.trigger),
+    [
+      "probe-failure",
+      "unknown-capability",
+      "adapter-mismatch",
+      "provider-invalid-response",
+      "protocol-repair-exhausted",
+    ],
+  );
+  assert.ok(
+    fixture.scenarios.every(
+      (scenario) =>
+        scenario.hostSearchCalls === 0 &&
+        scenario.downgradedWorkflowCalls === 0 &&
+        scenario.terminal.result === "failed" &&
+        scenario.terminal.reason === "protocol_error",
+    ),
+  );
+  assert.deepEqual(fixture.historicalReplay, {
+    fixture: "../task-004/legacy-exit-matrix.json",
+    purpose: "inert pre-state-machine migration history",
+    executable: false,
+    callable: false,
+  });
+});

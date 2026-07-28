@@ -245,7 +245,7 @@ test("concurrent admission shares one probe and late old-settings results are di
   assert.deepEqual(settings.providerCapabilities, []);
 });
 
-test("schema-v1 migration drops legacy boolean fallback rows", () => {
+test("schema-v1 migration drops pre-admission capability rows", () => {
   assert.deepEqual(
     migrateCapabilityCache([
       {
