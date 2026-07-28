@@ -3,7 +3,7 @@
 - WenzMark ID: `5c05ffc8-c467-492a-88d0-bc3d9f708c9e`
 - 分支: `task/TASK-010-capability-gate`
 - 开始时间: `2026-07-28 14:26:11 +0800`
-- 状态: `in_progress`
+- 状态: `done`
 
 ## 执行记录
 
@@ -56,3 +56,4 @@
 - 独立复跑 `pnpm test:e2e`：35/35 通过；复跑生成的 TASK-009 截图已恢复，未留下卡外改动。
 - 截图按原始分辨率复核通过；暂存区为空，三个用户 QA 资产保持未跟踪且未修改。技术验收通过，进入提交、PR 与 CI 阶段。
 - PR #12 首轮远端 verify 为 34/35：能力探测在 CI 上完成过快，瞬时“正在重新探测”文案未被 Playwright 采样；Rust CI 已通过，产品结果已成功。测试现对能力端点加入 250ms 确定性延迟后再断言重探状态，不修改产品行为。
+- 定向用例并行重复 10 次全部通过；PR #12 第二轮 Rust/verify CI 均通过，已 squash 合入 `feat/readonly-note-harness-alpha`，merge SHA `5fac09104b3eb11cdc7700c446ee6e4a69e2de60`。

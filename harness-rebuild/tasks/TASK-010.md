@@ -1,7 +1,7 @@
 ---
 id: TASK-010
 title: 探测升格为准入门禁
-status: in_progress
+status: done
 depends_on: [TASK-007]
 parallelizable: true
 isolation: outputs/task-010/
