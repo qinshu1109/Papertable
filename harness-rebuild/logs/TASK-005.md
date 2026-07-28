@@ -53,6 +53,7 @@
 ## Acceptance
 
 Supervisor technical acceptance: PASS.
+
 - PR: `#7`
 - CI: Rust and verify PASS.
 - Merged into `feat/readonly-note-harness-alpha` as `16a5061`.

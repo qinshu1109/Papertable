@@ -31,10 +31,12 @@ import {
   type ProviderUsage,
 } from "./agentBudget";
 import {
+  appendAgentDuplicateCall,
   appendAgentBudgetRecord,
   appendAgentBudgetStart,
   type AgentAuditPersistence,
 } from "./agentBudgetAudit";
+import { successfulToolCallSignature } from "./agentNoProgress";
 
 const MAX_READS = 4;
 const MAX_SEARCH = 8;
@@ -634,12 +636,61 @@ async function executeToolCalls(input: {
   trace: AgentRunTrace;
   onPhase: AgentTurnInput["onPhase"];
   failures: Map<string, number>;
+  successfulCalls: Map<string, number>;
+  onDuplicate: (signature: string, occurrences: number) => Promise<void>;
   runtime: AgentRuntime;
-}): Promise<ProviderMessage[]> {
+}): Promise<{
+  toolMessages: ProviderMessage[];
+  reminderMessages: ProviderMessage[];
+  chargedCalls: number;
+  stopForNoProgress: boolean;
+}> {
   const toolMessages: ProviderMessage[] = [];
+  const reminderMessages: ProviderMessage[] = [];
+  let chargedCalls = 0;
+  let stopForNoProgress = false;
   for (const call of input.calls) {
-    const signature = `${call.name}:${call.arguments}`;
-    const failed = input.failures.get(signature) ?? 0;
+    if (stopForNoProgress) {
+      toolMessages.push({
+        role: "tool",
+        toolCallId: call.id,
+        content: toolResult({
+          skipped: true,
+          reason: "no_progress",
+          message: "检测到重复成功调用后，本批次其余工具未执行。",
+        }),
+      });
+      continue;
+    }
+    const successfulSignature = successfulToolCallSignature(call);
+    const successfulOccurrences = successfulSignature
+      ? input.successfulCalls.get(successfulSignature)
+      : undefined;
+    if (successfulSignature && successfulOccurrences) {
+      const occurrences = successfulOccurrences + 1;
+      input.successfulCalls.set(successfulSignature, occurrences);
+      await input.onDuplicate(successfulSignature, occurrences);
+      toolMessages.push({
+        role: "tool",
+        toolCallId: call.id,
+        content: toolResult({
+          duplicate: true,
+          unchanged: true,
+          message: "相同工具查询已经执行过，沿用先前结果，本次未重新执行。",
+        }),
+      });
+      if (occurrences === 2)
+        reminderMessages.push({
+          role: "system",
+          content:
+            "系统提醒：相同查询已经执行过，结果未发生变化。本次没有重新执行工具；请基于现有结果选择不同操作。",
+        });
+      else stopForNoProgress = true;
+      continue;
+    }
+
+    const failureSignature = `${call.name}:${call.arguments}`;
+    const failed = input.failures.get(failureSignature) ?? 0;
     if (failed >= 2) {
       toolMessages.push({
         role: "tool",
@@ -651,6 +702,7 @@ async function executeToolCalls(input: {
       });
       continue;
     }
+    chargedCalls += 1;
     const args = safeJson(call.arguments);
     try {
       if (!args) throw new Error("工具参数必须是 JSON 对象。");
@@ -688,6 +740,8 @@ async function executeToolCalls(input: {
             })),
           }),
         });
+        if (successfulSignature)
+          input.successfulCalls.set(successfulSignature, 1);
         continue;
       }
       if (call.name === "read_notes") {
@@ -721,11 +775,13 @@ async function executeToolCalls(input: {
             })),
           }),
         });
+        if (successfulSignature)
+          input.successfulCalls.set(successfulSignature, 1);
         continue;
       }
       throw new Error("不允许的工具调用。");
     } catch (cause) {
-      input.failures.set(signature, failed + 1);
+      input.failures.set(failureSignature, failed + 1);
       const message = errorMessage(cause);
       input.trace.errors?.push(message);
       toolMessages.push({
@@ -735,7 +791,12 @@ async function executeToolCalls(input: {
       });
     }
   }
-  return toolMessages;
+  return {
+    toolMessages,
+    reminderMessages,
+    chargedCalls,
+    stopForNoProgress,
+  };
 }
 
 async function runTwoStage(
@@ -882,12 +943,27 @@ type NativeAgentState =
       kind: "synthesizing";
       terminalOnSuccess: AgentTerminalState;
       repairAttempt: 0 | 1;
+      noProgressEvidence?: "qualified" | "insufficient";
     };
 
 const FINAL_SYNTHESIS_REPAIR_INSTRUCTION = [
   "协议修复：上一次最终综合没有返回一份完整、可显示的最终文本。",
   "保持完全相同的证据边界，只重新发送一份完整的最终回答；不得新增来源、猜测内容或调用工具。",
 ].join("\n");
+
+const NO_PROGRESS_SYNTHESIS_INSTRUCTIONS = {
+  qualified: [
+    "探索因同一成功工具调用再次重复而停止：继续检索没有取得新进展。",
+    "只使用已经实际读取的片段做一次未完成综合，明确说明覆盖不全；只能引用已经读取的 chunkId，不得补充搜索命中、猜测或新来源。",
+  ].join("\n"),
+  insufficient: [
+    "探索因同一成功工具调用再次重复而停止：继续检索没有取得新进展。",
+    "当前没有实际读取且具引用资格的片段。只输出明确的无进展与证据不足声明；不得回答原问题、不得把搜索命中当证据、不得猜测或编造来源。",
+  ].join("\n"),
+} as const;
+
+const NO_PROGRESS_WITHOUT_EVIDENCE_MESSAGE =
+  "重复执行相同查询没有取得新进展，且当前没有实际读取、可用于回答的合格证据，因此本轮停止探索，不补充无来源结论。";
 
 function providerEmptyFailure(
   trace: AgentRunTrace,
@@ -943,6 +1019,7 @@ async function runNativeStateMachine(
   const readChunks: NoteChunk[] = [];
   const searchHits: NoteHit[] = [];
   const failures = new Map<string, number>();
+  const successfulCalls = new Map<string, number>();
   let state: NativeAgentState = { kind: "requesting-model", round: 0 };
 
   while (true) {
@@ -1132,8 +1209,7 @@ async function runNativeStateMachine(
       }
 
       case "executing-tools": {
-        await budget.consume("calls", state.calls.length);
-        const toolMessages = await executeToolCalls({
+        const execution = await executeToolCalls({
           calls: state.calls,
           projectId: input.projectId,
           libraryIds: input.libraryIds,
@@ -1143,14 +1219,43 @@ async function runNativeStateMachine(
           trace,
           onPhase: input.onPhase,
           failures,
+          successfulCalls,
+          onDuplicate: async (signature, occurrences) => {
+            if (input.audit)
+              await appendAgentDuplicateCall(
+                input.audit,
+                trace,
+                budget.ledger,
+                signature,
+                occurrences,
+                runtime.now(),
+              );
+          },
           runtime,
         });
+        if (execution.chargedCalls)
+          await budget.consume("calls", execution.chargedCalls);
         messages = [
           ...messages,
           { role: "assistant", content: null, toolCalls: state.calls },
-          ...toolMessages,
+          ...execution.toolMessages,
+          ...execution.reminderMessages,
         ];
         await budget.wall("exploration");
+        if (execution.stopForNoProgress) {
+          trace.truncated = true;
+          state = {
+            kind: "synthesizing",
+            terminalOnSuccess:
+              readChunks.length > 0
+                ? createAgentTerminalState("partial", "no_progress")
+                : createAgentTerminalState("refused", "insufficient_evidence"),
+            repairAttempt: 0,
+            noProgressEvidence:
+              readChunks.length > 0 ? "qualified" : "insufficient",
+          };
+          break;
+        }
         if (budget.ledger.remaining.wallMs <= 0) {
           await budget.mark("wall_exhausted");
           trace.truncated = true;
@@ -1182,24 +1287,38 @@ async function runNativeStateMachine(
       }
 
       case "synthesizing": {
-        const strict = strictNoEvidenceOutcome(
-          input,
-          trace,
-          readChunks,
-          searchHits,
-        );
-        if (strict) return strict;
+        if (!state.noProgressEvidence) {
+          const strict = strictNoEvidenceOutcome(
+            input,
+            trace,
+            readChunks,
+            searchHits,
+          );
+          if (strict) return strict;
+        }
         input.onPhase("answering");
-        const synthesisMessages =
-          state.repairAttempt === 0
-            ? messages
-            : [
-                ...messages,
+        const synthesisMessages = [
+          ...messages,
+          ...(state.noProgressEvidence
+            ? [
+                {
+                  role: "system" as const,
+                  content:
+                    NO_PROGRESS_SYNTHESIS_INSTRUCTIONS[
+                      state.noProgressEvidence
+                    ],
+                },
+              ]
+            : []),
+          ...(state.repairAttempt === 1
+            ? [
                 {
                   role: "system" as const,
                   content: FINAL_SYNTHESIS_REPAIR_INSTRUCTION,
                 },
-              ];
+              ]
+            : []),
+        ];
         try {
           const output = await streamRound({
             messages: synthesisMessages,
@@ -1226,9 +1345,22 @@ async function runNativeStateMachine(
                 kind: "synthesizing",
                 terminalOnSuccess: state.terminalOnSuccess,
                 repairAttempt: 1,
+                ...(state.noProgressEvidence
+                  ? { noProgressEvidence: state.noProgressEvidence }
+                  : {}),
               };
               break;
             }
+            if (state.noProgressEvidence === "insufficient")
+              return terminalOutcome(
+                trace,
+                state.terminalOnSuccess,
+                readChunks,
+                {
+                  searchHits,
+                  directAnswer: NO_PROGRESS_WITHOUT_EVIDENCE_MESSAGE,
+                },
+              );
             throw providerEmptyFailure(trace, readChunks, searchHits);
           }
           output.tokens.forEach(input.onToken);
@@ -1248,8 +1380,18 @@ async function runNativeStateMachine(
               kind: "synthesizing",
               terminalOnSuccess: state.terminalOnSuccess,
               repairAttempt: 1,
+              ...(state.noProgressEvidence
+                ? { noProgressEvidence: state.noProgressEvidence }
+                : {}),
             };
             break;
+          }
+          if (state.noProgressEvidence === "insufficient") {
+            trace.errors?.push(errorMessage(cause));
+            return terminalOutcome(trace, state.terminalOnSuccess, readChunks, {
+              searchHits,
+              directAnswer: NO_PROGRESS_WITHOUT_EVIDENCE_MESSAGE,
+            });
           }
           if (cause instanceof AgentRunFailure) throw cause;
           throw finalSynthesisFailure(trace, readChunks, searchHits, cause);

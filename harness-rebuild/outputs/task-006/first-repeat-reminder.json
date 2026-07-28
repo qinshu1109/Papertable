@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "scenario": "first-successful-signature-repeat",
+  "signatureInputs": [
+    {
+      "name": "search_notes",
+      "arguments": "{\"query\":\"相同查询\",\"limit\":4}"
+    },
+    {
+      "name": "search_notes",
+      "arguments": "{\"limit\":4,\"query\":\"相同查询\"}"
+    }
+  ],
+  "events": [
+    {
+      "kind": "duplicate-call-detected",
+      "signature": "search_notes:30b4d71ac73ff41b",
+      "occurrences": 2
+    }
+  ],
+  "injectedSystemMessages": [
+    "系统提醒：相同查询已经执行过，结果未发生变化。本次没有重新执行工具；请基于现有结果选择不同操作。"
+  ],
+  "assert": {
+    "signaturesEqual": true,
+    "repeatExecuted": false,
+    "repeatCallBudgetConsumed": 0,
+    "systemReminderCount": 1,
+    "sameModelContinued": true,
+    "differentActionExecuted": true
+  }
+}

@@ -7,6 +7,7 @@ import {
   markAgentBudgetExhausted,
 } from "./agentBudget";
 import {
+  appendAgentDuplicateCall,
   appendAgentBudgetRecord,
   appendAgentBudgetStart,
   appendAgentBudgetTerminal,
@@ -61,4 +62,74 @@ test("budget audit keeps schema v1 and appends start, usage, terminal in order",
     reason: "calls_exhausted",
   });
   assert.equal(appended[2]?.finishedAt, 13);
+});
+
+test("duplicate-call events persist schema-v1 checkpoints and no-progress terminal state", async () => {
+  const appended: AppendAgentStepInput[] = [];
+  const persistence: AgentAuditPersistence = {
+    runId: "run-duplicate",
+    turnId: "turn-duplicate",
+    appendStep: async (input) => {
+      appended.push(structuredClone(input));
+    },
+  };
+  const ledger = createAgentBudgetLedger();
+  const trace: AgentRunTrace = {
+    mode: "native-tools",
+    startedAt: 10,
+    finishedAt: 10,
+    searchQueries: ["重复查询"],
+    hitCount: 1,
+    readChunkIds: ["qualified-evidence"],
+    budget: ledger,
+  };
+
+  await appendAgentBudgetStart(persistence, trace, ledger);
+  await appendAgentDuplicateCall(
+    persistence,
+    trace,
+    ledger,
+    "read_notes:stable",
+    2,
+    11,
+  );
+  await appendAgentDuplicateCall(
+    persistence,
+    trace,
+    ledger,
+    "read_notes:stable",
+    3,
+    12,
+  );
+  await appendAgentBudgetTerminal(
+    persistence,
+    trace,
+    { result: "partial", reason: "no_progress" },
+    13,
+    { answer: "基于已读证据的部分结果" },
+  );
+
+  assert.deepEqual(
+    appended.map((input) => input.event.message.kind),
+    [
+      "exploration-started",
+      "duplicate-call-detected",
+      "duplicate-call-detected",
+      "terminal",
+    ],
+  );
+  assert.deepEqual(
+    appended.map((input) => input.schemaVersion),
+    [1, 1, 1, 1],
+  );
+  assert.equal(appended[1]?.checkpoint.stopReason, undefined);
+  assert.equal(appended[2]?.checkpoint.stopReason, "no_progress");
+  assert.deepEqual(appended[2]?.checkpoint.readChunkIds, [
+    "qualified-evidence",
+  ]);
+  assert.deepEqual(appended[3]?.checkpoint.terminal, {
+    result: "partial",
+    reason: "no_progress",
+  });
+  assert.equal(appended[3]?.checkpoint.stopReason, "no_progress");
 });
