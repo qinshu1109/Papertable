@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "scenario": "truncated-arguments-repair-exhausted",
+  "malformedArguments": "{\"query\":\"绝不补括号\"",
+  "events": [
+    {
+      "kind": "protocol-repaired",
+      "action": "ambiguous-payload-requires-same-model-resend"
+    },
+    {
+      "kind": "protocol-repaired",
+      "action": "same-model-native-tools-resend-requested"
+    },
+    {
+      "kind": "protocol-repaired",
+      "action": "same-protocol-non-stream-request-rebuilt"
+    },
+    {
+      "kind": "protocol-repaired",
+      "action": "matching-capability-cache-invalidated-and-reprobe-started"
+    },
+    {
+      "kind": "protocol-repaired",
+      "action": "capability-reprobe-confirmed-native-tools"
+    },
+    {
+      "kind": "terminal",
+      "terminal": { "result": "failed", "reason": "protocol_error" },
+      "citations": [],
+      "unresolvedQuestions": []
+    }
+  ],
+  "assert": {
+    "searchExecutions": 0,
+    "heuristicBraceCompletion": false,
+    "guessedName": false,
+    "fabricatedSuccess": false,
+    "protocolErrorOnlyAfterRepairExhaustion": true,
+    "evidencePreserved": true
+  }
+}

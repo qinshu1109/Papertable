@@ -732,29 +732,35 @@ fn note_library_project_scope(
 #[tauri::command]
 fn note_library_search(
     db: State<Db>,
+    run_id: String,
     project_id: String,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<notes::PublicNoteHit>, notes::Error> {
     with_db!(db, conn, {
-        Ok(notes::search_project(conn, &project_id, &query, limit)?
-            .iter()
-            .map(notes::PublicNoteHit::from)
-            .collect())
+        Ok(
+            notes::search_project_for_run(conn, &run_id, &project_id, &query, limit)?
+                .iter()
+                .map(notes::PublicNoteHit::from)
+                .collect(),
+        )
     })
 }
 
 #[tauri::command]
 fn note_library_read(
     db: State<Db>,
+    run_id: String,
     project_id: String,
     chunk_ids: Vec<String>,
 ) -> Result<Vec<notes::PublicNoteChunk>, notes::Error> {
     with_db!(db, conn, {
-        Ok(notes::read_project(conn, &project_id, &chunk_ids)?
-            .iter()
-            .map(notes::PublicNoteChunk::from)
-            .collect())
+        Ok(
+            notes::read_project_for_run(conn, &run_id, &project_id, &chunk_ids)?
+                .iter()
+                .map(notes::PublicNoteChunk::from)
+                .collect(),
+        )
     })
 }
 

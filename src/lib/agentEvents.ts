@@ -99,7 +99,7 @@ export type AgentMessage =
       kind: "protocol-repaired";
       issue: string;
       action: string;
-      deterministic: true;
+      deterministic: boolean;
     }
   | {
       kind: "retry";

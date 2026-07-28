@@ -21,6 +21,7 @@ const target =
  * is supplied before the model starts and is never accepted from tool JSON.
  */
 export async function searchProjectNotes(input: {
+  runId?: string;
   projectId: string;
   libraryIds: string[];
   query: string;
@@ -29,7 +30,12 @@ export async function searchProjectNotes(input: {
   if (!input.libraryIds.length || !input.query.trim()) return [];
   const hits =
     target === "desktop"
-      ? await searchDesktopNotes(input.projectId, input.query, input.limit)
+      ? await searchDesktopNotes(
+          input.runId ?? "",
+          input.projectId,
+          input.query,
+          input.limit,
+        )
       : await noteLibraries.search({
           libraryIds: input.libraryIds,
           query: input.query,
@@ -40,13 +46,18 @@ export async function searchProjectNotes(input: {
 }
 
 export async function readProjectNotes(input: {
+  runId?: string;
   projectId: string;
   libraryIds: string[];
   chunkIds: string[];
 }): Promise<NoteChunk[]> {
   if (!input.libraryIds.length || !input.chunkIds.length) return [];
   if (target === "desktop")
-    return readDesktopNotes(input.projectId, input.chunkIds.slice(0, 4));
+    return readDesktopNotes(
+      input.runId ?? "",
+      input.projectId,
+      input.chunkIds.slice(0, 4),
+    );
   return noteLibraries.read({
     libraryIds: input.libraryIds,
     chunkIds: input.chunkIds.slice(0, 4),

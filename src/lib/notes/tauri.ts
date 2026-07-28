@@ -26,12 +26,14 @@ export const tauriNoteLibraryHost: NoteLibraryHost = {
     // This lower-level method is only used by pure code/tests.  The agent
     // always calls the project-bound helper below via `searchForProject`.
     invoke<NoteHit[]>("note_library_search", {
+      runId: "",
       projectId: "",
       query: input.query,
       limit: input.limit,
     }),
   read: (input: BoundNoteRead) =>
     invoke<NoteChunk[]>("note_library_read", {
+      runId: "",
       projectId: "",
       chunkIds: input.chunkIds,
     }),
@@ -49,18 +51,29 @@ export function connectDesktopVault(vault: string): Promise<NoteLibrary> {
 
 /** Host-only helpers that preserve the Rust-side fixed binding. */
 export function searchDesktopNotes(
+  runId: string,
   projectId: string,
   query: string,
   limit: number,
 ): Promise<NoteHit[]> {
-  return invoke<NoteHit[]>("note_library_search", { projectId, query, limit });
+  return invoke<NoteHit[]>("note_library_search", {
+    runId,
+    projectId,
+    query,
+    limit,
+  });
 }
 
 export function readDesktopNotes(
+  runId: string,
   projectId: string,
   chunkIds: string[],
 ): Promise<NoteChunk[]> {
-  return invoke<NoteChunk[]>("note_library_read", { projectId, chunkIds });
+  return invoke<NoteChunk[]>("note_library_read", {
+    runId,
+    projectId,
+    chunkIds,
+  });
 }
 
 /** Safe public scope status: includes IDs and reasons, never a Vault root path. */

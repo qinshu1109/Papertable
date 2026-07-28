@@ -33,8 +33,12 @@ import {
 } from "../agentBudget";
 import {
   appendAgentBudgetStart,
+  appendAgentBudgetTerminal,
   appendAgentDuplicateCall,
+  appendAgentProtocolAction,
+  appendAgentRetry,
 } from "../agentBudgetAudit";
+import { createAgentTerminalState } from "../agentTerminal";
 import type { AgentRunTrace } from "../../types";
 
 const snapshot = (): WorkspaceSnapshot => ({
@@ -442,6 +446,108 @@ test("duplicate-call detection and no-progress checkpoint survive close and reop
           : 0,
       ),
     [2, 3],
+  );
+});
+
+test("TASK-007 retry, repair, capability invalidation and rejection survive close and reopen", async () => {
+  await freshDb();
+  await saveWorkspace(snapshot());
+  const ledger = createAgentBudgetLedger();
+  const trace: AgentRunTrace = {
+    mode: "native-tools",
+    startedAt: 10,
+    finishedAt: 10,
+    searchQueries: [],
+    hitCount: 0,
+    readChunkIds: [],
+    budget: ledger,
+  };
+  const persistence = {
+    runId: "run-protocol-reopen",
+    turnId: "t",
+    appendStep: appendAgentStep,
+  };
+  await appendAgentBudgetStart(persistence, trace, ledger);
+  await appendAgentRetry(
+    persistence,
+    trace,
+    ledger,
+    1,
+    "rate-limited",
+    250,
+    1,
+    11,
+  );
+  await appendAgentProtocolAction(
+    persistence,
+    trace,
+    ledger,
+    "tool_call 缺少工具名。",
+    "same-model-native-tools-resend-requested",
+    2,
+    12,
+  );
+  await appendAgentProtocolAction(
+    persistence,
+    trace,
+    ledger,
+    "tool-call-rejected",
+    "只能读取当前 run 的 Rust search allowlist 已返回的片段。",
+    3,
+    13,
+  );
+  await appendAgentProtocolAction(
+    persistence,
+    trace,
+    ledger,
+    "工具协议仍不完整。",
+    "matching-capability-cache-invalidated-and-reprobe-started",
+    4,
+    14,
+  );
+  await appendAgentBudgetTerminal(
+    persistence,
+    trace,
+    createAgentTerminalState("failed", "protocol_error"),
+    15,
+  );
+
+  db.close();
+  await db.open();
+  const audit = await loadAgentAudit("t");
+  assert.equal(audit?.kind, "event-sourced");
+  if (audit?.kind !== "event-sourced") return;
+  assert.equal(audit.run.schemaVersion, 1);
+  assert.equal(audit.run.lastSequence, 6);
+  assert.equal(audit.run.phase, "terminal");
+  assert.deepEqual(audit.run.checkpoint.terminal, {
+    result: "failed",
+    reason: "protocol_error",
+  });
+  assert.deepEqual(
+    audit.events.map((event) => event.eventType),
+    [
+      "exploration-started",
+      "retry",
+      "protocol-repaired",
+      "protocol-repaired",
+      "protocol-repaired",
+      "terminal",
+    ],
+  );
+  assert.equal(
+    audit.events[1]?.message.kind === "retry"
+      ? audit.events[1].message.delayMs
+      : undefined,
+    250,
+  );
+  assert.ok(
+    audit.events.some(
+      (event) =>
+        event.message.kind === "protocol-repaired" &&
+        event.message.action ===
+          "matching-capability-cache-invalidated-and-reprobe-started",
+    ),
   );
 });
 

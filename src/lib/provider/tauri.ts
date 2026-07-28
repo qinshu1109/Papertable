@@ -92,6 +92,31 @@ type WireEvent =
       usage?: ProviderUsage;
     };
 
+function providerErrorFromInvoke(cause: unknown): ProviderError {
+  const message =
+    typeof cause === "string"
+      ? cause
+      : cause instanceof Error
+        ? cause.message
+        : "";
+  for (const code of [
+    "unauthorized",
+    "rate-limited",
+    "timeout",
+    "disconnected",
+    "empty-response",
+    "invalid-response",
+    "service-unavailable",
+    "upstream",
+  ] as const)
+    if (message === providerErrorMessage(code))
+      return new ProviderError(message, code);
+  return new ProviderError(
+    providerErrorMessage("service-unavailable"),
+    "service-unavailable",
+  );
+}
+
 /** Tauri Channel 回调桥接成与 Web 完全一样的异步事件流。 */
 export async function* streamModel(input: {
   task: ModelTask;
@@ -217,11 +242,16 @@ export async function completeModel(input: {
   toolCalls: ToolCall[];
   usage?: ProviderUsage;
 }> {
-  const result = await invoke<{
+  let result: {
     content?: string;
     toolCalls?: ToolCall[];
     usage?: ProviderUsage;
-  }>("llm_complete", { request: input });
+  };
+  try {
+    result = await invoke<typeof result>("llm_complete", { request: input });
+  } catch (cause) {
+    throw providerErrorFromInvoke(cause);
+  }
   const toolCalls = Array.isArray(result.toolCalls)
     ? result.toolCalls.filter(
         (call): call is ToolCall =>

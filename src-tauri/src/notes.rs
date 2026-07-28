@@ -1359,6 +1359,56 @@ pub fn search_project(
     }
 }
 
+fn assert_active_agent_run_project(
+    conn: &Connection,
+    run_id: &str,
+    project_id: &str,
+) -> Result<()> {
+    let run: Option<(String, String)> = conn
+        .query_row(
+            "SELECT c.project_id, r.phase
+             FROM agent_runs r
+             JOIN turns t ON t.id = r.turn_id
+             JOIN cards c ON c.id = t.card_id
+             WHERE r.id = ?1",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match run {
+        Some((bound_project_id, phase))
+            if bound_project_id == project_id && phase != "terminal" =>
+        {
+            Ok(())
+        }
+        _ => Err("read/search 请求没有匹配当前运行的宿主作用域。".into()),
+    }
+}
+
+/// Desktop Agent search path. The Rust data layer, not the WebView, owns the
+/// resulting per-run chunk allowlist. Reopen is fail-safe because the rows are
+/// persisted with the run and removed by foreign-key cascades.
+pub fn search_project_for_run(
+    conn: &mut Connection,
+    run_id: &str,
+    project_id: &str,
+    query: &str,
+    requested_limit: Option<usize>,
+) -> Result<Vec<NoteHit>> {
+    let tx = conn.transaction()?;
+    assert_active_agent_run_project(&tx, run_id, project_id)?;
+    let hits = search_project(&tx, project_id, query, requested_limit)?;
+    for hit in &hits {
+        tx.execute(
+            "INSERT OR IGNORE INTO agent_note_search_allowlist (run_id, project_id, chunk_id)
+             VALUES (?1, ?2, ?3)",
+            params![run_id, project_id, hit.chunk_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(hits)
+}
+
 fn safe_fts_query(query: &str) -> Option<String> {
     let normalized = query
         .chars()
@@ -1584,6 +1634,51 @@ pub fn read_project(
         .collect())
 }
 
+/// Security boundary for Agent reads. Every requested chunk must have been
+/// returned by a Rust-executed search for this exact active run and project.
+/// Supplying another run id, project id, library id, path, or a frontend
+/// readableIds set cannot create authority.
+pub fn read_project_for_run(
+    conn: &Connection,
+    run_id: &str,
+    project_id: &str,
+    chunk_ids: &[String],
+) -> Result<Vec<NoteReadChunk>> {
+    assert_active_agent_run_project(conn, run_id, project_id)?;
+    let mut seen = BTreeSet::new();
+    let ids: Vec<String> = chunk_ids
+        .iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .take(4)
+        .cloned()
+        .collect();
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT COUNT(*) FROM agent_note_search_allowlist
+         WHERE run_id = ? AND project_id = ? AND chunk_id IN ({placeholders})"
+    );
+    let mut values = vec![
+        SqlValue::Text(run_id.to_string()),
+        SqlValue::Text(project_id.to_string()),
+    ];
+    values.extend(ids.iter().cloned().map(SqlValue::Text));
+    let allowed: i64 = conn.query_row(&sql, params_from_iter(values), |row| row.get(0))?;
+    if allowed != ids.len() as i64 {
+        return Err("只能读取当前 run 的 Rust search allowlist 已返回的片段。".into());
+    }
+    let chunks = read_project(conn, project_id, &ids)?;
+    if chunks.len() != ids.len() {
+        return Err("片段已离开当前宿主作用域，拒绝读取。".into());
+    }
+    Ok(chunks)
+}
+
 /// 检查历史引用在“当前、已更新、已删除、资料库不可用”之间的真实状态。这里故意
 /// 不复用 `read_project(chunk_id)`：文档更新会改变 chunk id，直接读旧 id 会把一个
 /// 已更新来源误报成“不可用”。
@@ -1728,6 +1823,38 @@ mod tests {
         crate::db::open_in_memory().unwrap()
     }
 
+    fn seed_agent_run(conn: &Connection, project_id: &str, run_id: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (id, name, pinned, updated_at)
+             VALUES (?1, ?1, 0, 1)",
+            params![project_id],
+        )
+        .unwrap();
+        let card_id = format!("card-{run_id}");
+        let turn_id = format!("turn-{run_id}");
+        conn.execute(
+            "INSERT INTO cards (
+               id, project_id, title, favorite, unread, created_at, concepts
+             ) VALUES (?1, ?2, 'Agent', 0, 0, 1, '[]')",
+            params![card_id, project_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO turns (id, card_id, role, content, created_at)
+             VALUES (?1, ?2, 'ai', '', 1)",
+            params![turn_id, card_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_runs (
+               id, turn_id, schema_version, phase, started_at, updated_at,
+               last_sequence, checkpoint
+             ) VALUES (?1, ?2, 1, 'exploring', 1, 1, 0, '{}')",
+            params![run_id, turn_id],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn headings_inside_code_fences_do_not_split_documents() {
         let markdown = "# 标题\n\n正文\n\n```md\n# 不是标题\n```\n\n## 第二节\n资料";
@@ -1811,6 +1938,144 @@ mod tests {
         let read = read_project(&conn, "p", &[hits[0].chunk_id.clone()]).unwrap();
         assert_eq!(read.len(), 1);
         assert!(read[0].content.contains("B-42"));
+    }
+
+    #[test]
+    fn rust_run_allowlist_rejects_frontend_bypass_unsearched_and_cross_scope_chunks() {
+        let mut conn = database();
+        seed_agent_run(&conn, "p", "run-p");
+        seed_agent_run(&conn, "other", "run-other");
+        import_files(
+            &conn,
+            &NoteImportInput {
+                id: "lib".into(),
+                name: "资料".into(),
+                files: vec![
+                    NoteImportFile {
+                        path: "searched.md".into(),
+                        content: "允许读取的唯一编号 ALLOW-42。".into(),
+                    },
+                    NoteImportFile {
+                        path: "unsearched.md".into(),
+                        content: "前端 readableIds 伪造也不能读取 BYPASS-99。".into(),
+                    },
+                ],
+                now: Some(1),
+            },
+        )
+        .unwrap();
+        bind_project(&conn, "p", &["lib".into()]).unwrap();
+        bind_project(&conn, "other", &["lib".into()]).unwrap();
+
+        let allowed = search_project_for_run(&mut conn, "run-p", "p", "ALLOW-42", Some(1)).unwrap();
+        assert_eq!(allowed.len(), 1);
+        let allowed_id = allowed[0].chunk_id.clone();
+        assert_eq!(
+            read_project_for_run(&conn, "run-p", "p", std::slice::from_ref(&allowed_id))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let unsearched_id: String = conn
+            .query_row(
+                "SELECT c.id FROM note_chunks c
+                 JOIN note_documents d ON d.id = c.document_id
+                 WHERE d.relative_path = 'unsearched.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let bypass =
+            read_project_for_run(&conn, "run-p", "p", std::slice::from_ref(&unsearched_id))
+                .expect_err("frontend readableIds cannot authorize an unsearched chunk");
+        assert!(bypass.to_string().contains("Rust search allowlist"));
+
+        let cross_run = read_project_for_run(
+            &conn,
+            "run-other",
+            "other",
+            std::slice::from_ref(&allowed_id),
+        )
+        .expect_err("another run cannot reuse this run's search result");
+        assert!(cross_run.to_string().contains("Rust search allowlist"));
+
+        let wrong_project =
+            read_project_for_run(&conn, "run-p", "other", std::slice::from_ref(&allowed_id))
+                .expect_err("project ids cannot widen a run's host-frozen scope");
+        assert!(wrong_project.to_string().contains("宿主作用域"));
+
+        conn.execute(
+            "UPDATE agent_runs SET phase = 'terminal' WHERE id = 'run-p'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            read_project_for_run(&conn, "run-p", "p", std::slice::from_ref(&allowed_id)).is_err()
+        );
+    }
+
+    #[test]
+    fn rust_run_search_allowlist_survives_close_and_reopen() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("run-allowlist.sqlite3");
+        let allowed_id = {
+            let mut conn = crate::db::open(&path).unwrap();
+            seed_agent_run(&conn, "p", "run-persisted");
+            import_files(
+                &conn,
+                &NoteImportInput {
+                    id: "lib".into(),
+                    name: "资料".into(),
+                    files: vec![
+                        NoteImportFile {
+                            path: "searched.md".into(),
+                            content: "持久化允许编号 PERSIST-42。".into(),
+                        },
+                        NoteImportFile {
+                            path: "unsearched.md".into(),
+                            content: "未检索编号 NEVER-42。".into(),
+                        },
+                    ],
+                    now: Some(1),
+                },
+            )
+            .unwrap();
+            bind_project(&conn, "p", &["lib".into()]).unwrap();
+            search_project_for_run(&mut conn, "run-persisted", "p", "PERSIST-42", Some(1)).unwrap()
+                [0]
+            .chunk_id
+            .clone()
+        };
+
+        let conn = crate::db::open(&path).unwrap();
+        assert_eq!(
+            read_project_for_run(
+                &conn,
+                "run-persisted",
+                "p",
+                std::slice::from_ref(&allowed_id)
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+        let unsearched_id: String = conn
+            .query_row(
+                "SELECT c.id FROM note_chunks c
+                 JOIN note_documents d ON d.id = c.document_id
+                 WHERE d.relative_path = 'unsearched.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(read_project_for_run(
+            &conn,
+            "run-persisted",
+            "p",
+            std::slice::from_ref(&unsearched_id)
+        )
+        .is_err());
     }
 
     #[test]

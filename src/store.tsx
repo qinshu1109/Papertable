@@ -1011,7 +1011,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [refreshNoteLibraries, showToast],
   );
 
-  const ensureProviderCapability = useCallback(async () => {
+  const ensureProviderCapability = useCallback(async (force = false) => {
     const current = latestRef.current.settings;
     const baseUrl = current.providerBaseUrl ?? "https://cozai.net/v1";
     const model = current.model;
@@ -1019,7 +1019,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       (capability) =>
         capability.baseUrl === baseUrl && capability.model === model,
     );
-    if (cached) return cached;
+    if (!force && cached) return cached;
+    if (force)
+      setSettings((previous) => ({
+        ...previous,
+        providerCapabilities: (previous.providerCapabilities ?? []).filter(
+          (capability) =>
+            capability.baseUrl !== baseUrl || capability.model !== model,
+        ),
+      }));
     try {
       const probe = await probeProviderCapabilities();
       const next = {
@@ -1519,6 +1527,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             throttle.push(answer);
           },
           audit: agentAudit,
+          protocolRecovery: {
+            invalidateAndReprobe: () => ensureProviderCapability(true),
+          },
         };
         const outcome =
           allBoundLibrariesUnavailable && built.answerMode === "sources-only"

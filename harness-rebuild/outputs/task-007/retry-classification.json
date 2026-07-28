@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "scenario": "provider-retry-classification",
+  "rows": [
+    {
+      "code": "unauthorized",
+      "action": "fail",
+      "maxRetries": 0,
+      "backoffMs": []
+    },
+    {
+      "code": "rate-limited",
+      "action": "retry-with-backoff",
+      "maxRetries": 2,
+      "backoffMs": [250, 750]
+    },
+    {
+      "code": "service-unavailable",
+      "action": "retry",
+      "maxRetries": 2,
+      "backoffMs": [0, 0]
+    },
+    {
+      "code": "upstream",
+      "action": "retry",
+      "maxRetries": 2,
+      "backoffMs": [0, 0]
+    },
+    {
+      "code": "disconnected",
+      "action": "retry",
+      "maxRetries": 2,
+      "backoffMs": [0, 0]
+    },
+    {
+      "code": "timeout",
+      "action": "retry",
+      "maxRetries": 2,
+      "backoffMs": [0, 0]
+    },
+    {
+      "code": "empty-response",
+      "action": "retry",
+      "maxRetries": 2,
+      "backoffMs": [0, 0]
+    },
+    {
+      "code": "invalid-response",
+      "action": "repair-protocol",
+      "maxRetries": 0,
+      "backoffMs": []
+    }
+  ],
+  "assert": {
+    "configurationNeverRetries": true,
+    "rateLimitBackoffBounded": true,
+    "transportRetriesAtMostTwice": true,
+    "allAttemptsRemainInsideTask005Ledger": true
+  }
+}

@@ -119,6 +119,7 @@ function injectedRuntime(input: {
       return result;
     },
     now: () => 10,
+    sleep: async () => undefined,
   };
 }
 
@@ -383,6 +384,10 @@ test("empty evidence-insufficient synthesis repair falls back to an explicit no-
         toolRound(searchCall("search-empty-3")),
         finalRound(""),
         finalRound(""),
+        finalRound(""),
+        finalRound(""),
+        finalRound(""),
+        finalRound(""),
       ],
       searches: [[]],
     }),
@@ -411,6 +416,8 @@ test("evidence-insufficient synthesis transport failure never replaces no-progre
         toolRound(searchCall("search-empty-1")),
         toolRound(searchCall("search-empty-2")),
         toolRound(searchCall("search-empty-3")),
+        new ProviderError("模型请求未能完成，请重试。", "upstream"),
+        new ProviderError("模型请求未能完成，请重试。", "upstream"),
         new ProviderError("模型请求未能完成，请重试。", "upstream"),
       ],
       searches: [[]],
@@ -447,6 +454,7 @@ test("exception-only fuse remains independent and keeps isError reinjection", as
     runtime: injectedRuntime({
       requests,
       rounds: [
+        toolRound(searchCall("search-first")),
         toolRound({
           id: "invalid-1",
           name: "read_notes",
@@ -470,8 +478,8 @@ test("exception-only fuse remains independent and keeps isError reinjection", as
   assert.equal(outcome.terminal.result, "completed");
   assert.equal(
     outcome.trace.budget?.used.calls,
-    2,
-    "the fuse refusal is not an executed tool call and must not consume budget",
+    3,
+    "the search and two failed reads execute; the fuse refusal does not consume budget",
   );
   assert.equal(
     appended.some(
@@ -484,6 +492,10 @@ test("exception-only fuse remains independent and keeps isError reinjection", as
     .slice(1)
     .flatMap((messages) =>
       messages.filter((message) => message.role === "tool"),
+    )
+    .filter(
+      (message) =>
+        message.role === "tool" && JSON.parse(message.content).isError === true,
     );
   assert.equal(errorResults.length >= 3, true);
   for (const result of errorResults)

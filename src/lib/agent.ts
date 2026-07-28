@@ -34,9 +34,22 @@ import {
   appendAgentDuplicateCall,
   appendAgentBudgetRecord,
   appendAgentBudgetStart,
+  appendAgentFinalSynthesis,
+  appendAgentProtocolAction,
+  appendAgentReadCompleted,
+  appendAgentReadRequested,
+  appendAgentRetry,
+  appendAgentSearchCompleted,
+  appendAgentSearchRequested,
   type AgentAuditPersistence,
 } from "./agentBudgetAudit";
 import { successfulToolCallSignature } from "./agentNoProgress";
+import {
+  assembleToolProtocol,
+  PROTOCOL_RETRY_CLASSIFICATION,
+  validateCompletedToolProtocol,
+  visibleProtocolLeak,
+} from "./agentProtocolRepair";
 
 const MAX_READS = 4;
 const MAX_SEARCH = 8;
@@ -133,6 +146,10 @@ export interface AgentTurnInput {
   budgetLimits?: Partial<AgentBudgetLimits>;
   /** Host persistence boundary; secrets and filesystem scope never enter it. */
   audit?: AgentAuditPersistence;
+  /** Same endpoint/model capability refresh; it must never select another protocol. */
+  protocolRecovery?: {
+    invalidateAndReprobe(): Promise<ProviderCapability>;
+  };
 }
 
 export interface AgentRuntime {
@@ -141,6 +158,7 @@ export interface AgentRuntime {
   search: typeof searchProjectNotes;
   read: typeof readProjectNotes;
   now: () => number;
+  sleep: (delayMs: number, signal: AbortSignal) => Promise<void>;
 }
 
 interface AgentBudgetController {
@@ -223,6 +241,24 @@ function runtimeFor(input: AgentTurnInput): AgentRuntime {
     search: input.runtime?.search ?? searchProjectNotes,
     read: input.runtime?.read ?? readProjectNotes,
     now: input.runtime?.now ?? Date.now,
+    sleep:
+      input.runtime?.sleep ??
+      ((delayMs, signal) =>
+        new Promise<void>((resolve, reject) => {
+          if (signal.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          const timeout = globalThis.setTimeout(resolve, delayMs);
+          signal.addEventListener(
+            "abort",
+            () => {
+              globalThis.clearTimeout(timeout);
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        })),
   };
 }
 
@@ -349,7 +385,7 @@ function citationContext(chunks: NoteChunk[]): string {
  * or a citeable source.  This keeps the host from silently spending a
  * read_notes call the model never asked for.
  */
-function searchMetadataContext(hits: NoteHit[]): string {
+export function searchMetadataContext(hits: NoteHit[]): string {
   if (!hits.length) return "";
   return [
     "宿主已执行受限笔记搜索，但当前模型没有返回工具调用。以下只是搜索元数据与命中摘要，不是完整正文：可以据此说明标题、相对路径、命中数或摘要中直接出现的文字；不要把它当作完整阅读，不要生成 [[source:...]] 引用，也不要据此延伸未显示的事实。",
@@ -427,6 +463,7 @@ async function planQueries(
 }
 
 async function searchAndRead(input: {
+  runId?: string;
   projectId: string;
   libraryIds: string[];
   queries: string[];
@@ -440,6 +477,7 @@ async function searchAndRead(input: {
   for (const query of input.queries) {
     input.trace.searchQueries.push(query);
     const next = await input.runtime.search({
+      ...(input.runId ? { runId: input.runId } : {}),
       projectId: input.projectId,
       libraryIds: input.libraryIds,
       query,
@@ -457,39 +495,13 @@ async function searchAndRead(input: {
   if (!hits.length) return { hits, chunks: [] };
   input.onPhase("reading");
   const chunks = await input.runtime.read({
+    ...(input.runId ? { runId: input.runId } : {}),
     projectId: input.projectId,
     libraryIds: input.libraryIds,
     chunkIds: hits.slice(0, MAX_READS).map((hit) => hit.chunk.id),
   });
   input.trace.readChunkIds = chunks.map((chunk) => chunk.id);
   return { hits, chunks };
-}
-
-function collectStreamCalls(events: ProviderStreamEvent[]): ToolCall[] {
-  const partial = new Map<
-    number,
-    { id?: string; name?: ToolCall["name"]; arguments: string }
-  >();
-  for (const event of events) {
-    if (event.type !== "tool-call-delta") continue;
-    const current = partial.get(event.index) ?? { arguments: "" };
-    if (event.id) current.id = event.id;
-    if (
-      event.name === "search_notes" ||
-      event.name === "read_notes" ||
-      event.name === "papertable_probe"
-    )
-      current.name = event.name;
-    if (event.arguments) current.arguments += event.arguments;
-    partial.set(event.index, current);
-  }
-  return [...partial.entries()]
-    .sort(([left], [right]) => left - right)
-    .flatMap(([, call]) =>
-      call.id && call.name
-        ? [{ id: call.id, name: call.name, arguments: call.arguments || "{}" }]
-        : [],
-    );
 }
 
 async function streamRound(input: {
@@ -513,6 +525,8 @@ async function streamRound(input: {
   tokens: Extract<ProviderStreamEvent, { type: "token" }>[];
   finishReason?: string;
   usage?: ProviderUsage;
+  protocolIssue?: string;
+  deterministicRepairActions: string[];
   /**
    * Tool rounds buffer prose until the host has decided it is safe to show.
    * In particular, a sources-only run with no evidence must never flash an
@@ -550,7 +564,8 @@ async function streamRound(input: {
   } finally {
     if (!usageRecorded) await input.onUsage?.(undefined);
   }
-  const toolCalls = collectStreamCalls(events);
+  const assembly = assembleToolProtocol(events);
+  const toolCalls = assembly.calls;
   const tokens = events.filter(
     (event): event is Extract<ProviderStreamEvent, { type: "token" }> =>
       event.type === "token",
@@ -561,11 +576,40 @@ async function streamRound(input: {
   const usage = [...events]
     .reverse()
     .find((event) => event.type === "done")?.usage;
+  const forcedToolCall =
+    input.withTools &&
+    (input.toolChoice === "required" ||
+      (typeof input.toolChoice === "object" &&
+        input.toolChoice?.type === "function"));
+  const forcedToolName =
+    typeof input.toolChoice === "object"
+      ? input.toolChoice.function.name
+      : undefined;
+  const protocolIssue =
+    assembly.issue ??
+    (visibleProtocolLeak(events)
+      ? "模型把工具协议标签泄漏到了可见正文。"
+      : forcedToolName && toolCalls.some((call) => call.name !== forcedToolName)
+        ? `模型没有按强制原生工具协议调用 ${forcedToolName}。`
+        : forcedToolCall && !toolCalls.length
+          ? "模型没有按强制原生工具协议返回完整 tool_call。"
+          : undefined);
+  if (
+    !protocolIssue &&
+    !toolCalls.length &&
+    !tokens.some((event) => event.text.trim())
+  )
+    throw new ProviderError(
+      agentTerminalErrorMessage("provider-empty-response"),
+      "empty-response",
+    );
   return {
     toolCalls,
     tokens,
     ...(finishReason ? { finishReason } : {}),
     ...(usage ? { usage } : {}),
+    ...(protocolIssue ? { protocolIssue } : {}),
+    deterministicRepairActions: assembly.deterministicActions,
     deferredTokens: input.withTools && !toolCalls.length ? tokens : [],
   };
 }
@@ -628,6 +672,7 @@ function strictNoEvidenceOutcome(
 
 async function executeToolCalls(input: {
   calls: ToolCall[];
+  runId?: string;
   projectId: string;
   libraryIds: string[];
   readableIds: Set<string>;
@@ -638,6 +683,9 @@ async function executeToolCalls(input: {
   failures: Map<string, number>;
   successfulCalls: Map<string, number>;
   onDuplicate: (signature: string, occurrences: number) => Promise<void>;
+  audit?: AgentAuditPersistence;
+  ledger: AgentBudgetLedger;
+  nextAuditSequence: () => number;
   runtime: AgentRuntime;
 }): Promise<{
   toolMessages: ProviderMessage[];
@@ -711,7 +759,18 @@ async function executeToolCalls(input: {
         if (!query || query.length > 100) throw new Error("检索词格式不正确。");
         const requested = typeof args.limit === "number" ? args.limit : 4;
         input.onPhase("searching");
+        if (input.audit)
+          await appendAgentSearchRequested(
+            input.audit,
+            input.trace,
+            input.ledger,
+            query,
+            call.id,
+            input.nextAuditSequence(),
+            input.runtime.now(),
+          );
         const hits = await input.runtime.search({
+          ...(input.runId ? { runId: input.runId } : {}),
           projectId: input.projectId,
           libraryIds: input.libraryIds,
           query,
@@ -728,6 +787,17 @@ async function executeToolCalls(input: {
           )
             input.searchHits.push(hit);
         }
+        if (input.audit)
+          await appendAgentSearchCompleted(
+            input.audit,
+            input.trace,
+            input.ledger,
+            query,
+            call.id,
+            hits.map((hit) => hit.chunk.id),
+            input.nextAuditSequence(),
+            input.runtime.now(),
+          );
         toolMessages.push({
           role: "tool",
           toolCallId: call.id,
@@ -746,14 +816,32 @@ async function executeToolCalls(input: {
       }
       if (call.name === "read_notes") {
         const raw = Array.isArray(args.chunkIds) ? args.chunkIds : [];
-        const ids = raw
-          .filter((id): id is string => typeof id === "string")
-          .filter((id) => input.readableIds.has(id))
-          .slice(0, MAX_READS);
+        const requestedIds = raw.filter(
+          (id): id is string => typeof id === "string",
+        );
+        if (
+          requestedIds.length !== raw.length ||
+          requestedIds.some((id) => !input.readableIds.has(id))
+        )
+          throw new Error(
+            "只能读取本轮 search_notes 已返回的片段；请求包含未检索 chunk。",
+          );
+        const ids = requestedIds.slice(0, MAX_READS);
         if (!ids.length)
           throw new Error("只能读取本轮 search_notes 已返回的片段。");
         input.onPhase("reading");
+        if (input.audit)
+          await appendAgentReadRequested(
+            input.audit,
+            input.trace,
+            input.ledger,
+            ids,
+            call.id,
+            input.nextAuditSequence(),
+            input.runtime.now(),
+          );
         const chunks = await input.runtime.read({
+          ...(input.runId ? { runId: input.runId } : {}),
           projectId: input.projectId,
           libraryIds: input.libraryIds,
           chunkIds: ids,
@@ -763,6 +851,17 @@ async function executeToolCalls(input: {
           if (!current.has(chunk.id)) input.readChunks.push(chunk);
         }
         input.trace.readChunkIds = input.readChunks.map((chunk) => chunk.id);
+        if (input.audit)
+          await appendAgentReadCompleted(
+            input.audit,
+            input.trace,
+            input.ledger,
+            ids,
+            chunks,
+            call.id,
+            input.nextAuditSequence(),
+            input.runtime.now(),
+          );
         toolMessages.push({
           role: "tool",
           toolCallId: call.id,
@@ -784,6 +883,16 @@ async function executeToolCalls(input: {
       input.failures.set(failureSignature, failed + 1);
       const message = errorMessage(cause);
       input.trace.errors?.push(message);
+      if (input.audit)
+        await appendAgentProtocolAction(
+          input.audit,
+          input.trace,
+          input.ledger,
+          "tool-call-rejected",
+          message,
+          input.nextAuditSequence(),
+          input.runtime.now(),
+        );
       toolMessages.push({
         role: "tool",
         toolCallId: call.id,
@@ -811,6 +920,7 @@ async function runTwoStage(
     const question = latestQuestion(input.built.messages);
     try {
       const fallback = await searchAndRead({
+        runId: input.audit?.runId,
         projectId: input.projectId,
         libraryIds: input.libraryIds,
         queries: [isInventoryQuestion(question) ? "*" : question],
@@ -883,6 +993,7 @@ async function runTwoStage(
   let hits: NoteHit[] = [];
   try {
     ({ chunks, hits } = await searchAndRead({
+      runId: input.audit?.runId,
       projectId: input.projectId,
       libraryIds: input.libraryIds,
       queries,
@@ -935,10 +1046,67 @@ async function runTwoStage(
 
 type NativeRoundOutput = Awaited<ReturnType<typeof streamRound>>;
 
+async function classifiedProviderRequest<T>(input: {
+  request: () => Promise<T>;
+  signal: AbortSignal;
+  runtime: AgentRuntime;
+  budget: AgentBudgetController;
+  stage: AgentBudgetRecord["stage"];
+  audit?: AgentAuditPersistence;
+  trace: AgentRunTrace;
+  nextAuditSequence: () => number;
+  chargeRound?: boolean;
+}): Promise<T> {
+  let retryAttempt = 0;
+  while (true) {
+    try {
+      try {
+        return await input.request();
+      } finally {
+        if (input.chargeRound && input.budget.ledger.remaining.rounds > 0)
+          await input.budget.consume("rounds", 1, input.stage);
+      }
+    } catch (cause) {
+      await input.budget.wall(input.stage);
+      if (!(cause instanceof ProviderError)) throw cause;
+      const classification = PROTOCOL_RETRY_CLASSIFICATION[cause.code];
+      if (
+        classification.action === "fail" ||
+        classification.action === "repair-protocol" ||
+        retryAttempt >= classification.maxRetries ||
+        input.budget.ledger.remaining.wallMs <= 0 ||
+        (input.chargeRound && input.budget.ledger.remaining.rounds <= 0) ||
+        input.budget.ledger.remaining.tokens === 0
+      )
+        throw cause;
+      retryAttempt += 1;
+      const delayMs = classification.backoffMs[retryAttempt - 1] ?? 0;
+      if (input.audit)
+        await appendAgentRetry(
+          input.audit,
+          input.trace,
+          input.budget.ledger,
+          retryAttempt,
+          cause.code,
+          delayMs,
+          input.nextAuditSequence(),
+          input.runtime.now(),
+        );
+      if (delayMs > 0) await input.runtime.sleep(delayMs, input.signal);
+    }
+  }
+}
+
 type NativeAgentState =
   | { kind: "requesting-model"; round: number }
   | { kind: "handling-round"; round: number; output: NativeRoundOutput }
   | { kind: "executing-tools"; round: number; calls: ToolCall[] }
+  | {
+      kind: "repairing-protocol";
+      round: number;
+      issue: string;
+      stage: "resend" | "non-stream" | "reprobe";
+    }
   | {
       kind: "synthesizing";
       terminalOnSuccess: AgentTerminalState;
@@ -950,6 +1118,15 @@ const FINAL_SYNTHESIS_REPAIR_INSTRUCTION = [
   "协议修复：上一次最终综合没有返回一份完整、可显示的最终文本。",
   "保持完全相同的证据边界，只重新发送一份完整的最终回答；不得新增来源、猜测内容或调用工具。",
 ].join("\n");
+
+function protocolResendInstruction(issue: string): string {
+  return [
+    `原生工具协议修复请求：上一批 tool_call 无法安全执行，原因：${issue}`,
+    "请使用完全相同的模型与原生 tools 协议，重新发送完整、合法的调用。",
+    "只能明确选择 search_notes 或 read_notes，并完整发送 provider 生成的 call id 与 JSON 对象参数。",
+    "不要解释、不要输出工具标签、不要省略字段；宿主不会猜工具名、补 token、补括号或改写歧义值。",
+  ].join("\n");
+}
 
 const NO_PROGRESS_SYNTHESIS_INSTRUCTIONS = {
   qualified: [
@@ -1004,6 +1181,25 @@ function finalSynthesisFailure(
   );
 }
 
+function exhaustedProtocolFailure(
+  trace: AgentRunTrace,
+  readChunks: NoteChunk[],
+  searchHits: NoteHit[],
+  issue: string,
+  cause?: unknown,
+): AgentRunFailure {
+  const message = `原生工具协议修复已耗尽：${issue}`;
+  trace.errors?.push(message);
+  const terminal = createAgentTerminalState("failed", "protocol_error");
+  return new AgentRunFailure(
+    message,
+    finish(trace, terminal),
+    terminal,
+    cause,
+    { readChunks, searchHits },
+  );
+}
+
 /**
  * Native-only explicit state machine. The legacy two-stage implementation
  * remains separately callable through runAgentTurn's capability branch.
@@ -1020,6 +1216,29 @@ async function runNativeStateMachine(
   const searchHits: NoteHit[] = [];
   const failures = new Map<string, number>();
   const successfulCalls = new Map<string, number>();
+  let auditSequence = 0;
+  const nextAuditSequence = () => {
+    auditSequence += 1;
+    return auditSequence;
+  };
+  const recordProtocol = async (
+    issue: string,
+    action: string,
+    deterministic = false,
+  ) => {
+    trace.errors?.push(`${issue} ${action}`);
+    if (input.audit)
+      await appendAgentProtocolAction(
+        input.audit,
+        trace,
+        budget.ledger,
+        issue,
+        action,
+        nextAuditSequence(),
+        runtime.now(),
+        deterministic,
+      );
+  };
   let state: NativeAgentState = { kind: "requesting-model", round: 0 };
 
   while (true) {
@@ -1055,22 +1274,58 @@ async function runNativeStateMachine(
           break;
         }
         input.onPhase("searching");
-        const output = await streamRound({
-          messages,
-          signal: input.signal,
-          withTools: true,
-          toolChoice:
-            trace.searchQueries.length === 0
-              ? {
-                  type: "function",
-                  function: { name: "search_notes" },
-                }
-              : "auto",
-          onToken: input.onToken,
-          runtime,
-          onUsage: (usage) => budget.provider(usage, "exploration"),
-        });
-        await budget.consume("rounds", 1);
+        let output: NativeRoundOutput;
+        try {
+          output = await classifiedProviderRequest({
+            request: () =>
+              streamRound({
+                messages,
+                signal: input.signal,
+                withTools: true,
+                toolChoice:
+                  trace.searchQueries.length === 0
+                    ? {
+                        type: "function",
+                        function: { name: "search_notes" },
+                      }
+                    : "auto",
+                onToken: input.onToken,
+                runtime,
+                onUsage: (usage) => budget.provider(usage, "exploration"),
+              }),
+            signal: input.signal,
+            runtime,
+            budget,
+            stage: "exploration",
+            audit: input.audit,
+            trace,
+            nextAuditSequence,
+            chargeRound: true,
+          });
+        } catch (cause) {
+          if (
+            cause instanceof ProviderError &&
+            (cause.code === "invalid-response" ||
+              cause.code === "empty-response")
+          ) {
+            const issue =
+              cause.code === "invalid-response"
+                ? "provider 返回了畸形原生工具协议响应。"
+                : "provider 在有界重试后仍返回空响应。";
+            await recordProtocol(
+              issue,
+              "same-model-same-protocol-repair-entered",
+            );
+            state = {
+              kind: "repairing-protocol",
+              round: state.round,
+              issue,
+              stage: "resend",
+            };
+            break;
+          }
+          throw cause;
+        }
         await budget.wall("exploration");
         if (output.finishReason === "length") {
           // Pi invariant: a length-truncated tool batch is wholly invalid.
@@ -1117,11 +1372,25 @@ async function runNativeStateMachine(
           };
           break;
         }
-        if (
-          output.finishReason === "tool_calls" &&
-          output.toolCalls.length === 0
-        )
-          throw providerEmptyFailure(trace, readChunks, searchHits);
+        for (const action of output.deterministicRepairActions)
+          await recordProtocol(
+            "deterministic-tool-protocol-cleanup",
+            action,
+            true,
+          );
+        if (output.protocolIssue) {
+          await recordProtocol(
+            output.protocolIssue,
+            "ambiguous-payload-requires-same-model-resend",
+          );
+          state = {
+            kind: "repairing-protocol",
+            round: state.round,
+            issue: output.protocolIssue,
+            stage: "resend",
+          };
+          break;
+        }
         state = { kind: "handling-round", round: state.round, output };
         break;
       }
@@ -1146,42 +1415,6 @@ async function runNativeStateMachine(
           }
           state = { kind: "executing-tools", round: state.round, calls };
           break;
-        }
-
-        // A few OpenAI-compatible gateways accept tools but ignore forced
-        // tool_choice and answer in prose. Bound material must still be
-        // searched before accepting that prose.
-        if (trace.searchQueries.length === 0 && readChunks.length === 0) {
-          const question = latestQuestion(input.built.messages);
-          const fallbackQuery = isInventoryQuestion(question) ? "*" : question;
-          input.onPhase("searching");
-          const fallbackHits = await runtime.search({
-            projectId: input.projectId,
-            libraryIds: input.libraryIds,
-            query: fallbackQuery,
-            limit: MAX_SEARCH,
-          });
-          trace.searchQueries.push(fallbackQuery);
-          trace.hitCount += fallbackHits.length;
-          fallbackHits.slice(0, MAX_SEARCH).forEach((hit) => {
-            readableIds.add(hit.chunk.id);
-            if (
-              !searchHits.some((current) => current.chunk.id === hit.chunk.id)
-            )
-              searchHits.push(hit);
-          });
-          if (searchHits.length) {
-            messages.splice(1, 0, {
-              role: "system",
-              content: searchMetadataContext(searchHits),
-            });
-            state = {
-              kind: "synthesizing",
-              terminalOnSuccess: createAgentTerminalState("completed", "none"),
-              repairAttempt: 0,
-            };
-            break;
-          }
         }
 
         const strict = strictNoEvidenceOutcome(
@@ -1211,6 +1444,7 @@ async function runNativeStateMachine(
       case "executing-tools": {
         const execution = await executeToolCalls({
           calls: state.calls,
+          runId: input.audit?.runId,
           projectId: input.projectId,
           libraryIds: input.libraryIds,
           readableIds,
@@ -1231,6 +1465,9 @@ async function runNativeStateMachine(
                 runtime.now(),
               );
           },
+          audit: input.audit,
+          ledger: budget.ledger,
+          nextAuditSequence,
           runtime,
         });
         if (execution.chargedCalls)
@@ -1286,6 +1523,235 @@ async function runNativeStateMachine(
         break;
       }
 
+      case "repairing-protocol": {
+        const repairState: Extract<
+          NativeAgentState,
+          { kind: "repairing-protocol" }
+        > = state;
+        if (
+          budget.ledger.remaining.rounds <= 0 ||
+          budget.ledger.remaining.wallMs <= 0 ||
+          budget.ledger.remaining.tokens === 0
+        )
+          throw exhaustedProtocolFailure(
+            trace,
+            readChunks,
+            searchHits,
+            `${repairState.issue}（TASK-005 预算不允许继续修复）`,
+          );
+        const repairMessages: ProviderMessage[] = [
+          ...messages,
+          {
+            role: "system",
+            content: protocolResendInstruction(repairState.issue),
+          },
+        ];
+        if (repairState.stage === "resend") {
+          await recordProtocol(
+            repairState.issue,
+            "same-model-native-tools-resend-requested",
+          );
+          try {
+            const output = await classifiedProviderRequest({
+              request: () =>
+                streamRound({
+                  messages: repairMessages,
+                  signal: input.signal,
+                  withTools: true,
+                  toolChoice: "required",
+                  onToken: input.onToken,
+                  runtime,
+                  onUsage: (usage) => budget.provider(usage, "exploration"),
+                }),
+              signal: input.signal,
+              runtime,
+              budget,
+              stage: "exploration",
+              audit: input.audit,
+              trace,
+              nextAuditSequence,
+              chargeRound: true,
+            });
+            for (const action of output.deterministicRepairActions)
+              await recordProtocol(
+                "deterministic-tool-protocol-cleanup",
+                action,
+                true,
+              );
+            if (!output.protocolIssue && output.toolCalls.length) {
+              await recordProtocol(
+                repairState.issue,
+                "same-model-resend-produced-complete-legal-call",
+              );
+              state = {
+                kind: "handling-round",
+                round: repairState.round,
+                output,
+              };
+              break;
+            }
+            state = {
+              ...repairState,
+              issue: output.protocolIssue ?? repairState.issue,
+              stage: "non-stream",
+            };
+          } catch (cause) {
+            if (cause instanceof ProviderError && cause.code === "unauthorized")
+              throw finalSynthesisFailure(trace, readChunks, searchHits, cause);
+            state = { ...repairState, stage: "non-stream" };
+          }
+          break;
+        }
+
+        if (repairState.stage === "non-stream") {
+          await recordProtocol(
+            repairState.issue,
+            "same-protocol-non-stream-request-rebuilt",
+          );
+          try {
+            const completion = await classifiedProviderRequest({
+              request: async () => {
+                const result = await runtime.complete({
+                  task: "agent",
+                  messages: repairMessages,
+                  temperature: 0,
+                  tools: toolDefinitions,
+                  toolChoice: "required",
+                });
+                await budget.provider(result.usage, "exploration");
+                return result;
+              },
+              signal: input.signal,
+              runtime,
+              budget,
+              stage: "exploration",
+              audit: input.audit,
+              trace,
+              nextAuditSequence,
+              chargeRound: true,
+            });
+            const validated = validateCompletedToolProtocol(
+              completion.toolCalls,
+            );
+            for (const action of validated.deterministicActions)
+              await recordProtocol(
+                "deterministic-tool-protocol-cleanup",
+                action,
+                true,
+              );
+            if (!validated.issue && validated.calls.length) {
+              await recordProtocol(
+                repairState.issue,
+                "same-protocol-non-stream-produced-complete-legal-call",
+              );
+              state = {
+                kind: "handling-round",
+                round: repairState.round,
+                output: {
+                  toolCalls: validated.calls,
+                  tokens: [],
+                  deterministicRepairActions: [],
+                  deferredTokens: [],
+                },
+              };
+              break;
+            }
+            state = {
+              ...repairState,
+              issue:
+                validated.issue ?? "同协议非流式请求仍未返回完整原生工具调用。",
+              stage: "reprobe",
+            };
+          } catch (cause) {
+            if (cause instanceof ProviderError && cause.code === "unauthorized")
+              throw finalSynthesisFailure(trace, readChunks, searchHits, cause);
+            state = { ...repairState, stage: "reprobe" };
+          }
+          break;
+        }
+
+        await recordProtocol(
+          repairState.issue,
+          "matching-capability-cache-invalidated-and-reprobe-started",
+        );
+        if (!input.protocolRecovery)
+          throw exhaustedProtocolFailure(
+            trace,
+            readChunks,
+            searchHits,
+            `${repairState.issue}（宿主没有可用的能力重探测入口）`,
+          );
+        const capability = await input.protocolRecovery.invalidateAndReprobe();
+        await recordProtocol(
+          repairState.issue,
+          capability.mode === "native-tools" &&
+            capability.streamingToolCalls &&
+            capability.toolResultAccepted
+            ? "capability-reprobe-confirmed-native-tools"
+            : "capability-reprobe-rejected-native-tools-without-downgrade",
+        );
+        if (
+          capability.mode !== "native-tools" ||
+          !capability.streamingToolCalls ||
+          !capability.toolResultAccepted
+        )
+          throw exhaustedProtocolFailure(
+            trace,
+            readChunks,
+            searchHits,
+            `${repairState.issue}（重探测未确认相同原生工具协议）`,
+          );
+        try {
+          const output = await classifiedProviderRequest({
+            request: () =>
+              streamRound({
+                messages: repairMessages,
+                signal: input.signal,
+                withTools: true,
+                toolChoice: "required",
+                onToken: input.onToken,
+                runtime,
+                onUsage: (usage) => budget.provider(usage, "exploration"),
+              }),
+            signal: input.signal,
+            runtime,
+            budget,
+            stage: "exploration",
+            audit: input.audit,
+            trace,
+            nextAuditSequence,
+            chargeRound: true,
+          });
+          if (!output.protocolIssue && output.toolCalls.length) {
+            await recordProtocol(
+              repairState.issue,
+              "last-stable-checkpoint-retry-produced-complete-legal-call",
+            );
+            state = {
+              kind: "handling-round",
+              round: repairState.round,
+              output,
+            };
+            break;
+          }
+          throw exhaustedProtocolFailure(
+            trace,
+            readChunks,
+            searchHits,
+            output.protocolIssue ?? repairState.issue,
+          );
+        } catch (cause) {
+          if (cause instanceof AgentRunFailure) throw cause;
+          throw exhaustedProtocolFailure(
+            trace,
+            readChunks,
+            searchHits,
+            repairState.issue,
+            cause,
+          );
+        }
+      }
+
       case "synthesizing": {
         if (!state.noProgressEvidence) {
           const strict = strictNoEvidenceOutcome(
@@ -1320,14 +1786,38 @@ async function runNativeStateMachine(
             : []),
         ];
         try {
-          const output = await streamRound({
-            messages: synthesisMessages,
+          if (input.audit)
+            await appendAgentFinalSynthesis(
+              input.audit,
+              trace,
+              budget.ledger,
+              "started",
+              nextAuditSequence(),
+              runtime.now(),
+            );
+          if (state.repairAttempt === 1)
+            await recordProtocol(
+              "final-synthesis-empty-or-truncated",
+              "same-model-complete-final-answer-resend-requested",
+            );
+          const output = await classifiedProviderRequest({
+            request: () =>
+              streamRound({
+                messages: synthesisMessages,
+                signal: input.signal,
+                withTools: false,
+                onToken: input.onToken,
+                runtime,
+                emitTokens: false,
+                onUsage: (usage) => budget.provider(usage, "synthesis"),
+              }),
             signal: input.signal,
-            withTools: false,
-            onToken: input.onToken,
             runtime,
-            emitTokens: false,
-            onUsage: (usage) => budget.provider(usage, "synthesis"),
+            budget,
+            stage: "synthesis",
+            audit: input.audit,
+            trace,
+            nextAuditSequence,
           });
           await budget.wall("synthesis");
           const completeText = output.tokens
@@ -1363,6 +1853,15 @@ async function runNativeStateMachine(
               );
             throw providerEmptyFailure(trace, readChunks, searchHits);
           }
+          if (input.audit)
+            await appendAgentFinalSynthesis(
+              input.audit,
+              trace,
+              budget.ledger,
+              "completed",
+              nextAuditSequence(),
+              runtime.now(),
+            );
           output.tokens.forEach(input.onToken);
           return terminalOutcome(trace, state.terminalOnSuccess, readChunks, {
             searchHits,
