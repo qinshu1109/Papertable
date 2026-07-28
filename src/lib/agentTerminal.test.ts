@@ -94,7 +94,7 @@ test("the discriminated union rejects illegal combinations at typecheck", () => 
   );
 });
 
-test("provider-empty and final-answer-empty use distinct stable codes and copy", () => {
+test("provider, final-answer, and synthesis-tool failures use distinct stable copy", () => {
   assert.notEqual(
     AGENT_TERMINAL_ERROR_MESSAGES["provider-empty-response"],
     AGENT_TERMINAL_ERROR_MESSAGES["final-answer-empty"],
@@ -106,5 +106,9 @@ test("provider-empty and final-answer-empty use distinct stable codes and copy",
   assert.equal(
     agentTerminalErrorMessage("final-answer-empty"),
     "模型回答已结束，但没有可显示的最终文本，请重试。",
+  );
+  assert.equal(
+    agentTerminalErrorMessage("unexpected-synthesis-tool-call"),
+    "模型在最终综合阶段仍请求调用工具，协议修复后仍未返回最终正文。",
   );
 });

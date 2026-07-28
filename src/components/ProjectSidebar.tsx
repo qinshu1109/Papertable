@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ChevronsLeft,
   ChevronsRight,
   Download,
+  Edit3,
   FolderPlus,
   LoaderCircle,
   MoreHorizontal,
@@ -15,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { useStore } from "../store";
+import { normalizeProjectName, PROJECT_NAME_LIMIT } from "../lib/desktopUi";
 import { Logo } from "./Logo";
 
 interface Props {
@@ -42,16 +45,26 @@ export function ProjectSidebar({
     activeProjectId,
     streamingCardIds,
     setActiveProject,
+    renameProject,
     togglePinProject,
     createProject,
     deleteProject,
   } = useStore();
   const [query, setQuery] = useState("");
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [nameDialog, setNameDialog] = useState<{
+    mode: "create" | "rename";
+    projectId?: string;
+    value: string;
+  } | null>(null);
+  const desktopBuild = __PAPERTABLE_TARGET__ === "desktop";
 
   useEffect(() => {
     const closeMenu = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuFor(null);
+      if (event.key === "Escape") {
+        setMenuFor(null);
+        setNameDialog(null);
+      }
     };
     window.addEventListener("keydown", closeMenu);
     return () => window.removeEventListener("keydown", closeMenu);
@@ -114,7 +127,15 @@ export function ProjectSidebar({
       </div>
 
       <div className="sb-actions">
-        <button className="sb-item" onClick={createProject} title="新建项目">
+        <button
+          className="sb-item"
+          onClick={() =>
+            desktopBuild
+              ? setNameDialog({ mode: "create", value: "" })
+              : createProject()
+          }
+          title="新建项目"
+        >
           <FolderPlus size={15} />
           {!rail && <span>新建项目</span>}
         </button>
@@ -201,6 +222,22 @@ export function ProjectSidebar({
                     style={{ top: 30, right: 4 }}
                     onClick={(e) => e.stopPropagation()}
                   >
+                    {desktopBuild && (
+                      <button
+                        className="menu-item"
+                        onClick={() => {
+                          setNameDialog({
+                            mode: "rename",
+                            projectId: p.id,
+                            value: p.name,
+                          });
+                          setMenuFor(null);
+                        }}
+                      >
+                        <Edit3 size={14} />
+                        重命名项目
+                      </button>
+                    )}
                     <button
                       className="menu-item"
                       onClick={() => {
@@ -260,6 +297,84 @@ export function ProjectSidebar({
           {!rail && <span>设置</span>}
         </button>
       </div>
+      {desktopBuild &&
+        nameDialog &&
+        createPortal(
+          <div
+            className="overlay"
+            role="presentation"
+            onClick={() => setNameDialog(null)}
+          >
+            <form
+              className="modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label={
+                nameDialog.mode === "create" ? "新建项目" : "重命名项目"
+              }
+              onClick={(event) => event.stopPropagation()}
+              onSubmit={(event) => {
+                event.preventDefault();
+                const name = normalizeProjectName(nameDialog.value);
+                if (!name || [...name].length > PROJECT_NAME_LIMIT) return;
+                if (nameDialog.mode === "create") createProject(name);
+                else if (nameDialog.projectId)
+                  renameProject(nameDialog.projectId, name);
+                setNameDialog(null);
+              }}
+            >
+              <div className="modal-head">
+                <FolderPlus size={17} />
+                <h3>
+                  {nameDialog.mode === "create" ? "新建项目" : "重命名项目"}
+                </h3>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => setNameDialog(null)}
+                  aria-label="关闭"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="modal-body">
+                <label className="settings-field" style={{ marginTop: 0 }}>
+                  项目名称
+                  <input
+                    autoFocus
+                    value={nameDialog.value}
+                    maxLength={PROJECT_NAME_LIMIT}
+                    placeholder="例如：小红书起号"
+                    onChange={(event) =>
+                      setNameDialog((current) =>
+                        current
+                          ? { ...current, value: event.target.value }
+                          : current,
+                      )
+                    }
+                  />
+                </label>
+              </div>
+              <div className="modal-foot">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setNameDialog(null)}
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  className="btn primary"
+                  disabled={!normalizeProjectName(nameDialog.value)}
+                >
+                  {nameDialog.mode === "create" ? "创建项目" : "保存名称"}
+                </button>
+              </div>
+            </form>
+          </div>,
+          document.body,
+        )}
     </aside>
   );
 }

@@ -14,6 +14,7 @@ import type {
   ProviderStreamEvent,
 } from "../types";
 import type { NoteChunk, NoteHit } from "./notes/types";
+import { ProviderError, providerErrorMessage } from "./provider/http";
 
 const capability = (mode: ProviderCapability["mode"]): ProviderCapability => ({
   schemaVersion: 1,
@@ -207,6 +208,72 @@ test("ordinary no-library chat remains a single deterministic provider stream", 
   assert.equal(completions, 0);
   assert.equal(searches, 0);
   assert.equal(reads, 0);
+});
+
+test("desktop ordinary chat retries a pre-token disconnect in the same turn", async () => {
+  let streams = 0;
+  const visible: string[] = [];
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: [],
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => visible.push(event.text),
+    runtime: baseRuntime({
+      target: "desktop",
+      stream: async function* () {
+        streams += 1;
+        if (streams === 1)
+          throw new ProviderError(
+            providerErrorMessage("disconnected"),
+            "disconnected",
+          );
+        yield { type: "token", text: "自动重连后的回答。", channel: "final" };
+        yield { type: "done", finishReason: "stop" };
+      },
+    }),
+  });
+
+  assert.equal(streams, 2);
+  assert.deepEqual(visible, ["自动重连后的回答。"]);
+  assert.deepEqual(outcome.terminal, { result: "completed", reason: "none" });
+});
+
+test("desktop ordinary chat never retries after visible tokens were emitted", async () => {
+  let streams = 0;
+  const visible: string[] = [];
+
+  await assert.rejects(
+    () =>
+      runAgentTurn({
+        built: built("general"),
+        projectId: "project-a",
+        libraryIds: [],
+        signal: new AbortController().signal,
+        onPhase: () => undefined,
+        onToken: (event) => visible.push(event.text),
+        runtime: baseRuntime({
+          target: "desktop",
+          stream: async function* () {
+            streams += 1;
+            yield { type: "token", text: "不完整正文", channel: "final" };
+            throw new ProviderError(
+              providerErrorMessage("disconnected"),
+              "disconnected",
+            );
+          },
+        }),
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentRunFailure);
+      assert.equal(error.message, providerErrorMessage("disconnected"));
+      return true;
+    },
+  );
+
+  assert.equal(streams, 1);
+  assert.deepEqual(visible, ["不完整正文"]);
 });
 
 test("unknown capability cannot execute any library workflow", async () => {
@@ -768,12 +835,19 @@ test("controlled citations delete forged markers instead of making them renderab
 });
 
 function budgetExhaustionRuntime(options: {
-  final: "success" | "empty";
+  final: "success" | "empty" | "tool-call";
+  requests?: Parameters<AgentRuntime["stream"]>[0][];
+  onSearch?: () => void;
 }): AgentRuntime {
   const allowed = chunk("budget-evidence");
+  const unread = {
+    ...chunk("budget-unread-hit"),
+    text: "这条搜索命中尚未通过 read_notes 读取，不能进入最终证据。",
+  };
   let request = 0;
   return baseRuntime({
-    stream: () => {
+    stream: (input) => {
+      options.requests?.push(input);
       request += 1;
       if (request === 1)
         return events([
@@ -820,24 +894,43 @@ function budgetExhaustionRuntime(options: {
           },
           { type: "done", finishReason: "tool_calls" },
         ]);
-      return options.final === "success"
-        ? events([
-            {
-              type: "token",
-              text: `基于现有证据给出未完成综合。[[source:${allowed.id}]]`,
-              channel: "final",
-            },
-            { type: "done", finishReason: "stop" },
-          ])
-        : events([{ type: "done", finishReason: "stop" }]);
+      if (options.final === "success")
+        return events([
+          {
+            type: "token",
+            text: `基于现有证据给出未完成综合。[[source:${allowed.id}]]`,
+            channel: "final",
+          },
+          { type: "done", finishReason: "stop" },
+        ]);
+      if (options.final === "tool-call")
+        return events([
+          {
+            type: "tool-call-delta",
+            index: 0,
+            id: `forbidden-final-search-${request}`,
+            name: "search_notes",
+          },
+          {
+            type: "tool-call-delta",
+            index: 0,
+            arguments: '{"query":"最终综合不得继续搜索"}',
+          },
+          { type: "done", finishReason: "tool_calls" },
+        ]);
+      return events([{ type: "done", finishReason: "stop" }]);
     },
-    search: async () => [hit(allowed)],
+    search: async (input) => {
+      options.onSearch?.();
+      return input.query === "预算证据" ? [hit(allowed)] : [hit(unread)];
+    },
     read: async () => [allowed],
   });
 }
 
 test("exhausted round budget plus successful final synthesis is partial and truncated", async () => {
   const visible: string[] = [];
+  const requests: Parameters<AgentRuntime["stream"]>[0][] = [];
   const outcome = await runAgentTurn({
     built: built("general"),
     projectId: "project-a",
@@ -846,7 +939,7 @@ test("exhausted round budget plus successful final synthesis is partial and trun
     signal: new AbortController().signal,
     onPhase: () => undefined,
     onToken: (event) => visible.push(event.text),
-    runtime: budgetExhaustionRuntime({ final: "success" }),
+    runtime: budgetExhaustionRuntime({ final: "success", requests }),
   });
 
   assert.deepEqual(outcome.terminal, {
@@ -862,6 +955,85 @@ test("exhausted round budget plus successful final synthesis is partial and trun
   );
   assert.equal(visible.length, 1);
   assert.match(visible[0], /未完成综合/);
+  const finalRequest = requests[requests.length - 1];
+  assert.equal(finalRequest?.toolChoice, "none");
+  assert.equal(finalRequest?.tools, undefined);
+  assert.ok(
+    finalRequest?.messages.every(
+      (message) =>
+        message.role !== "tool" &&
+        !(message.role === "assistant" && "toolCalls" in message),
+    ),
+    "finalization must receive a text-only card context",
+  );
+  const finalContext = JSON.stringify(finalRequest?.messages);
+  assert.match(finalContext, /阶段切换：你现在是 Papertable 的最终答案编写器/);
+  assert.match(finalContext, /budget-evidence/);
+  assert.doesNotMatch(finalContext, /budget-unread-hit/);
+  assert.doesNotMatch(finalContext, /尚未通过 read_notes 读取/);
+  assert.doesNotMatch(finalContext, /你必须主动使用只读工具检索这些材料/);
+});
+
+test("transport retry attempts do not consume the remaining semantic round", async () => {
+  let streams = 0;
+  const visible: string[] = [];
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => visible.push(event.text),
+    budgetLimits: { rounds: 1, calls: 2 },
+    runtime: baseRuntime({
+      stream: () => {
+        streams += 1;
+        if (streams === 1)
+          return (async function* () {
+            yield* [] as ProviderStreamEvent[];
+            throw new ProviderError(
+              providerErrorMessage("disconnected"),
+              "disconnected",
+            );
+          })();
+        if (streams === 2)
+          return events([
+            {
+              type: "tool-call-delta",
+              index: 0,
+              id: "search-after-reconnect",
+              name: "search_notes",
+              arguments: '{"query":"重连后的检索"}',
+            },
+            { type: "done", finishReason: "tool_calls" },
+          ]);
+        return events([
+          {
+            type: "token",
+            text: "重连后保留了完整语义轮，并完成最终综合。",
+            channel: "final",
+          },
+          { type: "done", finishReason: "stop" },
+        ]);
+      },
+      search: async () => [],
+    }),
+  });
+
+  assert.equal(streams, 3);
+  assert.deepEqual(outcome.terminal, {
+    result: "partial",
+    reason: "rounds_exhausted",
+  });
+  assert.equal(outcome.trace.budget?.used.rounds, 1);
+  assert.equal(
+    outcome.trace.budget?.records.filter(
+      (record) => record.dimension === "rounds" && record.amount === 1,
+    ).length,
+    1,
+  );
+  assert.deepEqual(visible, ["重连后保留了完整语义轮，并完成最终综合。"]);
 });
 
 test("exhausted budget plus empty synthesis and exhausted repair fails protocol with evidence and no answer", async () => {
@@ -900,6 +1072,83 @@ test("exhausted budget plus empty synthesis and exhausted repair fails protocol 
     visible,
     [],
     "no partial or fabricated answer may be emitted",
+  );
+});
+
+test("final synthesis explicitly disables tools and never executes provider tool calls", async () => {
+  const visible: string[] = [];
+  const requests: Parameters<AgentRuntime["stream"]>[0][] = [];
+  let searches = 0;
+  let failure: AgentRunFailure | undefined;
+  try {
+    await runAgentTurn({
+      built: built("general"),
+      projectId: "project-a",
+      libraryIds: ["library-a"],
+      capability: capability("native-tools"),
+      signal: new AbortController().signal,
+      onPhase: () => undefined,
+      onToken: (event) => visible.push(event.text),
+      runtime: budgetExhaustionRuntime({
+        final: "tool-call",
+        requests,
+        onSearch: () => {
+          searches += 1;
+        },
+      }),
+    });
+  } catch (cause) {
+    assert.ok(cause instanceof AgentRunFailure);
+    failure = cause;
+  }
+
+  assert.ok(failure, "a repeated synthesis tool call must fail closed");
+  assert.deepEqual(failure.terminal, {
+    result: "failed",
+    reason: "protocol_error",
+  });
+  assert.equal(failure.errorCode, "unexpected-synthesis-tool-call");
+  assert.match(failure.message, /最终综合阶段仍请求调用工具/);
+  assert.deepEqual(failure.trace.readChunkIds, ["budget-evidence"]);
+  assert.equal(
+    searches,
+    3,
+    "the two synthesis search_notes calls must never reach the host",
+  );
+  assert.deepEqual(visible, []);
+  const firstSynthesis = requests[requests.length - 2];
+  const repairedSynthesis = requests[requests.length - 1];
+  assert.equal(firstSynthesis?.toolChoice, "none");
+  assert.equal(repairedSynthesis?.toolChoice, "none");
+  assert.equal(firstSynthesis?.tools, undefined);
+  assert.equal(repairedSynthesis?.tools, undefined);
+  const firstEvidence =
+    firstSynthesis?.messages[firstSynthesis.messages.length - 1];
+  const repairedEvidence =
+    repairedSynthesis?.messages[repairedSynthesis.messages.length - 1];
+  assert.equal(firstEvidence?.role, "user");
+  assert.deepEqual(
+    repairedEvidence,
+    firstEvidence,
+    "protocol repair must replay the frozen evidence packet unchanged",
+  );
+  for (const request of [firstSynthesis, repairedSynthesis]) {
+    assert.ok(
+      request?.messages.every(
+        (message) =>
+          message.role !== "tool" &&
+          !(message.role === "assistant" && "toolCalls" in message),
+      ),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(request?.messages),
+      /forbidden-final-search/,
+    );
+  }
+  assert.ok(
+    failure.trace.errors?.some((message) =>
+      message.includes("final-synthesis-returned-tool-call"),
+    ),
   );
 });
 

@@ -101,6 +101,10 @@ import {
   type WorkspaceUpsert,
 } from "./lib/delta";
 import {
+  createdCardPersistenceUpsert,
+  persistCreatedCardBeforeGeneration,
+} from "./lib/cardCreation";
+import {
   applyAttentionChanges,
   applyChanges,
   appendAgentStep,
@@ -471,7 +475,7 @@ interface Ctx {
   setActiveProject: (id: string) => void;
   renameProject: (id: string, name: string) => void;
   togglePinProject: (id: string) => void;
-  createProject: () => void;
+  createProject: (name?: string) => void;
   /** Creates a root only when the active project has no live cards. */
   createRootCard: () => string | null;
   deleteProject: (id: string) => void;
@@ -2432,19 +2436,39 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           ? newCard.turns[0].content
           : "";
       if (prompt)
-        window.setTimeout(() => {
-          void streamAnswer({
-            cardId,
-            cardsSnapshot: nextCards,
-            edgesSnapshot: [...edges, edge],
-            snapshotsSnapshot: [...snapshots, snapshot],
-            references: [],
-            relation: input.type,
+        void persistCreatedCardBeforeGeneration({
+          upsert: createdCardPersistenceUpsert({
+            card: newCard,
+            edge,
+            snapshot,
+            anchor,
+          }),
+          persist: applyChanges,
+          startGeneration: () =>
+            streamAnswer({
+              cardId,
+              cardsSnapshot: nextCards,
+              edgesSnapshot: [...edges, edge],
+              snapshotsSnapshot: [...snapshots, snapshot],
+              references: [],
+              relation: input.type,
+            }),
+        }).catch(() => {
+          showToast({
+            text: "新卡片尚未保存成功，已停止生成；请稍后重试。",
           });
-        }, 0);
+        });
       return cardId;
     },
-    [activeProjectId, cards, edges, recordInteraction, snapshots, streamAnswer],
+    [
+      activeProjectId,
+      cards,
+      edges,
+      recordInteraction,
+      showToast,
+      snapshots,
+      streamAnswer,
+    ],
   );
 
   const send = useCallback(
@@ -3110,13 +3134,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       ),
     [],
   );
-  const createProject = useCallback(() => {
+  const createProject = useCallback((name?: string) => {
     const projectId = uid("project");
     const rootId = uid("card");
+    const projectName =
+      name?.normalize("NFC").replace(/\s+/gu, " ").trim() || "未命名项目";
     setProjects((current) => [
       {
         id: projectId,
-        name: "未命名项目",
+        name: projectName,
         pinned: false,
         updatedAt: Date.now(),
       },

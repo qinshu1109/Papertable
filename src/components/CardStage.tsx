@@ -37,6 +37,7 @@ import type {
   AgentTimelineNode,
   TrajectoryPromotionDraft,
 } from "../lib/agentTimeline";
+import { desktopTurnsForDisplay } from "../lib/desktopUi";
 
 const spring = {
   type: "spring" as const,
@@ -572,7 +573,11 @@ export function CardStage() {
     lastCreated?.cardId === card.id
       ? EDGE_META[lastCreated.type].enterFrom
       : { x: 0, y: 18, rotate: 0 };
-  const aiTurns = card.turns.filter((t) => t.role === "ai");
+  const desktopBuild = __PAPERTABLE_TARGET__ === "desktop";
+  const displayedTurns = desktopBuild
+    ? desktopTurnsForDisplay(card.turns)
+    : card.turns;
+  const aiTurns = displayedTurns.filter((t) => t.role === "ai");
   const normalizedTitleDraft = titleDraft
     .normalize("NFC")
     .replace(/\s+/gu, " ")
@@ -860,7 +865,7 @@ export function CardStage() {
                     在下方输入器提问开始，或用底部的三种关系从别处带入上下文。
                   </div>
                 )}
-                {card.turns.map((turn) => (
+                {displayedTurns.map((turn) => (
                   <TurnBlock
                     key={turn.id}
                     turn={turn}
@@ -1370,11 +1375,13 @@ function TurnBlock({
         </div>
       </div>
 
-      <AgentTimeline
-        turnId={turn.id}
-        streaming={streaming}
-        onPromote={onPromoteTrajectory}
-      />
+      {__PAPERTABLE_TARGET__ !== "desktop" && (
+        <AgentTimeline
+          turnId={turn.id}
+          streaming={streaming}
+          onPromote={onPromoteTrajectory}
+        />
+      )}
 
       {streaming && turn.content.length === 0 && (
         <div className="thinking" role="status" aria-live="polite">

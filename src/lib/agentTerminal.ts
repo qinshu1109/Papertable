@@ -76,11 +76,15 @@ export const AGENT_TERMINAL_MESSAGES = {
  * TASK-004 will wire these distinct codes into their existing runtime paths.
  */
 export type AgentTerminalErrorCode =
-  "provider-empty-response" | "final-answer-empty";
+  | "provider-empty-response"
+  | "final-answer-empty"
+  | "unexpected-synthesis-tool-call";
 
 export const AGENT_TERMINAL_ERROR_MESSAGES = {
   "provider-empty-response": "模型服务没有返回可处理的内容，请重试。",
   "final-answer-empty": "模型回答已结束，但没有可显示的最终文本，请重试。",
+  "unexpected-synthesis-tool-call":
+    "模型在最终综合阶段仍请求调用工具，协议修复后仍未返回最终正文。",
 } as const satisfies Record<AgentTerminalErrorCode, string>;
 
 export function isLegalAgentTerminalState(
