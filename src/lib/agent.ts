@@ -379,7 +379,12 @@ async function streamRound(input: {
             tools: toolDefinitions,
             toolChoice: input.toolChoice ?? ("auto" as const),
           }
-        : {}),
+        : {
+            // Omitting `tools` is not sufficient for every OpenAI-compatible
+            // gateway. CozAI/Claude can otherwise continue a tool call from
+            // the assistant/tool history during final synthesis.
+            toolChoice: "none" as const,
+          }),
     })) {
       events.push(event);
       if (
@@ -432,13 +437,16 @@ async function streamRound(input: {
       : undefined;
   const protocolIssue =
     assembly.issue ??
-    (visibleProtocolLeak(events)
-      ? "模型把工具协议标签泄漏到了可见正文。"
-      : forcedToolName && toolCalls.some((call) => call.name !== forcedToolName)
-        ? `模型没有按强制原生工具协议调用 ${forcedToolName}。`
-        : forcedToolCall && !toolCalls.length
-          ? "模型没有按强制原生工具协议返回完整 tool_call。"
-          : undefined);
+    (!input.withTools && toolCalls.length
+      ? "final-synthesis-returned-tool-call"
+      : visibleProtocolLeak(events)
+        ? "模型把工具协议标签泄漏到了可见正文。"
+        : forcedToolName &&
+            toolCalls.some((call) => call.name !== forcedToolName)
+          ? `模型没有按强制原生工具协议调用 ${forcedToolName}。`
+          : forcedToolCall && !toolCalls.length
+            ? "模型没有按强制原生工具协议返回完整 tool_call。"
+            : undefined);
   if (
     !protocolIssue &&
     !toolCalls.length &&
@@ -873,7 +881,14 @@ type NativeAgentState =
 const FINAL_SYNTHESIS_REPAIR_INSTRUCTION = [
   "协议修复：上一次最终综合没有返回一份完整、可显示的最终文本。",
   "保持完全相同的证据边界，只重新发送一份完整的最终回答；不得新增来源、猜测内容或调用工具。",
+  "本阶段工具已禁用；只能输出最终正文，不得返回 tool_call。",
 ].join("\n");
+
+const FINAL_SYNTHESIS_TOOL_CALL_ISSUE = "final-synthesis-returned-tool-call";
+const FINAL_SYNTHESIS_TOOL_CALL_REPAIR_ACTION =
+  "same-model-final-answer-with-tools-disabled-resend-requested";
+const FINAL_SYNTHESIS_GENERIC_REPAIR_ACTION =
+  "same-model-complete-final-answer-resend-requested";
 
 function protocolResendInstruction(issue: string): string {
   return [
@@ -914,6 +929,34 @@ function providerEmptyFailure(
     terminal,
     cause,
     { readChunks, searchHits, errorCode },
+  );
+}
+
+function finalSynthesisProtocolFailure(
+  trace: AgentRunTrace,
+  readChunks: NoteChunk[],
+  searchHits: NoteHit[],
+  issue: string,
+): AgentRunFailure {
+  const unexpectedToolCall = issue === FINAL_SYNTHESIS_TOOL_CALL_ISSUE;
+  const errorCode = unexpectedToolCall
+    ? ("unexpected-synthesis-tool-call" as const)
+    : undefined;
+  const message = errorCode
+    ? agentTerminalErrorMessage(errorCode)
+    : `最终综合协议错误：${issue}`;
+  trace.errors?.push(message);
+  const terminal = createAgentTerminalState("failed", "protocol_error");
+  return new AgentRunFailure(
+    message,
+    finish(trace, terminal),
+    terminal,
+    undefined,
+    {
+      readChunks,
+      searchHits,
+      ...(errorCode ? { errorCode } : {}),
+    },
   );
 }
 
@@ -1559,11 +1602,6 @@ async function runNativeStateMachine(
               nextAuditSequence(),
               runtime.now(),
             );
-          if (state.repairAttempt === 1)
-            await recordProtocol(
-              "final-synthesis-empty-or-truncated",
-              "same-model-complete-final-answer-resend-requested",
-            );
           const output = await classifiedProviderRequest({
             request: () =>
               streamRound({
@@ -1586,6 +1624,31 @@ async function runNativeStateMachine(
             nextAuditSequence,
           });
           await budget.wall("synthesis");
+          if (output.protocolIssue) {
+            if (state.repairAttempt === 0) {
+              await recordProtocol(
+                output.protocolIssue,
+                output.protocolIssue === FINAL_SYNTHESIS_TOOL_CALL_ISSUE
+                  ? FINAL_SYNTHESIS_TOOL_CALL_REPAIR_ACTION
+                  : FINAL_SYNTHESIS_GENERIC_REPAIR_ACTION,
+              );
+              state = {
+                kind: "synthesizing",
+                terminalOnSuccess: state.terminalOnSuccess,
+                repairAttempt: 1,
+                ...(state.noProgressEvidence
+                  ? { noProgressEvidence: state.noProgressEvidence }
+                  : {}),
+              };
+              break;
+            }
+            throw finalSynthesisProtocolFailure(
+              trace,
+              readChunks,
+              searchHits,
+              output.protocolIssue,
+            );
+          }
           const completeText = output.tokens
             .map((event) => event.text)
             .join("")
@@ -1597,6 +1660,10 @@ async function runNativeStateMachine(
                 : agentTerminalErrorMessage("provider-empty-response"),
             );
             if (state.repairAttempt === 0) {
+              await recordProtocol(
+                "final-synthesis-empty-or-truncated",
+                FINAL_SYNTHESIS_GENERIC_REPAIR_ACTION,
+              );
               state = {
                 kind: "synthesizing",
                 terminalOnSuccess: state.terminalOnSuccess,
@@ -1640,6 +1707,10 @@ async function runNativeStateMachine(
           ) {
             trace.errors?.push(
               agentTerminalErrorMessage("provider-empty-response"),
+            );
+            await recordProtocol(
+              "final-synthesis-empty-or-truncated",
+              FINAL_SYNTHESIS_GENERIC_REPAIR_ACTION,
             );
             state = {
               kind: "synthesizing",

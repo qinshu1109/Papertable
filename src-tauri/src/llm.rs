@@ -1605,6 +1605,26 @@ mod tests {
     }
 
     #[test]
+    fn final_synthesis_can_explicitly_disable_tools_without_definitions() {
+        let request = ChatRequest {
+            task: "agent".into(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: Some("只输出最终正文。".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            }],
+            temperature: None,
+            tools: vec![],
+            tool_choice: Some(Value::String("none".into())),
+        };
+        validate(&request).unwrap();
+        let body = body_for(&ProviderConfig::default(), &request, true);
+        assert_eq!(body["tool_choice"], "none");
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
     fn a_client_cannot_declare_the_probe_tool() {
         let mut request = ChatRequest {
             task: "chat".into(),

@@ -1,6 +1,7 @@
 import type {
   BuiltContext,
   ProviderCapability,
+  ProviderMessage,
   ProviderStreamEvent,
   ToolCall,
 } from "../types";
@@ -320,6 +321,93 @@ function injectedStream(events: ProviderStreamEvent[]) {
   })();
 }
 
+async function runChineseSynthesisToolLock(
+  capability: ProviderCapability,
+): Promise<Task013AcceptanceRow> {
+  const messages: ProviderMessage[] = [
+    {
+      role: "system",
+      content:
+        "你正在进行最终综合。工具已禁用；只使用历史工具结果输出一份简洁的中文最终正文，不得调用工具。",
+    },
+    {
+      role: "user",
+      content: "基于已经读取的多份材料总结共同结论，并明确说明证据覆盖有限。",
+    },
+  ];
+  for (let index = 1; index <= 4; index += 1) {
+    const callId = `task-013-synthesis-history-${index}`;
+    messages.push({
+      role: "assistant",
+      content: null,
+      toolCalls: [
+        {
+          id: callId,
+          name: index % 2 === 1 ? "search_notes" : "read_notes",
+          arguments:
+            index % 2 === 1
+              ? `{"query":"中文多片段证据 ${index}"}`
+              : `{"chunkIds":["task-013-evidence"]}`,
+        },
+      ],
+    });
+    messages.push({
+      role: "tool",
+      toolCallId: callId,
+      content: JSON.stringify({
+        chunks: [
+          {
+            chunkId: "task-013-evidence",
+            content: TASK013_SYNTHETIC_EVIDENCE.text,
+          },
+        ],
+      }),
+    });
+  }
+
+  const visible: string[] = [];
+  const toolCalls: ProviderStreamEvent[] = [];
+  let finishReason: string | undefined;
+  for await (const event of streamModel({
+    task: "agent",
+    messages,
+    signal: new AbortController().signal,
+    toolChoice: "none",
+  })) {
+    if (event.type === "token") visible.push(event.text);
+    if (event.type === "tool-call-delta") toolCalls.push(event);
+    if (event.type === "done") finishReason = event.finishReason;
+  }
+  const hasAnswer = visible.join("").trim().length > 0;
+  const toolLockHeld = toolCalls.length === 0 && finishReason !== "tool_calls";
+  return {
+    id: "chinese-multi-tool-history-synthesis-lock",
+    source: "real-provider",
+    model: capability.model,
+    execution: "external",
+    criteria: {
+      "correct-tool-calls": criterion(
+        toolLockHeld,
+        "tool_choice=none 的中文最终综合仍返回了工具调用",
+      ),
+      "correct-terminal-state": criterion(
+        hasAnswer && toolLockHeld,
+        "中文最终综合没有返回可显示正文",
+      ),
+      "persisted-evidence": { status: "not-applicable" },
+      "no-unauthorized-reads": criterion(
+        toolCalls.length === 0,
+        "最终综合试图发起新的读取",
+      ),
+      "no-unhandled-duplicate-calls": criterion(
+        toolCalls.length === 0,
+        "最终综合重复了历史工具调用",
+      ),
+      "no-two-stage-on-protocol-failure": { status: "not-applicable" },
+    },
+  };
+}
+
 async function runInjectedFailure(
   capability: ProviderCapability,
   input: { id: string; exhaustedSynthesis: boolean },
@@ -496,6 +584,7 @@ export async function runTask013RealProviderMatrix(
   const rows: Task013AcceptanceRow[] = [];
   for (const scenario of REAL_SCENARIOS)
     rows.push(await runExternalScenario(capability, scenario));
+  rows.push(await runChineseSynthesisToolLock(capability));
   rows.push(
     await runInjectedFailure(capability, {
       id: "exhaustion-failed-repair-injection",

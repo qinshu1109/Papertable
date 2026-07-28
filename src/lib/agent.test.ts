@@ -768,12 +768,15 @@ test("controlled citations delete forged markers instead of making them renderab
 });
 
 function budgetExhaustionRuntime(options: {
-  final: "success" | "empty";
+  final: "success" | "empty" | "tool-call";
+  requests?: Parameters<AgentRuntime["stream"]>[0][];
+  onSearch?: () => void;
 }): AgentRuntime {
   const allowed = chunk("budget-evidence");
   let request = 0;
   return baseRuntime({
-    stream: () => {
+    stream: (input) => {
+      options.requests?.push(input);
       request += 1;
       if (request === 1)
         return events([
@@ -820,24 +823,43 @@ function budgetExhaustionRuntime(options: {
           },
           { type: "done", finishReason: "tool_calls" },
         ]);
-      return options.final === "success"
-        ? events([
-            {
-              type: "token",
-              text: `基于现有证据给出未完成综合。[[source:${allowed.id}]]`,
-              channel: "final",
-            },
-            { type: "done", finishReason: "stop" },
-          ])
-        : events([{ type: "done", finishReason: "stop" }]);
+      if (options.final === "success")
+        return events([
+          {
+            type: "token",
+            text: `基于现有证据给出未完成综合。[[source:${allowed.id}]]`,
+            channel: "final",
+          },
+          { type: "done", finishReason: "stop" },
+        ]);
+      if (options.final === "tool-call")
+        return events([
+          {
+            type: "tool-call-delta",
+            index: 0,
+            id: `forbidden-final-search-${request}`,
+            name: "search_notes",
+          },
+          {
+            type: "tool-call-delta",
+            index: 0,
+            arguments: '{"query":"最终综合不得继续搜索"}',
+          },
+          { type: "done", finishReason: "tool_calls" },
+        ]);
+      return events([{ type: "done", finishReason: "stop" }]);
     },
-    search: async () => [hit(allowed)],
+    search: async () => {
+      options.onSearch?.();
+      return [hit(allowed)];
+    },
     read: async () => [allowed],
   });
 }
 
 test("exhausted round budget plus successful final synthesis is partial and truncated", async () => {
   const visible: string[] = [];
+  const requests: Parameters<AgentRuntime["stream"]>[0][] = [];
   const outcome = await runAgentTurn({
     built: built("general"),
     projectId: "project-a",
@@ -846,7 +868,7 @@ test("exhausted round budget plus successful final synthesis is partial and trun
     signal: new AbortController().signal,
     onPhase: () => undefined,
     onToken: (event) => visible.push(event.text),
-    runtime: budgetExhaustionRuntime({ final: "success" }),
+    runtime: budgetExhaustionRuntime({ final: "success", requests }),
   });
 
   assert.deepEqual(outcome.terminal, {
@@ -862,6 +884,9 @@ test("exhausted round budget plus successful final synthesis is partial and trun
   );
   assert.equal(visible.length, 1);
   assert.match(visible[0], /未完成综合/);
+  const finalRequest = requests[requests.length - 1];
+  assert.equal(finalRequest?.toolChoice, "none");
+  assert.equal(finalRequest?.tools, undefined);
 });
 
 test("exhausted budget plus empty synthesis and exhausted repair fails protocol with evidence and no answer", async () => {
@@ -900,6 +925,60 @@ test("exhausted budget plus empty synthesis and exhausted repair fails protocol 
     visible,
     [],
     "no partial or fabricated answer may be emitted",
+  );
+});
+
+test("final synthesis explicitly disables tools and never executes provider tool calls", async () => {
+  const visible: string[] = [];
+  const requests: Parameters<AgentRuntime["stream"]>[0][] = [];
+  let searches = 0;
+  let failure: AgentRunFailure | undefined;
+  try {
+    await runAgentTurn({
+      built: built("general"),
+      projectId: "project-a",
+      libraryIds: ["library-a"],
+      capability: capability("native-tools"),
+      signal: new AbortController().signal,
+      onPhase: () => undefined,
+      onToken: (event) => visible.push(event.text),
+      runtime: budgetExhaustionRuntime({
+        final: "tool-call",
+        requests,
+        onSearch: () => {
+          searches += 1;
+        },
+      }),
+    });
+  } catch (cause) {
+    assert.ok(cause instanceof AgentRunFailure);
+    failure = cause;
+  }
+
+  assert.ok(failure, "a repeated synthesis tool call must fail closed");
+  assert.deepEqual(failure.terminal, {
+    result: "failed",
+    reason: "protocol_error",
+  });
+  assert.equal(failure.errorCode, "unexpected-synthesis-tool-call");
+  assert.match(failure.message, /最终综合阶段仍请求调用工具/);
+  assert.deepEqual(failure.trace.readChunkIds, ["budget-evidence"]);
+  assert.equal(
+    searches,
+    3,
+    "the two synthesis search_notes calls must never reach the host",
+  );
+  assert.deepEqual(visible, []);
+  const firstSynthesis = requests[requests.length - 2];
+  const repairedSynthesis = requests[requests.length - 1];
+  assert.equal(firstSynthesis?.toolChoice, "none");
+  assert.equal(repairedSynthesis?.toolChoice, "none");
+  assert.equal(firstSynthesis?.tools, undefined);
+  assert.equal(repairedSynthesis?.tools, undefined);
+  assert.ok(
+    failure.trace.errors?.some((message) =>
+      message.includes("final-synthesis-returned-tool-call"),
+    ),
   );
 });
 
