@@ -9,4 +9,4 @@
 - `done`：监督 Codex 独立复跑、PR CI 和合入均完成。
 - `blocked`：两轮分类修复仍失败，或触发范围/权限/冲突护栏。
 
-执行 Agent 不得自行设置 `done`。每卡一个 WenzMark 会话、分支、PR 和 `logs/TASK-xxx.md`；监督者完成技术验收并统一回写共享状态。TASK-011 另需用户即时确认。
+执行 Agent 不得自行设置 `done`。每卡一个 WenzMark 会话、分支、PR 和 `logs/TASK-xxx.md`；监督者完成技术验收并统一回写共享状态。用户已预授权全部卡片与 TASK-011 删除，不再设置人工停顿门禁。

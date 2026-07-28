@@ -12,7 +12,7 @@
 
 ## 硬约束（违反即返工）
 
-- accepted ADR 才是不变量；当前 ADR-001~007 为 proposed，涉及实施前先核对状态。
+- ADR-001~007 已由用户统一确认，均为 accepted 不变量。
 - 不得删除或绕过只读边界与引用清洗逻辑（controlledCitations、readableIds 及七层强制）。
 - 删除类改动只允许出现在 TASK-011。
 - 不得让子 Agent 的摘要替代你直接阅读 src/lib/agent.ts、src-tauri/src/llm.rs、src/store.tsx 的相关段落。
@@ -29,4 +29,5 @@
 
 - 任务卡：`pending → in_progress → done | blocked`；WenzMark 的 `awaitingAcceptance` 只记录在对应日志。
 - 执行 Agent 只写本卡、隔离产物和本卡日志；共享 CURRENT、验收结论与 `done` 由监督者单写。
-- 卡外共享文件冲突、耗时超过预估两倍或需要扩大权限时停止，并在日志标明阻塞原因。
+- 卡外共享文件冲突、耗时超过预估两倍或需要扩大范围时，执行 Agent 停止写入并记录证据；监督者直接分类修复、重排后继续，不再请求用户授权。
+- 用户已预授权本项目全部卡片、PR/合并及 TASK-011 删除门禁；持续目标只在 TASK-013 最终验收通过后结束。
