@@ -15,6 +15,8 @@
 - 2026-07-28: WenzMark was already marked `completed` before Git integration; the supervisor kept downstream tasks locked until PR merge.
 - 2026-07-28: PR #2 `verify` failed because repository-wide Prettier had not been run on the new workspace Markdown.
 - 2026-07-28: formatted governed workspace files while excluding immutable raw sources and generated `target/`; retained TASK-011's inline dependency list because the workspace validator requires a non-empty scalar on the key line.
+- 2026-07-28: PR #2 Rust job exposed one pre-existing `rustfmt` difference in `src-tauri/src/lib.rs`; the task branch matched its integration base before the failure, so the supervisor applied only the mechanical formatting repair.
+- 2026-07-28: the current stable Clippy also rejected one pre-existing cloned single-item slice in a notes test; replaced it with `std::slice::from_ref` without changing behavior.
 
 ## Acceptance
 
