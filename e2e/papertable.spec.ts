@@ -1055,6 +1055,10 @@ test("rapid double-clicking send starts one model run", async ({ page }) => {
 test("settings shows the three-stage Agent gate, TTL, expiry and re-probing state", async ({
   page,
 }) => {
+  await page.route("**/api/llm/capabilities", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await route.continue();
+  });
   await page.goto("/");
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await page.getByRole("button", { name: "设置", exact: true }).click();
