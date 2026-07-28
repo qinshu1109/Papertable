@@ -1,7 +1,7 @@
 ---
 id: TASK-002
 title: 终态类型层：结果×原因 + 合法组合表
-status: pending
+status: in_progress
 depends_on: []
 parallelizable: true
 isolation: outputs/task-002/

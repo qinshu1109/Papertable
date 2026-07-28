@@ -17,7 +17,7 @@ profile: code
 
 ## 规则摘要
 
-- accepted ADR 是硬约束；当前 ADR 均待用户确认
+- ADR-001～007 已确认并接受，是实现硬约束
 - 每次 Codex 运行只执行一张任务卡
 - 测试与实现同卡交付，不得延后
 - 编排与依赖图见 ORCHESTRATION.md
