@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "scenario": "further-repeat-with-qualified-read-evidence",
+  "events": [
+    {
+      "kind": "search-completed",
+      "query": "相同查询",
+      "callId": "search-evidence",
+      "hitCount": 1,
+      "hitChunkIds": ["qualified-evidence"]
+    },
+    {
+      "kind": "read-completed",
+      "requestedChunkIds": ["qualified-evidence"],
+      "callId": "read-1",
+      "sources": [
+        {
+          "chunkId": "qualified-evidence",
+          "libraryId": "library-a",
+          "documentId": "document-a",
+          "title": "研究 / 证据",
+          "relativePath": "研究/证据.md",
+          "documentHash": "hash-a",
+          "text": "合格证据：只能从实际读取的片段得到。"
+        }
+      ]
+    },
+    {
+      "kind": "duplicate-call-detected",
+      "signature": "read_notes:a1eeb37c6d9a7574",
+      "occurrences": 2
+    },
+    {
+      "kind": "duplicate-call-detected",
+      "signature": "read_notes:a1eeb37c6d9a7574",
+      "occurrences": 3
+    },
+    {
+      "kind": "final-synthesis",
+      "stage": "completed",
+      "basisEventIds": ["read-1"],
+      "unresolvedQuestions": ["重复工具调用未取得新进展。"]
+    },
+    {
+      "kind": "terminal",
+      "terminal": { "result": "partial", "reason": "no_progress" },
+      "answer": "基于已读证据只能给出部分结论。",
+      "citations": [],
+      "unresolvedQuestions": ["重复工具调用未取得新进展。"]
+    }
+  ],
+  "assert": {
+    "searchExecutions": 1,
+    "readExecutions": 1,
+    "suppressedReadExecutions": 2,
+    "usedCallBudget": 2,
+    "continuedExplorationAfterThirdOccurrence": false,
+    "sameModelSynthesis": true,
+    "qualifiedEvidenceIsActualRead": true,
+    "fabricatedEvidence": false
+  }
+}

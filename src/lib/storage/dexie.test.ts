@@ -31,6 +31,11 @@ import {
   createAgentBudgetLedger,
   markAgentBudgetExhausted,
 } from "../agentBudget";
+import {
+  appendAgentBudgetStart,
+  appendAgentDuplicateCall,
+} from "../agentBudgetAudit";
+import type { AgentRunTrace } from "../../types";
 
 const snapshot = (): WorkspaceSnapshot => ({
   projects: [{ id: "p", name: "测试项目", pinned: false, updatedAt: 1 }],
@@ -371,6 +376,72 @@ test("budget ledger and append audit survive close and reopen", async () => {
       ? audit.events[1].message.record?.sequence
       : undefined,
     2,
+  );
+});
+
+test("duplicate-call detection and no-progress checkpoint survive close and reopen", async () => {
+  await freshDb();
+  await saveWorkspace(snapshot());
+  const ledger = createAgentBudgetLedger();
+  const trace: AgentRunTrace = {
+    mode: "native-tools",
+    startedAt: 10,
+    finishedAt: 10,
+    searchQueries: ["重复查询"],
+    hitCount: 1,
+    readChunkIds: ["qualified-evidence"],
+    budget: ledger,
+  };
+  const persistence = {
+    runId: "run-duplicate-reopen",
+    turnId: "t",
+    appendStep: appendAgentStep,
+  };
+
+  await appendAgentBudgetStart(persistence, trace, ledger);
+  await appendAgentDuplicateCall(
+    persistence,
+    trace,
+    ledger,
+    "read_notes:stable",
+    2,
+    11,
+  );
+  await appendAgentDuplicateCall(
+    persistence,
+    trace,
+    ledger,
+    "read_notes:stable",
+    3,
+    12,
+  );
+
+  db.close();
+  await db.open();
+  const audit = await loadAgentAudit("t");
+  assert.equal(audit?.kind, "event-sourced");
+  if (audit?.kind !== "event-sourced") return;
+  assert.equal(audit.run.schemaVersion, 1);
+  assert.equal(audit.run.lastSequence, 3);
+  assert.equal(audit.run.checkpoint.stopReason, "no_progress");
+  assert.deepEqual(audit.run.checkpoint.readChunkIds, ["qualified-evidence"]);
+  assert.deepEqual(
+    audit.events.map((event) => event.eventType),
+    [
+      "exploration-started",
+      "duplicate-call-detected",
+      "duplicate-call-detected",
+    ],
+  );
+  assert.deepEqual(
+    audit.events
+      .slice(1)
+      .map((event) =>
+        event.message.kind === "duplicate-call-detected"
+          ? event.message.occurrences
+          : 0,
+      ),
+    [2, 3],
   );
 });
 

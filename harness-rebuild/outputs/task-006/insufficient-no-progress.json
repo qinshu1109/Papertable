@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "scenario": "further-repeat-without-qualified-read-evidence",
+  "events": [
+    {
+      "kind": "search-completed",
+      "query": "相同查询",
+      "callId": "search-empty-1",
+      "hitCount": 0,
+      "hitChunkIds": []
+    },
+    {
+      "kind": "duplicate-call-detected",
+      "signature": "search_notes:30b4d71ac73ff41b",
+      "occurrences": 2
+    },
+    {
+      "kind": "duplicate-call-detected",
+      "signature": "search_notes:30b4d71ac73ff41b",
+      "occurrences": 3
+    },
+    {
+      "kind": "terminal",
+      "terminal": {
+        "result": "refused",
+        "reason": "insufficient_evidence"
+      },
+      "answer": "重复执行相同查询没有取得新进展，且当前没有实际读取、可用于回答的合格证据，因此本轮停止探索，不补充无来源结论。",
+      "citations": [],
+      "unresolvedQuestions": ["重复工具调用未取得新进展。"]
+    }
+  ],
+  "assert": {
+    "searchExecutions": 1,
+    "suppressedSearchExecutions": 2,
+    "usedCallBudget": 1,
+    "readChunkIds": [],
+    "genericProviderError": false,
+    "answerToOriginalQuestion": false,
+    "fabricatedEvidence": false
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "scenario": "duplicate-events-close-reopen",
+  "events": [
+    {
+      "sequence": 1,
+      "eventType": "exploration-started"
+    },
+    {
+      "sequence": 2,
+      "eventType": "duplicate-call-detected",
+      "message": {
+        "kind": "duplicate-call-detected",
+        "signature": "read_notes:a1eeb37c6d9a7574",
+        "occurrences": 2
+      }
+    },
+    {
+      "sequence": 3,
+      "eventType": "duplicate-call-detected",
+      "message": {
+        "kind": "duplicate-call-detected",
+        "signature": "read_notes:a1eeb37c6d9a7574",
+        "occurrences": 3
+      }
+    }
+  ],
+  "checkpoint": {
+    "phase": "repairing",
+    "readChunkIds": ["qualified-evidence"],
+    "stopReason": "no_progress",
+    "unresolvedQuestions": ["同一成功工具调用再次重复，探索未取得新进展。"]
+  },
+  "assert": {
+    "eventSchemaVersionUnchanged": 1,
+    "eventRowsAppendOnly": true,
+    "checkpointAdvancedInSameTransaction": true,
+    "lastSequence": 3,
+    "reopenPreservesEventsAndCheckpoint": true
+  }
+}

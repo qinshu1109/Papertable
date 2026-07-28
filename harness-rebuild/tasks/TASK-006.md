@@ -1,7 +1,7 @@
 ---
 id: TASK-006
 title: 无进展检测
-status: pending
+status: in_progress
 depends_on: [TASK-004]
 parallelizable: true
 isolation: outputs/task-006/
