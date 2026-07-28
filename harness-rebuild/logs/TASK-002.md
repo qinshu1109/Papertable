@@ -46,4 +46,5 @@
 
 - Candidate implementation satisfies the TASK-002 verify contract.
 - `2026-07-28` — Supervisor independently inspected the type table, tests, WenzMark row/log/exit code, runtime scope, Git diff, and reran the complete local gate.
-- Technical acceptance: PASS. Task remains `in_progress` until its PR is merged; no unresolved local gate remains.
+- Technical acceptance: PASS. PR #4 CI `verify`/`rust` passed and was squash-merged as `a2d6008`.
+- Final state: `done`; WenzMark accepted/completed and TASK-003 unlocked.
