@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { controlledCitations, runAgentTurn, type AgentRuntime } from "./agent";
+import {
+  AgentRunFailure,
+  controlledCitations,
+  runAgentTurn,
+  type AgentRuntime,
+} from "./agent";
 import type {
   BuiltContext,
   ProviderCapability,
@@ -289,6 +294,11 @@ test("native tool loop rejects guessed chunk ids without calling read", async ()
   assert.match(
     errorResult?.content ?? "",
     /只能读取本轮 search_notes 已返回的片段/,
+  );
+  assert.equal(
+    JSON.parse(errorResult?.content ?? "{}").isError,
+    true,
+    "tool failures return to the model as structured isError results",
   );
 });
 
@@ -588,4 +598,206 @@ test("controlled citations delete forged markers instead of making them renderab
     ["read-id"],
   );
   assert.equal(result.content, "可信  伪造  重复");
+});
+
+function budgetExhaustionRuntime(options: {
+  final: "success" | "empty";
+}): AgentRuntime {
+  const allowed = chunk("budget-evidence");
+  let request = 0;
+  return baseRuntime({
+    stream: () => {
+      request += 1;
+      if (request === 1)
+        return events([
+          {
+            type: "tool-call-delta",
+            index: 0,
+            id: "search-budget",
+            name: "search_notes",
+          },
+          {
+            type: "tool-call-delta",
+            index: 0,
+            arguments: '{"query":"预算证据"}',
+          },
+          { type: "done", finishReason: "tool_calls" },
+        ]);
+      if (request === 2)
+        return events([
+          {
+            type: "tool-call-delta",
+            index: 0,
+            id: "read-budget",
+            name: "read_notes",
+          },
+          {
+            type: "tool-call-delta",
+            index: 0,
+            arguments: `{"chunkIds":["${allowed.id}"]}`,
+          },
+          { type: "done", finishReason: "tool_calls" },
+        ]);
+      if (request <= 4)
+        return events([
+          {
+            type: "tool-call-delta",
+            index: 0,
+            id: `search-more-${request}`,
+            name: "search_notes",
+          },
+          {
+            type: "tool-call-delta",
+            index: 0,
+            arguments: `{"query":"补充检索 ${request}"}`,
+          },
+          { type: "done", finishReason: "tool_calls" },
+        ]);
+      return options.final === "success"
+        ? events([
+            {
+              type: "token",
+              text: `基于现有证据给出未完成综合。[[source:${allowed.id}]]`,
+              channel: "final",
+            },
+            { type: "done", finishReason: "stop" },
+          ])
+        : events([{ type: "done", finishReason: "stop" }]);
+    },
+    search: async () => [hit(allowed)],
+    read: async () => [allowed],
+  });
+}
+
+test("exhausted round budget plus successful final synthesis is partial and marks K truncated", async () => {
+  const visible: string[] = [];
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => visible.push(event.text),
+    runtime: budgetExhaustionRuntime({ final: "success" }),
+  });
+
+  assert.deepEqual(outcome.terminal, {
+    result: "partial",
+    reason: "rounds_exhausted",
+  });
+  assert.deepEqual(outcome.trace.terminal, outcome.terminal);
+  assert.equal(outcome.trace.truncated, true);
+  assert.deepEqual(outcome.trace.readChunkIds, ["budget-evidence"]);
+  assert.deepEqual(
+    outcome.readChunks.map((item) => item.id),
+    ["budget-evidence"],
+  );
+  assert.equal(visible.length, 1);
+  assert.match(visible[0], /未完成综合/);
+});
+
+test("exhausted budget plus empty synthesis and exhausted repair fails protocol with evidence and no answer", async () => {
+  const visible: string[] = [];
+  let failure: AgentRunFailure | undefined;
+  try {
+    await runAgentTurn({
+      built: built("general"),
+      projectId: "project-a",
+      libraryIds: ["library-a"],
+      capability: capability("native-tools"),
+      signal: new AbortController().signal,
+      onPhase: () => undefined,
+      onToken: (event) => visible.push(event.text),
+      runtime: budgetExhaustionRuntime({ final: "empty" }),
+    });
+  } catch (cause) {
+    assert.ok(cause instanceof AgentRunFailure);
+    failure = cause;
+  }
+
+  assert.ok(failure, "the exhausted deterministic repair must fail");
+  assert.deepEqual(failure.terminal, {
+    result: "failed",
+    reason: "protocol_error",
+  });
+  assert.deepEqual(failure.trace.terminal, failure.terminal);
+  assert.equal(failure.trace.truncated, true);
+  assert.deepEqual(failure.trace.readChunkIds, ["budget-evidence"]);
+  assert.deepEqual(
+    failure.readChunks.map((item) => item.id),
+    ["budget-evidence"],
+  );
+  assert.equal(failure.errorCode, "provider-empty-response");
+  assert.deepEqual(
+    visible,
+    [],
+    "no partial or fabricated answer may be emitted",
+  );
+});
+
+test("finishReason length invalidates the entire truncated tool-call batch", async () => {
+  const requests: Parameters<AgentRuntime["stream"]>[0][] = [];
+  let searches = 0;
+  const visible: string[] = [];
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => visible.push(event.text),
+    runtime: baseRuntime({
+      stream: (input) => {
+        requests.push(input);
+        return requests.length === 1
+          ? events([
+              {
+                type: "tool-call-delta",
+                index: 0,
+                id: "truncated-search",
+                name: "search_notes",
+              },
+              {
+                type: "tool-call-delta",
+                index: 0,
+                arguments: '{"query":"不得执行"}',
+              },
+              { type: "done", finishReason: "length" },
+            ])
+          : events([
+              {
+                type: "token",
+                text: "截断批次已作废。",
+                channel: "final",
+              },
+              { type: "done", finishReason: "stop" },
+            ]);
+      },
+      search: async () => {
+        searches += 1;
+        return [];
+      },
+    }),
+  });
+
+  assert.equal(
+    searches,
+    0,
+    "no call from a length-truncated batch may execute",
+  );
+  assert.equal(
+    requests[1]?.messages.some(
+      (message) => message.role === "assistant" && "toolCalls" in message,
+    ),
+    false,
+    "the invalid batch must not enter the provider transcript",
+  );
+  assert.deepEqual(outcome.terminal, {
+    result: "partial",
+    reason: "tokens_exhausted",
+  });
+  assert.equal(outcome.trace.truncated, true);
+  assert.deepEqual(visible, ["截断批次已作废。"]);
 });

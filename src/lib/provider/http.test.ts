@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ProviderError, getProviderHealth, streamModel } from "./http";
+import {
+  ProviderError,
+  getProviderHealth,
+  providerErrorMessage,
+  streamModel,
+} from "./http";
 
 function withFetch(
   replacement: typeof fetch,
@@ -87,5 +92,12 @@ test("web stream treats a closed stream without done as a safe disconnect", asyn
         },
       );
     },
+  );
+});
+
+test("provider empty-response uses the TASK-002 provider-empty copy", () => {
+  assert.equal(
+    providerErrorMessage("empty-response"),
+    "模型服务没有返回可处理的内容，请重试。",
   );
 });

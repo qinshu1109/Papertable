@@ -19,7 +19,7 @@ export function providerErrorMessage(code) {
     case "disconnected":
       return "连接意外中断，请重试。";
     case "empty-response":
-      return "模型没有返回文本，请重试。";
+      return "模型服务没有返回可处理的内容，请重试。";
     case "invalid-response":
       return "模型服务返回了无法处理的响应，请重试。";
     case "service-unavailable":

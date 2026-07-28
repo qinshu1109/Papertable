@@ -222,7 +222,10 @@ export async function completeModel(input: {
       )
     : [];
   if (typeof result.content !== "string" && !toolCalls.length)
-    throw new Error("模型没有返回内容。");
+    throw new ProviderError(
+      providerErrorMessage("empty-response"),
+      "empty-response",
+    );
   return { content: result.content ?? "", toolCalls };
 }
 

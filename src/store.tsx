@@ -50,6 +50,10 @@ import {
   type AgentOutcome,
 } from "./lib/agent";
 import {
+  agentTerminalErrorMessage,
+  createAgentTerminalState,
+} from "./lib/agentTerminal";
+import {
   exportNoteCorpusForBackup,
   importNoteCorpusFromBackup,
   noteLibraries,
@@ -343,6 +347,7 @@ function unavailableSourcesOnlyOutcome(
   warning: string,
 ): AgentOutcome {
   const now = Date.now();
+  const terminal = createAgentTerminalState("refused", "insufficient_evidence");
   return {
     trace: {
       mode,
@@ -353,7 +358,9 @@ function unavailableSourcesOnlyOutcome(
       readChunkIds: [],
       errors: [warning],
       retrievalUnavailable: true,
+      terminal,
     },
+    terminal,
     readChunks: [],
     searchHits: [],
     directAnswer:
@@ -1507,7 +1514,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           answer = outcome.directAnswer ?? gate.finish();
           throttle.dispose();
           if (!answer.trim())
-            throw new Error("模型没有返回可显示的最终文本，请重试。");
+            throw new AgentRunFailure(
+              agentTerminalErrorMessage("final-answer-empty"),
+              outcome.trace,
+              createAgentTerminalState("failed", "protocol_error"),
+              undefined,
+              {
+                readChunks: outcome.readChunks,
+                searchHits: outcome.searchHits,
+                errorCode: "final-answer-empty",
+              },
+            );
           const cited = controlledCitations(answer, outcome.readChunks);
           answer = cited.content;
           const agentRun = withHistoricalRetrievalEvidence(
@@ -1543,7 +1560,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           const message =
             error instanceof Error ? error.message : "模型生成失败。";
           const agentRun =
-            error instanceof AgentRunFailure ? error.trace : undefined;
+            error instanceof AgentRunFailure
+              ? withHistoricalRetrievalEvidence(
+                  error.trace,
+                  error.readChunks,
+                  error.searchHits,
+                )
+              : undefined;
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
@@ -1553,7 +1576,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                     streaming: false,
                     status: "error",
                     error: message,
-                    content: answer || "生成失败。",
+                    content:
+                      error instanceof AgentRunFailure
+                        ? answer
+                        : answer || "生成失败。",
                     agentPhase: undefined,
                     ...(agentRun ? { agentRun } : {}),
                   }

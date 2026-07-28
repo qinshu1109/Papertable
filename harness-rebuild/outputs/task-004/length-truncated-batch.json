@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "scenario": "length-invalidates-tool-call-batch",
+  "providerBatch": {
+    "finishReason": "length",
+    "toolCalls": [
+      {
+        "id": "truncated-search",
+        "name": "search_notes",
+        "arguments": "{\"query\":\"不得执行\"}"
+      }
+    ]
+  },
+  "events": [
+    {
+      "kind": "exploration-started",
+      "objective": "回答用户问题",
+      "mode": "native-tools"
+    },
+    {
+      "kind": "final-synthesis",
+      "stage": "started",
+      "basisEventIds": [],
+      "unresolvedQuestions": ["工具调用批次被长度上限截断"]
+    },
+    {
+      "kind": "terminal",
+      "terminal": { "result": "partial", "reason": "tokens_exhausted" },
+      "answer": "截断批次已作废。",
+      "citations": [],
+      "unresolvedQuestions": ["工具调用批次被长度上限截断"]
+    }
+  ],
+  "assert": {
+    "executedToolCallIds": [],
+    "transcriptToolCallIds": [],
+    "traceTruncated": true
+  }
+}

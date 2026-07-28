@@ -335,7 +335,7 @@ pub fn provider_error_message(code: &str) -> &'static str {
         "rate-limited" => "模型服务暂时限流，请稍后重试。",
         "timeout" => "请求超时，请重试。",
         "disconnected" => "连接意外中断，请重试。",
-        "empty-response" => "模型没有返回文本，请重试。",
+        "empty-response" => "模型服务没有返回可处理的内容，请重试。",
         "invalid-response" => "模型服务返回了无法处理的响应，请重试。",
         "service-unavailable" => "模型服务暂时不可用，请稍后重试。",
         _ => "模型请求未能完成，请重试。",
@@ -1440,5 +1440,9 @@ mod tests {
         assert!(!message.contains("127.0.0.1"));
         assert!(!message.contains("EOF"));
         assert_eq!(provider_error_message("timeout"), "请求超时，请重试。");
+        assert_eq!(
+            provider_error_message("empty-response"),
+            "模型服务没有返回可处理的内容，请重试。"
+        );
     }
 }

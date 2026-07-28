@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "scenario": "rounds-exhausted-successful-final-synthesis",
+  "events": [
+    {
+      "kind": "exploration-started",
+      "objective": "回答用户问题",
+      "mode": "native-tools"
+    },
+    {
+      "kind": "search-requested",
+      "query": "预算证据",
+      "callId": "search-budget"
+    },
+    {
+      "kind": "search-completed",
+      "query": "预算证据",
+      "callId": "search-budget",
+      "hitCount": 1,
+      "hitChunkIds": ["budget-evidence"]
+    },
+    {
+      "kind": "read-requested",
+      "chunkIds": ["budget-evidence"],
+      "callId": "read-budget"
+    },
+    {
+      "kind": "read-completed",
+      "requestedChunkIds": ["budget-evidence"],
+      "callId": "read-budget",
+      "sources": [
+        {
+          "chunkId": "budget-evidence",
+          "libraryId": "library-a",
+          "documentId": "document-a",
+          "title": "唯一事实",
+          "relativePath": "研究/唯一事实.md",
+          "documentHash": "hash-a",
+          "text": "唯一事实：这条事实只能从测试笔记读到。"
+        }
+      ]
+    },
+    {
+      "kind": "final-synthesis",
+      "stage": "started",
+      "basisEventIds": ["read-budget"],
+      "unresolvedQuestions": ["尚未完成全部探索"]
+    },
+    {
+      "kind": "final-synthesis",
+      "stage": "completed",
+      "basisEventIds": ["read-budget"],
+      "unresolvedQuestions": ["尚未完成全部探索"]
+    },
+    {
+      "kind": "terminal",
+      "terminal": { "result": "partial", "reason": "rounds_exhausted" },
+      "answer": "基于现有证据给出未完成综合。",
+      "citations": [],
+      "unresolvedQuestions": ["尚未完成全部探索"]
+    }
+  ],
+  "assert": {
+    "traceTruncated": true,
+    "readChunkIds": ["budget-evidence"],
+    "answerPresent": true
+  }
+}
