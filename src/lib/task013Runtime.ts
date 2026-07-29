@@ -49,7 +49,7 @@ export function task013NativeCapability(
     baseUrl: "http://127.0.0.1/task-013",
     model,
     mode: "native-tools",
-    protocolAdapterVersion: "openai-native-tools-v1",
+    protocolAdapterVersion: "openai-native-tools-v2",
     gatewayResponseShape: "openai-chat-completions-v1",
     toolCallEmission: { status: "passed" },
     toolResultAcceptance: { status: "passed" },

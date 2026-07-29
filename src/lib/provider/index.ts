@@ -15,6 +15,7 @@ export type {
   KeySource,
   ModelTask,
   ProviderCapabilityResult,
+  CapabilityProbeProgressHandler,
   ProviderConfig,
   ProviderHealth,
   ProviderTool,

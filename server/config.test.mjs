@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -136,7 +137,7 @@ test("本机假模型覆盖受限工具协议和能力探测", async () => {
     assert.equal(capabilityResult.streamingToolCallDelta.status, "passed");
     assert.equal(
       capabilityResult.protocolAdapterVersion,
-      "openai-native-tools-v1",
+      "openai-native-tools-v2",
     );
     assert.equal(
       capabilityResult.gatewayResponseShape,
@@ -201,6 +202,126 @@ test("本机假模型覆盖受限工具协议和能力探测", async () => {
     assert.equal(rejected.status, 400);
   } finally {
     child.kill();
+    await rm(folder, { recursive: true, force: true });
+  }
+});
+
+test("能力探测保持前两段串行并让流式阶段并行", async () => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), "papertable-probe-"));
+  const upstreamPort = nextPort();
+  const appPort = nextPort();
+  const arrivals = [];
+  const delayMs = 180;
+  const upstream = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    arrivals.push({
+      stream: payload.stream === true,
+      toolResult: payload.messages.some((message) => message.role === "tool"),
+      reasoningContinuation:
+        payload.messages.find((message) => message.role === "assistant")
+          ?.reasoning_content ?? null,
+      at: performance.now(),
+    });
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (payload.stream) {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "probe-stream",
+                    type: "function",
+                    function: {
+                      name: "papertable_probe",
+                      arguments: '{"probe":"ok"}',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })}\n\ndata: [DONE]\n\n`,
+      );
+      return;
+    }
+    const toolResult = payload.messages.some(
+      (message) => message.role === "tool",
+    );
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        choices: [
+          {
+            message: toolResult
+              ? { content: "accepted" }
+              : {
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: "probe-call",
+                      type: "function",
+                      function: {
+                        name: "papertable_probe",
+                        arguments: '{"probe":"ok"}',
+                      },
+                    },
+                  ],
+                },
+          },
+        ],
+      }),
+    );
+  });
+  await new Promise((resolve) =>
+    upstream.listen(upstreamPort, "127.0.0.1", resolve),
+  );
+  const origin = `http://127.0.0.1:${appPort}`;
+  const child = spawn(process.execPath, ["server/index.mjs"], {
+    cwd: path.resolve(import.meta.dirname, ".."),
+    env: {
+      ...process.env,
+      PAPERTABLE_PORT: String(appPort),
+      PAPERTABLE_CONFIG_FILE: path.join(folder, ".env.local"),
+      PAPERTABLE_FAKE_LLM: "",
+      COZAI_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
+      COZAI_MODEL: "probe-model",
+      COZAI_API_KEY: "probe-key",
+    },
+    stdio: "ignore",
+  });
+  try {
+    await waitForHealth(origin);
+    arrivals.length = 0;
+    const started = performance.now();
+    const response = await fetch(`${origin}/api/llm/capabilities`, {
+      method: "POST",
+    });
+    const elapsed = performance.now() - started;
+    const result = await response.json();
+    assert.equal(result.mode, "native-tools");
+    assert.equal(arrivals.length, 3);
+    const initial = arrivals.find(
+      (arrival) => !arrival.stream && !arrival.toolResult,
+    );
+    const streaming = arrivals.find((arrival) => arrival.stream);
+    const acceptance = arrivals.find((arrival) => arrival.toolResult);
+    assert.ok(initial && streaming && acceptance);
+    assert.ok(Math.abs(initial.at - streaming.at) < 100);
+    assert.ok(acceptance.at - initial.at >= delayMs - 30);
+    assert.equal(acceptance.reasoningContinuation, "tool-call-continuation");
+    assert.ok(elapsed < delayMs * 3 - 40);
+    assert.ok(result.toolCallEmission.durationMs >= delayMs - 30);
+    assert.ok(result.toolResultAcceptance.durationMs >= delayMs - 30);
+    assert.ok(result.streamingToolCallDelta.durationMs >= delayMs - 30);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => upstream.close(resolve));
     await rm(folder, { recursive: true, force: true });
   }
 });

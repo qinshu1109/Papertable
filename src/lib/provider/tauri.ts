@@ -17,12 +17,16 @@ import type {
   KeySource,
   ModelTask,
   ProviderCapabilityResult,
+  CapabilityProbeProgressHandler,
   ProviderConfig,
   ProviderHealth,
   ProviderTool,
 } from "./http";
 import { ProviderError, providerErrorMessage } from "./http";
-import { normalizeProviderCapabilityResult } from "./http";
+import {
+  normalizeCapabilityProbeProgressEvent,
+  normalizeProviderCapabilityResult,
+} from "./http";
 
 export function getProviderHealth(): Promise<ProviderHealth> {
   return invoke<ProviderHealth>("provider_health");
@@ -58,9 +62,19 @@ function asIso(value: unknown) {
   return new Date().toISOString();
 }
 
-export async function probeProviderCapabilities(): Promise<ProviderCapabilityResult> {
+export async function probeProviderCapabilities(
+  onProgress?: CapabilityProbeProgressHandler,
+): Promise<ProviderCapabilityResult> {
+  const handleProgress = onProgress;
+  const progress = new Channel<Record<string, unknown>>();
+  if (handleProgress)
+    progress.onmessage = (value) => {
+      const event = normalizeCapabilityProbeProgressEvent(value);
+      if (event) handleProgress?.(event);
+    };
   const result = await invoke<Record<string, unknown>>(
     "provider_probe_capability",
+    { progress },
   );
   return normalizeProviderCapabilityResult({
     ...result,

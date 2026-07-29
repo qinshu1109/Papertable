@@ -14,6 +14,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::time::Instant;
 use tauri::ipc::Channel;
 
 #[derive(Debug)]
@@ -183,6 +184,8 @@ pub struct CapabilityStageResult {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Serialize, Debug)]
@@ -197,6 +200,15 @@ pub struct ProviderCapabilityResult {
     pub tested_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityProbeProgressEvent {
+    pub stage: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// 与前端 `streamModel` 消费的 SSE 事件一一对应。
@@ -240,7 +252,8 @@ const ALLOWED_TASKS: [&str; 6] = [
 const ALLOWED_ROLES: [&str; 4] = ["system", "user", "assistant", "tool"];
 const CLIENT_TOOLS: [&str; 2] = ["search_notes", "read_notes"];
 const PROBE_TOOL: &str = "papertable_probe";
-const PROTOCOL_ADAPTER_VERSION: &str = "openai-native-tools-v1";
+const PROTOCOL_ADAPTER_VERSION: &str = "openai-native-tools-v2";
+const TOOL_CONTINUATION_REASONING: &str = "tool-call-continuation";
 const OPENAI_GATEWAY_RESPONSE_SHAPE: &str = "openai-chat-completions-v1";
 
 /// 对来自 WebView 的模型请求做白名单校验。`papertable_probe` 是能力探测的内部
@@ -594,6 +607,12 @@ fn wire_message(message: &Message) -> Value {
                 object.insert(
                     "tool_calls".into(),
                     Value::Array(message.tool_calls.iter().map(wire_tool_call).collect()),
+                );
+                // Some reasoning gateways require a non-empty continuation
+                // marker. Never echo the model's hidden reasoning.
+                object.insert(
+                    "reasoning_content".into(),
+                    Value::String(TOOL_CONTINUATION_REASONING.into()),
                 );
             }
             Value::Object(object)
@@ -1222,43 +1241,66 @@ fn streaming_probe_has_tool_call(
     Ok((false, observed_shape))
 }
 
-/// 探测只验证 OpenAI-compatible 的工具协议，绝不把原始回复、密钥或模型推理持久化。
-/// 结果由前端按 baseUrl+model+协议适配层版本缓存；任一变化都会失效。
-pub fn probe_capability(config: &ProviderConfig) -> ProviderCapabilityResult {
-    let stage = |status: &str, detail: Option<&str>| CapabilityStageResult {
+fn capability_stage(status: &str, detail: Option<&str>, duration_ms: u64) -> CapabilityStageResult {
+    CapabilityStageResult {
         status: status.into(),
         detail: detail.map(|value| value.chars().take(240).collect()),
-    };
-    let tested_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().to_string())
-        .unwrap_or_else(|_| "0".into());
-    if config.api_key.is_empty() {
-        return ProviderCapabilityResult {
-            mode: "unavailable".into(),
-            protocol_adapter_version: PROTOCOL_ADAPTER_VERSION.into(),
-            gateway_response_shape: "unknown".into(),
-            tool_call_emission: stage("failed", Some("未配置模型密钥。")),
-            tool_result_acceptance: stage("not-run", Some("工具调用发出阶段未通过。")),
-            streaming_tool_call_delta: stage("not-run", Some("未配置模型密钥。")),
-            tested_at,
-            unavailable_reason: Some("未配置模型密钥，Agent 模式不可用。".into()),
-        };
+        duration_ms: Some(duration_ms),
     }
+}
+
+fn capability_progress(
+    progress: Option<&Channel<CapabilityProbeProgressEvent>>,
+    stage: &str,
+    status: &str,
+    duration_ms: Option<u64>,
+) {
+    if let Some(progress) = progress {
+        let _ = progress.send(CapabilityProbeProgressEvent {
+            stage: stage.into(),
+            status: status.into(),
+            duration_ms,
+        });
+    }
+}
+
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn probe_non_streaming_chain(
+    config: &ProviderConfig,
+    progress: Option<&Channel<CapabilityProbeProgressEvent>>,
+) -> (CapabilityStageResult, CapabilityStageResult, String, bool) {
+    capability_progress(progress, "toolCallEmission", "started", None);
+    let emission_started = Instant::now();
     let tool_call_emission;
-    let mut tool_result_acceptance = stage("not-run", Some("工具调用发出阶段未通过。"));
+    let mut tool_result_acceptance =
+        capability_stage("not-run", Some("工具调用发出阶段未通过。"), 0);
     let mut gateway_shape = "unknown".to_string();
     let mut gateway_shape_valid = true;
     match complete_internal_probe(config, &probe_request()) {
         Ok(initial) => {
             gateway_shape = initial.gateway_response_shape.clone();
             gateway_shape_valid = initial.gateway_response_shape == OPENAI_GATEWAY_RESPONSE_SHAPE;
-            if initial.tool_calls.is_empty() {
-                tool_call_emission = stage("failed", Some("没有返回强制工具调用。"));
+            tool_call_emission = if initial.tool_calls.is_empty() {
+                capability_stage(
+                    "failed",
+                    Some("没有返回强制工具调用。"),
+                    elapsed_ms(emission_started),
+                )
             } else {
-                tool_call_emission = stage("passed", None);
-            }
+                capability_stage("passed", None, elapsed_ms(emission_started))
+            };
+            capability_progress(
+                progress,
+                "toolCallEmission",
+                &tool_call_emission.status,
+                tool_call_emission.duration_ms,
+            );
             if let Some(call) = initial.tool_calls.first() {
+                capability_progress(progress, "toolResultAcceptance", "started", None);
+                let acceptance_started = Instant::now();
                 let mut request = probe_request();
                 request.messages.push(Message {
                     role: "assistant".into(),
@@ -1277,53 +1319,163 @@ pub fn probe_capability(config: &ProviderConfig) -> ProviderCapabilityResult {
                     tool_call_id: Some(call.id.clone()),
                 });
                 request.tool_choice = Some(Value::String("none".into()));
-                match complete_internal_probe(config, &request) {
+                tool_result_acceptance = match complete_internal_probe(config, &request) {
                     Ok(completion) => {
-                        tool_result_acceptance = stage("passed", None);
                         if completion.gateway_response_shape != "unknown" {
                             if completion.gateway_response_shape != OPENAI_GATEWAY_RESPONSE_SHAPE {
                                 gateway_shape_valid = false;
                             }
                             gateway_shape = completion.gateway_response_shape;
                         }
+                        capability_stage("passed", None, elapsed_ms(acceptance_started))
                     }
                     Err(cause) => {
                         let detail = cause.to_string();
-                        tool_result_acceptance = stage("failed", Some(&detail));
+                        capability_stage("failed", Some(&detail), elapsed_ms(acceptance_started))
                     }
-                }
+                };
+                capability_progress(
+                    progress,
+                    "toolResultAcceptance",
+                    &tool_result_acceptance.status,
+                    tool_result_acceptance.duration_ms,
+                );
             }
         }
         Err(cause) => {
             let detail = cause.to_string();
-            tool_call_emission = stage("failed", Some(&detail));
+            tool_call_emission =
+                capability_stage("failed", Some(&detail), elapsed_ms(emission_started));
+            capability_progress(
+                progress,
+                "toolCallEmission",
+                "failed",
+                tool_call_emission.duration_ms,
+            );
         }
     }
-    let streaming_tool_call_delta = match streaming_probe_has_tool_call(config, &probe_request()) {
+    (
+        tool_call_emission,
+        tool_result_acceptance,
+        gateway_shape,
+        gateway_shape_valid,
+    )
+}
+
+fn probe_streaming_stage(
+    config: &ProviderConfig,
+    progress: Option<&Channel<CapabilityProbeProgressEvent>>,
+) -> (CapabilityStageResult, String, bool) {
+    capability_progress(progress, "streamingToolCallDelta", "started", None);
+    let started = Instant::now();
+    let (stage, shape, valid) = match streaming_probe_has_tool_call(config, &probe_request()) {
         Ok((true, shape)) => {
-            if shape == OPENAI_GATEWAY_RESPONSE_SHAPE {
-                gateway_shape = shape;
-            } else {
-                gateway_shape_valid = false;
-            }
-            stage("passed", None)
+            let valid = shape == OPENAI_GATEWAY_RESPONSE_SHAPE;
+            (
+                capability_stage("passed", None, elapsed_ms(started)),
+                shape,
+                valid,
+            )
         }
-        Ok((false, shape)) => {
-            if shape != "unknown" {
-                if shape != OPENAI_GATEWAY_RESPONSE_SHAPE {
-                    gateway_shape_valid = false;
-                }
-                gateway_shape = shape;
-            } else {
-                gateway_shape_valid = false;
-            }
-            stage("failed", Some("没有返回流式工具调用增量。"))
-        }
+        Ok((false, shape)) => (
+            capability_stage(
+                "failed",
+                Some("没有返回流式工具调用增量。"),
+                elapsed_ms(started),
+            ),
+            shape.clone(),
+            shape == OPENAI_GATEWAY_RESPONSE_SHAPE,
+        ),
         Err(cause) => {
             let detail = cause.to_string();
-            stage("failed", Some(&detail))
+            (
+                capability_stage("failed", Some(&detail), elapsed_ms(started)),
+                "unknown".into(),
+                false,
+            )
         }
     };
+    capability_progress(
+        progress,
+        "streamingToolCallDelta",
+        &stage.status,
+        stage.duration_ms,
+    );
+    (stage, shape, valid)
+}
+
+fn run_probe_parts<N, S, NonStreaming, Streaming>(
+    non_streaming: NonStreaming,
+    streaming: Streaming,
+) -> (N, std::thread::Result<S>)
+where
+    NonStreaming: FnOnce() -> N,
+    Streaming: FnOnce() -> S + Send,
+    S: Send,
+{
+    std::thread::scope(|scope| {
+        let streaming = scope.spawn(streaming);
+        let non_streaming = non_streaming();
+        (non_streaming, streaming.join())
+    })
+}
+
+/// 探测只验证 OpenAI-compatible 的工具协议，绝不把原始回复、密钥或模型推理持久化。
+/// 结果由前端按 baseUrl+model+协议适配层版本缓存；任一变化都会失效。
+pub fn probe_capability_with_progress(
+    config: &ProviderConfig,
+    progress: Option<Channel<CapabilityProbeProgressEvent>>,
+) -> ProviderCapabilityResult {
+    let tested_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_else(|_| "0".into());
+    if config.api_key.is_empty() {
+        for stage_name in ["toolCallEmission", "streamingToolCallDelta"] {
+            capability_progress(progress.as_ref(), stage_name, "started", None);
+            capability_progress(progress.as_ref(), stage_name, "failed", Some(0));
+        }
+        return ProviderCapabilityResult {
+            mode: "unavailable".into(),
+            protocol_adapter_version: PROTOCOL_ADAPTER_VERSION.into(),
+            gateway_response_shape: "unknown".into(),
+            tool_call_emission: capability_stage("failed", Some("未配置模型密钥。"), 0),
+            tool_result_acceptance: capability_stage(
+                "not-run",
+                Some("工具调用发出阶段未通过。"),
+                0,
+            ),
+            streaming_tool_call_delta: capability_stage("failed", Some("未配置模型密钥。"), 0),
+            tested_at,
+            unavailable_reason: Some("未配置模型密钥，Agent 模式不可用。".into()),
+        };
+    }
+    let stream_progress = progress.clone();
+    let (non_streaming, streaming) = run_probe_parts(
+        || probe_non_streaming_chain(config, progress.as_ref()),
+        move || probe_streaming_stage(config, stream_progress.as_ref()),
+    );
+    let (tool_call_emission, tool_result_acceptance, non_stream_shape, non_stream_valid) =
+        non_streaming;
+    let (streaming_tool_call_delta, stream_shape, stream_valid) = streaming.unwrap_or_else(|_| {
+        capability_progress(
+            progress.as_ref(),
+            "streamingToolCallDelta",
+            "failed",
+            Some(0),
+        );
+        (
+            capability_stage("failed", Some("流式能力探测线程异常退出。"), 0),
+            "unknown".into(),
+            false,
+        )
+    });
+    let gateway_shape = if stream_shape == "unknown" {
+        non_stream_shape
+    } else {
+        stream_shape
+    };
+    let gateway_shape_valid = non_stream_valid && stream_valid;
     let admitted = tool_call_emission.status == "passed"
         && tool_result_acceptance.status == "passed"
         && streaming_tool_call_delta.status == "passed"
@@ -1347,6 +1499,11 @@ pub fn probe_capability(config: &ProviderConfig) -> ProviderCapabilityResult {
             Some("三段原生工具握手未全部通过，Agent 模式不可用。".into())
         },
     }
+}
+
+#[cfg(test)]
+pub fn probe_capability(config: &ProviderConfig) -> ProviderCapabilityResult {
+    probe_capability_with_progress(config, None)
 }
 
 #[cfg(test)]
@@ -1580,6 +1737,11 @@ mod tests {
             body["messages"][1]["tool_calls"][0]["function"]["name"],
             "search_notes"
         );
+        assert_eq!(
+            body["messages"][1]["reasoning_content"],
+            TOOL_CONTINUATION_REASONING
+        );
+        assert_ne!(body["messages"][1]["reasoning_content"], "hidden");
         assert_eq!(body["messages"][2]["tool_call_id"], "call-1");
         assert_eq!(body["tools"][0]["type"], "function");
     }
@@ -1704,13 +1866,81 @@ mod tests {
         assert_eq!(result.mode, "unavailable");
         assert_eq!(result.tool_call_emission.status, "failed");
         assert_eq!(result.tool_result_acceptance.status, "not-run");
-        assert_eq!(result.streaming_tool_call_delta.status, "not-run");
+        assert_eq!(result.streaming_tool_call_delta.status, "failed");
+        assert_eq!(result.tool_call_emission.duration_ms, Some(0));
+        assert_eq!(result.tool_result_acceptance.duration_ms, Some(0));
+        assert_eq!(result.streaming_tool_call_delta.duration_ms, Some(0));
         assert_eq!(result.protocol_adapter_version, PROTOCOL_ADAPTER_VERSION);
         assert_eq!(result.gateway_response_shape, "unknown");
         assert!(result
             .unavailable_reason
             .unwrap_or_default()
             .contains("Agent"));
+    }
+
+    #[test]
+    fn capability_probe_runs_streaming_independently_and_joins_the_worker() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+
+        let (streaming_started, wait_for_streaming) = sync_channel(0);
+        let (release_streaming, released) = sync_channel(0);
+        let (non_streaming, streaming) = run_probe_parts(
+            || {
+                wait_for_streaming
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("streaming stage must start beside stage one");
+                release_streaming.send(()).unwrap();
+                "stage-one-then-stage-two"
+            },
+            move || {
+                streaming_started.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(1)).unwrap();
+                "streaming-stage"
+            },
+        );
+        assert_eq!(non_streaming, "stage-one-then-stage-two");
+        assert_eq!(streaming.unwrap(), "streaming-stage");
+    }
+
+    #[test]
+    fn capability_probe_joins_and_recovers_a_panicking_stream_worker() {
+        struct MarkDropped(std::sync::Arc<AtomicBool>);
+        impl Drop for MarkDropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(AtomicBool::new(false));
+        let worker_drop = dropped.clone();
+        let (non_streaming, streaming) = run_probe_parts(
+            || "non-streaming-finished",
+            move || {
+                let _guard = MarkDropped(worker_drop);
+                panic!("simulated stream worker failure");
+            },
+        );
+        assert_eq!(non_streaming, "non-streaming-finished");
+        assert!(streaming.is_err());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn capability_progress_payload_contains_only_allowlisted_fields() {
+        let event = CapabilityProbeProgressEvent {
+            stage: "toolCallEmission".into(),
+            status: "passed".into(),
+            duration_ms: Some(12),
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "stage": "toolCallEmission",
+                "status": "passed",
+                "durationMs": 12
+            })
+        );
     }
 
     #[test]

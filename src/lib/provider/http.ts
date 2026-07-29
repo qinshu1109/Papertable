@@ -1,5 +1,6 @@
 import type {
   AgentExecutionMode,
+  CapabilityProbeProgressEvent,
   CapabilityStageResult,
   ProviderErrorCode,
   ProviderMessage,
@@ -116,6 +117,10 @@ export interface ProviderCapabilityResult {
   unavailableReason?: string;
 }
 
+export type CapabilityProbeProgressHandler = (
+  event: CapabilityProbeProgressEvent,
+) => void;
+
 /** 密钥实际存在哪。Web 端为本机服务的 .env.local；桌面端为 0600 文件。 */
 export type KeySource = "file" | "none";
 
@@ -204,7 +209,10 @@ export async function getProviderConfig(): Promise<ProviderConfig> {
  * The local host performs the actual probe so the API key never enters the
  * page.  This result is safe to cache by base URL + model in AppSettings.
  */
-export async function probeProviderCapabilities(): Promise<ProviderCapabilityResult> {
+export async function probeProviderCapabilities(
+  onProgress?: CapabilityProbeProgressHandler,
+): Promise<ProviderCapabilityResult> {
+  void onProgress;
   const response = await fetch("/api/llm/capabilities", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -221,7 +229,11 @@ function normalizeStage(
 ): CapabilityStageResult {
   const stage =
     value && typeof value === "object"
-      ? (value as { status?: unknown; detail?: unknown })
+      ? (value as {
+          status?: unknown;
+          detail?: unknown;
+          durationMs?: unknown;
+        })
       : undefined;
   const status =
     stage?.status === "passed" ||
@@ -236,6 +248,41 @@ function normalizeStage(
       : status === "failed"
         ? { detail: fallback }
         : {}),
+    ...(typeof stage?.durationMs === "number" &&
+    Number.isFinite(stage.durationMs) &&
+    stage.durationMs >= 0
+      ? { durationMs: Math.round(stage.durationMs) }
+      : {}),
+  };
+}
+
+export function normalizeCapabilityProbeProgressEvent(
+  value: unknown,
+): CapabilityProbeProgressEvent | null {
+  const event =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  if (
+    event.stage !== "toolCallEmission" &&
+    event.stage !== "toolResultAcceptance" &&
+    event.stage !== "streamingToolCallDelta"
+  )
+    return null;
+  if (
+    event.status !== "started" &&
+    event.status !== "passed" &&
+    event.status !== "failed"
+  )
+    return null;
+  return {
+    stage: event.stage,
+    status: event.status,
+    ...(typeof event.durationMs === "number" &&
+    Number.isFinite(event.durationMs) &&
+    event.durationMs >= 0
+      ? { durationMs: Math.round(event.durationMs) }
+      : {}),
   };
 }
 

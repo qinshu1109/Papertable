@@ -23,7 +23,7 @@ const capability = (mode: ProviderCapability["mode"]): ProviderCapability => ({
   baseUrl: "http://127.0.0.1:0/v1",
   model: "fake",
   mode,
-  protocolAdapterVersion: "openai-native-tools-v1",
+  protocolAdapterVersion: "openai-native-tools-v2",
   gatewayResponseShape: "openai-chat-completions-v1",
   toolCallEmission: { status: mode === "native-tools" ? "passed" : "failed" },
   toolResultAcceptance: {
@@ -968,6 +968,58 @@ test("native search metadata does not force a read before the model chooses one"
     outcome.searchHits?.map((item) => item.chunk.id),
     [allowed.id],
   );
+});
+
+test("sources-only refuses search-only prose until a chunk is actually read", async () => {
+  const allowed = chunk("search-only-strict");
+  const tokens: string[] = [];
+  let phase = 0;
+  const outcome = await runAgentTurn({
+    built: built("sources-only"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => tokens.push(event.text),
+    runtime: baseRuntime({
+      stream: () => {
+        phase += 1;
+        if (phase === 1)
+          return events([
+            {
+              type: "tool-call-delta",
+              index: 0,
+              id: "search-only-strict-1",
+              name: "search_notes",
+            },
+            {
+              type: "tool-call-delta",
+              index: 0,
+              arguments: '{"query":"唯一事实"}',
+            },
+            { type: "done", finishReason: "tool_calls" },
+          ]);
+        return events([
+          {
+            type: "token",
+            text: "我只看了搜索摘要，但仍想直接作答。",
+            channel: "final",
+          },
+          { type: "done" },
+        ]);
+      },
+      search: async () => [hit(allowed)],
+    }),
+  });
+
+  assert.deepEqual(tokens, []);
+  assert.deepEqual(outcome.terminal, {
+    result: "refused",
+    reason: "insufficient_evidence",
+  });
+  assert.match(outcome.directAnswer ?? "", /没有找到足够证据/);
+  assert.equal(outcome.readChunks.length, 0);
 });
 
 test("controlled citations delete forged markers instead of making them renderable", () => {

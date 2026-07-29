@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "kind": "pre-task-023-serial-capability-baseline",
+  "capturedAt": "2026-07-29T20:16:15+08:00",
+  "gitHead": "f8b84bf",
+  "provider": "loopback-openai-compatible",
+  "providerDelayMsPerRequest": 300,
+  "expectedSerialShape": "stage1 + stage2 + stage3",
+  "runs": [
+    {
+      "run": 1,
+      "totalMs": 990,
+      "statuses": ["passed", "passed", "passed"]
+    },
+    {
+      "run": 2,
+      "totalMs": 926,
+      "statuses": ["passed", "passed", "passed"]
+    },
+    {
+      "run": 3,
+      "totalMs": 923,
+      "statuses": ["passed", "passed", "passed"]
+    }
+  ],
+  "medianTotalMs": 926,
+  "connectionObservation": {
+    "tcpConnections": 2,
+    "providerRequests": 9,
+    "note": "The process-level fetch pool was shared; the pre-change probe still awaited all three provider requests serially."
+  }
+}

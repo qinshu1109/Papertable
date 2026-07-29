@@ -30,7 +30,7 @@ const capability: ProviderCapability = {
   baseUrl: "http://127.0.0.1:0/v1",
   model: "fake",
   mode: "native-tools",
-  protocolAdapterVersion: "openai-native-tools-v1",
+  protocolAdapterVersion: "openai-native-tools-v2",
   gatewayResponseShape: "openai-chat-completions-v1",
   toolCallEmission: { status: "passed" },
   toolResultAcceptance: { status: "passed" },

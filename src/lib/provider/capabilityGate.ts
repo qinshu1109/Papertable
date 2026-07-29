@@ -8,7 +8,7 @@ import type { ProviderCapabilityResult } from "./http";
 export const DEFAULT_CAPABILITY_TTL_MS = 24 * 60 * 60 * 1_000;
 export const MIN_CAPABILITY_TTL_MS = 60_000;
 export const MAX_CAPABILITY_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
-export const PROTOCOL_ADAPTER_VERSION = "openai-native-tools-v1";
+export const PROTOCOL_ADAPTER_VERSION = "openai-native-tools-v2";
 export const OPENAI_GATEWAY_RESPONSE_SHAPE = "openai-chat-completions-v1";
 
 export type CapabilityInvalidationReason =
@@ -180,6 +180,11 @@ function safeStage(
       ...(typeof stage.detail === "string"
         ? { detail: stage.detail.slice(0, 240) }
         : {}),
+      ...(typeof stage.durationMs === "number" &&
+      Number.isFinite(stage.durationMs) &&
+      stage.durationMs >= 0
+        ? { durationMs: Math.round(stage.durationMs) }
+        : {}),
     };
   return { status: "failed", detail: fallback };
 }
@@ -246,6 +251,7 @@ export function failedCapability(input: {
   const stage = (status: "failed" | "not-run"): CapabilityStageResult => ({
     status,
     detail: input.detail.slice(0, 240),
+    durationMs: 0,
   });
   return {
     schemaVersion: 1,
