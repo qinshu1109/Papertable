@@ -19,6 +19,7 @@ const PROTOCOL_ADAPTER_VERSION = "openai-native-tools-v1";
 import {
   emitFakeStream,
   fakeCompletion,
+  fakeProviderDelayMs,
   fakeToolCalls,
 } from "./fake-provider.mjs";
 import {
@@ -910,6 +911,8 @@ const server = http.createServer(async (req, res) => {
     const validationError = validatePayload(payload);
     if (validationError) return json(res, 400, { message: validationError });
     if (fakeModel) {
+      const delayMs = fakeProviderDelayMs();
+      if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
       const toolCalls = fakeToolCalls(payload);
       return json(res, 200, {
         content: toolCalls.length ? "" : fakeCompletion(payload),

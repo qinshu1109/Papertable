@@ -24,6 +24,7 @@ const GOLD_SOURCE_FIELDS: [&str; 2] = ["source_card_id", "source_turn_id"];
 
 // One writer is enough for a personal local host and closes double-click races.
 static WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,7 +58,7 @@ struct Verdict {
     supersedes_memory_id: Option<String>,
 }
 
-fn safe_error(detail: impl ToString) -> Value {
+pub(crate) fn safe_error(detail: impl ToString) -> Value {
     let _ = detail;
     json!({
         "available": false,
@@ -148,24 +149,32 @@ fn normalize(
 }
 
 struct McpClient {
-    agent: ureq::Agent,
+    agent: &'static ureq::Agent,
+    url: String,
 }
 
 impl McpClient {
     fn new() -> Self {
+        Self::at(MCP_URL)
+    }
+
+    fn at(url: impl Into<String>) -> Self {
         Self {
-            agent: ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(3))
-                .timeout_read(Duration::from_secs(10))
-                .timeout_write(Duration::from_secs(10))
-                .build(),
+            agent: HTTP_AGENT.get_or_init(|| {
+                ureq::AgentBuilder::new()
+                    .timeout_connect(Duration::from_secs(3))
+                    .timeout_read(Duration::from_secs(10))
+                    .timeout_write(Duration::from_secs(10))
+                    .build()
+            }),
+            url: url.into(),
         }
     }
 
     fn post(&self, body: Value, session: Option<&str>) -> Result<(Value, Option<String>), String> {
         let mut request = self
             .agent
-            .post(MCP_URL)
+            .post(&self.url)
             .set("accept", "application/json, text/event-stream")
             .set("content-type", "application/json");
         if let Some(session) = session {
@@ -537,6 +546,7 @@ pub fn supersede(memory_id: String, input: VerdictInput) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_http::{serve_keep_alive, TestResponse};
 
     fn input() -> VerdictInput {
         VerdictInput {
@@ -615,6 +625,59 @@ mod tests {
         let mut unlocked = record;
         unlocked["memory_view"]["locked_fields"] = json!([]);
         assert!(memory_view(&unlocked).is_none());
+    }
+
+    #[test]
+    fn pooled_transport_keeps_each_mcp_call_on_a_fresh_session() {
+        let mut initialize_a = TestResponse::json(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+        initialize_a.headers.push(("mcp-session-id", "session-a"));
+        let tool_a = TestResponse::json(
+            r#"{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"call":"a"}}}"#,
+        );
+        let mut initialize_b = TestResponse::json(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+        initialize_b.headers.push(("mcp-session-id", "session-b"));
+        let tool_b = TestResponse::json(
+            r#"{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"call":"b"}}}"#,
+        );
+        let (url, server) = serve_keep_alive(vec![initialize_a, tool_a, initialize_b, tool_b]);
+
+        let first = McpClient::at(&url).call("health", json!({})).unwrap();
+        let second = McpClient::at(&url).call("health", json!({})).unwrap();
+        assert_eq!(first["call"], "a");
+        assert_eq!(second["call"], "b");
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 4);
+        let methods: Vec<_> = requests
+            .iter()
+            .map(|request| {
+                serde_json::from_str::<Value>(&request.body).unwrap()["method"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            methods,
+            ["initialize", "tools/call", "initialize", "tools/call"]
+        );
+        assert!(!requests[0].headers.contains_key("mcp-session-id"));
+        assert_eq!(
+            requests[1]
+                .headers
+                .get("mcp-session-id")
+                .map(String::as_str),
+            Some("session-a")
+        );
+        assert!(!requests[2].headers.contains_key("mcp-session-id"));
+        assert_eq!(
+            requests[3]
+                .headers
+                .get("mcp-session-id")
+                .map(String::as_str),
+            Some("session-b")
+        );
+        assert!(std::ptr::eq(McpClient::new().agent, McpClient::new().agent));
     }
 
     #[test]

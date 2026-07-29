@@ -305,6 +305,38 @@ test("legacy turns stay readable without backfill, then switch to event-sourced 
   );
 });
 
+test("web turn performance survives a workspace round trip", async () => {
+  await freshDb();
+  const input = snapshot();
+  input.cards[0].turns.push({
+    id: "timed",
+    role: "ai",
+    content: "完成",
+    createdAt: 2,
+    status: "complete",
+    agentRun: {
+      mode: "native-tools",
+      startedAt: 1,
+      finishedAt: 2,
+      searchQueries: [],
+      hitCount: 0,
+      readChunkIds: [],
+      performance: {
+        preflightMs: 12,
+        firstVisibleMs: 345,
+        totalMs: 456,
+      },
+    },
+  });
+  await saveWorkspace(input);
+  const restored = await loadWorkspace();
+  assert.deepEqual(
+    restored?.cards[0].turns.find((turn) => turn.id === "timed")?.agentRun
+      ?.performance,
+    { preflightMs: 12, firstVisibleMs: 345, totalMs: 456 },
+  );
+});
+
 test("agent event and run cursor abort together at every IndexedDB transaction boundary", async () => {
   for (const failurePoint of [
     "after-run-ensured",

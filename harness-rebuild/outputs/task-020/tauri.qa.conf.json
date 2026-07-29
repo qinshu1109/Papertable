@@ -1,0 +1,19 @@
+{
+  "productName": "Papertable TASK-020 QA",
+  "identifier": "com.papertable.task020.qa",
+  "build": {
+    "devUrl": "http://127.0.0.1:5180",
+    "beforeDevCommand": "PAPERTABLE_TARGET=desktop pnpm exec vite --host 127.0.0.1 --port 5180"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Papertable TASK-020 QA",
+        "width": 960,
+        "height": 720,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  }
+}

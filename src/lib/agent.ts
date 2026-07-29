@@ -114,6 +114,8 @@ export interface AgentTurnInput {
   onPhase: (phase: AgentPhase) => void;
   /** Receives only final-answer raw tokens; never tools / planning output. */
   onToken: (event: Extract<ProviderStreamEvent, { type: "token" }>) => void;
+  /** Local dispatch boundary; called immediately before each provider request. */
+  onModelRequest?: () => void;
   /**
    * Test seam for the host-owned operations.  Production deliberately leaves
    * this undefined, so the loop still uses the real provider and the scoped
@@ -225,9 +227,17 @@ function budgetController(input: {
 }
 
 function runtimeFor(input: AgentTurnInput): AgentRuntime {
+  const complete = input.runtime?.complete ?? completeModel;
+  const stream = input.runtime?.stream ?? streamModel;
   return {
-    complete: input.runtime?.complete ?? completeModel,
-    stream: input.runtime?.stream ?? streamModel,
+    complete: (request) => {
+      input.onModelRequest?.();
+      return complete(request);
+    },
+    stream: (request) => {
+      input.onModelRequest?.();
+      return stream(request);
+    },
     search: input.runtime?.search ?? searchProjectNotes,
     read: input.runtime?.read ?? readProjectNotes,
     target:

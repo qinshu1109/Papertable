@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "kind": "post-implementation-5s-local-provider",
+  "capturedAt": "2026-07-29T18:43:39+08:00",
+  "gitHead": "adb3169b5+working-tree",
+  "environment": {
+    "os": "Darwin 25.5.0 arm64",
+    "cpu": "Apple M4",
+    "desktopIdentifier": "com.papertable.task020.qa",
+    "model": "task020-delayed",
+    "provider": "http://127.0.0.1:18888/v1",
+    "providerDelayMs": 5000,
+    "questionSet": "../task-019/frozen-questions.json q1-q5",
+    "runOrder": "serial",
+    "noteFixture": "isolated seeded desktop project without a bound note library",
+    "source": "read-only extraction from the isolated QA SQLite database"
+  },
+  "cases": [
+    {
+      "caseId": "q1",
+      "question": "根据资料，Papertable 为什么必须坚持只读笔记边界？请给出最关键的两个原因。",
+      "preflightMs": 24,
+      "firstVisibleMs": 5036,
+      "totalMs": 5036,
+      "terminalResult": "completed"
+    },
+    {
+      "caseId": "q2",
+      "question": "如果模型没有真正读取资料就直接回答，现有设计应如何识别并阻止？",
+      "preflightMs": 63,
+      "firstVisibleMs": 5077,
+      "totalMs": 5077,
+      "terminalResult": "completed"
+    },
+    {
+      "caseId": "q3",
+      "question": "总结原生工具协议不可降级的理由，并说明失败时用户应该看到什么。",
+      "preflightMs": 23,
+      "firstVisibleMs": 5042,
+      "totalMs": 5042,
+      "terminalResult": "completed"
+    },
+    {
+      "caseId": "q4",
+      "question": "资料里的引用治理如何避免模型引用没有读过的片段？",
+      "preflightMs": 26,
+      "firstVisibleMs": 5037,
+      "totalMs": 5037,
+      "terminalResult": "completed"
+    },
+    {
+      "caseId": "q5",
+      "question": "把这套 Harness 的最小充分执行路径整理成三步，并指出什么时候应该停止探索。",
+      "preflightMs": 42,
+      "firstVisibleMs": 5051,
+      "totalMs": 5051,
+      "terminalResult": "completed"
+    }
+  ],
+  "median": {
+    "preflightMs": 26,
+    "firstVisibleMs": 5042,
+    "totalMs": 5042
+  },
+  "task019BaselineMedian": {
+    "preflightMs": 1,
+    "firstVisibleMs": 36516,
+    "totalMs": 36516
+  },
+  "uiResponsiveness": {
+    "providerDelayMs": 5000,
+    "interactionWindowFromRequestStartMs": 2554,
+    "cardSwitchDispatchMs": 244,
+    "cardVisibleMs": 889,
+    "windowDragControlMs": 321,
+    "heartbeatMaxGapDuringInteractionMs": 53,
+    "heartbeatSamplesDuringInteraction": 12,
+    "heartbeatMaxGapAfterRequestMs": 53,
+    "heartbeatSamplesAfterRequest": 236,
+    "thresholdMs": 250,
+    "passed": true
+  },
+  "comparisonCaveat": "TASK-019 used a real provider and native note tools; this post-run uses a deterministic one-request local fixture. The values verify the timing contract and five-second responsiveness, not a model-speed improvement."
+}
