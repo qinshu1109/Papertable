@@ -1,7 +1,7 @@
 ---
 id: TASK-023
 title: 能力探测优化与真实 Desktop 总验收
-status: in_progress
+status: done
 depends_on: [TASK-020, TASK-022]
 parallelizable: false
 isolation: outputs/task-023/
@@ -61,3 +61,4 @@ verify: 共享连接后的三段能力探测有逐阶段耗时；工具调用发
 - 2026-07-29T21:02:33+08:00：协议 v2、q2 严格门禁与最终证据加入后，从头复跑 `pnpm verify`（276/276 Node/TS、102/102 Rust，1 个既有 live MemOS 测试按设计忽略、生产构建）、Playwright 44/44、Rust fmt、严格 Clippy 全目标/全 feature `-D warnings` 与 `git diff --check`，全部通过。
 - 2026-07-29T21:13:20+08:00：从候选提交 `90e509d47` 执行 `pnpm desktop:signed`，ad-hoc 签名构建并安装到唯一位置 `/Applications/Papertable.app`；`codesign --verify --deep --strict` 通过，bundle `com.papertable.app`、版本 `0.1.0`、二进制内 commit `90e509d47`，provider 配置保持 `0600`。已卸载构建 DMG，`/Applications` 与 `/Volumes` 只剩一个安装包。
 - 2026-07-29T21:13:20+08:00：安装版可见界面验收通过。普通“测试连接”在 `595ms` 返回且没有能力探测状态；手动重新探测在 `584ms` 内显示阶段 1/3 进行中，最终三段为 `4080/2239/3163ms` 且全部通过。探测中窗口状态采样 `92ms`。真实提问在 `492ms` 内显示“正在探索”，随后显示第 2 轮、1 次检索、命中 4 段；生成中窗口采样 `68ms`，最终正文正常落卡。四张截图及完整发布结论见 `outputs/task-023/screenshots/` 与 `verification.md`。所有执行复选项已完成，任务保持 `in_progress`，等待监督者独立复核、推送与合入后再标记 `done`。
+- 2026-07-29T21:20:06+08:00：监督者完成相对 `f8b84bf` 的完整差异复核，未发现阻塞项；候选与安装证据经提交、推送后由 PR #23 的远端 `rust` 与 `verify` 检查通过，并以 merge commit `13f5ada` 合入 `task/TASK-014-verdict-memos`。安装身份、唯一 bundle、窗口门禁与流式预览证据已再次核对。满足“复核、提交、推送、安装验证与合入”全部条件，本卡由监督者标记 `done`。

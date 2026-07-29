@@ -1,7 +1,7 @@
 # TASK-023 verification
 
-Candidate status: executor gates passed; remains `in_progress` until the
-supervisor push, remote CI, and merge are complete.
+Candidate status: **accepted and merged** by the supervisor in PR #23
+(`13f5ada293e3e09a8b0359343dadfad9ec658040`).
 
 ## Capability result
 
@@ -110,3 +110,6 @@ safe progress metadata, and passes deterministic, real-provider, full
 regression, installed-app identity, and visible-window responsiveness gates.
 The original q2 and admission failures remain in the raw evidence rather than
 being hidden.
+
+Supervisor review found no blocking issue. Remote `rust` and `verify` checks
+passed, and PR #23 merged into `task/TASK-014-verdict-memos`.
