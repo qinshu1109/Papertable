@@ -5,6 +5,16 @@ const S = "<<<PAPERTABLE_ANSWER>>>";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+export function fakeProviderDelayMs(
+  value = process.env.PAPERTABLE_FAKE_LLM_DELAY_MS,
+) {
+  if (value === undefined || value === "") return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? Math.min(60_000, Math.max(0, Math.round(parsed)))
+    : 0;
+}
+
 const DECOHERENCE_BODY =
   "量子退相干是指系统与环境纠缠后相位信息扩散到环境中。\n\n它不是波函数坍缩。";
 
@@ -178,7 +188,14 @@ export function fakeCompletion(payload) {
   return `${S}这是本地验收用的流式回答：${topic}。\n\n它用于验证卡片、上下文、停止与自动保存链路；正式运行时会由 CozAI · Claude Opus 5 回答。`;
 }
 
-export async function emitFakeStream({ payload, write, signal }) {
+export async function emitFakeStream({
+  payload,
+  write,
+  signal,
+  delayMs = fakeProviderDelayMs(),
+  sleepFor = sleep,
+}) {
+  if (delayMs) await sleepFor(delayMs);
   const toolCalls = fakeToolCalls(payload);
   if (toolCalls.length) {
     for (const [index, toolCall] of toolCalls.entries()) {
@@ -211,7 +228,7 @@ export async function emitFakeStream({ payload, write, signal }) {
     write(
       sseEvent("token", { text: points.slice(i, i + 8).join(""), channel }),
     );
-    await sleep(25);
+    await sleepFor(25);
   }
   write(sseEvent("done", { stopped: Boolean(signal?.aborted) }));
 }

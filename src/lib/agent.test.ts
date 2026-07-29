@@ -172,6 +172,7 @@ test("ordinary no-library chat remains a single deterministic provider stream", 
   let searches = 0;
   let reads = 0;
   let completions = 0;
+  const dispatchOrder: string[] = [];
   const visible: string[] = [];
   const outcome = await runAgentTurn({
     built: built("general"),
@@ -180,12 +181,14 @@ test("ordinary no-library chat remains a single deterministic provider stream", 
     signal: new AbortController().signal,
     onPhase: () => undefined,
     onToken: (event) => visible.push(event.text),
+    onModelRequest: () => dispatchOrder.push("dispatch"),
     runtime: baseRuntime({
       complete: async () => {
         completions += 1;
         return { content: "不得调用", toolCalls: [] };
       },
       stream: async function* (input) {
+        dispatchOrder.push("stream");
         streams += 1;
         assert.equal(input.tools, undefined);
         yield { type: "token", text: "普通聊天回答。", channel: "final" };
@@ -208,6 +211,7 @@ test("ordinary no-library chat remains a single deterministic provider stream", 
   assert.equal(completions, 0);
   assert.equal(searches, 0);
   assert.equal(reads, 0);
+  assert.deepEqual(dispatchOrder, ["dispatch", "stream"]);
 });
 
 test("desktop library runs record usage past legacy limits and stop on the minimum sufficient path", async () => {

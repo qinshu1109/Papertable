@@ -2181,7 +2181,11 @@ mod tests {
                 error: None,
                 model: Some("m".into()),
                 favorite: None,
-                agent_run: Some(json!({"mode":"two-stage","readChunkIds":["chunk-1"]})),
+                agent_run: Some(json!({
+                    "mode":"two-stage",
+                    "readChunkIds":["chunk-1"],
+                    "performance":{"preflightMs":12,"firstVisibleMs":345,"totalMs":456}
+                })),
                 citations: Some(json!([{"chunkId":"chunk-1","excerpt":"证据"}])),
                 agent_phase: Some("reading".into()),
             },
@@ -2193,7 +2197,11 @@ mod tests {
             .find(|record| record.turn.id == "t")
             .unwrap()
             .turn;
-        assert_eq!(turn.agent_run.unwrap()["mode"], "two-stage");
+        let agent_run = turn.agent_run.unwrap();
+        assert_eq!(agent_run["mode"], "two-stage");
+        assert_eq!(agent_run["performance"]["preflightMs"], 12);
+        assert_eq!(agent_run["performance"]["firstVisibleMs"], 345);
+        assert_eq!(agent_run["performance"]["totalMs"], 456);
         assert_eq!(turn.citations.unwrap()[0]["chunkId"], "chunk-1");
         assert_eq!(turn.agent_phase.as_deref(), Some("reading"));
     }
