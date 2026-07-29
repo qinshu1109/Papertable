@@ -3,6 +3,8 @@ mod db;
 mod llm;
 mod memos;
 mod notes;
+#[cfg(test)]
+mod test_http;
 mod vault;
 mod watcher;
 
@@ -46,6 +48,22 @@ macro_rules! with_db {
         let $conn = &mut *guard;
         $body
     }};
+}
+
+async fn with_db_blocking<T, E, F>(db: Arc<Mutex<Connection>>, operation: F) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<String> + Send + 'static,
+    F: FnOnce(&mut Connection) -> Result<T, E> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = db
+            .lock()
+            .map_err(|_| E::from("数据库锁被毒化".to_string()))?;
+        operation(&mut guard)
+    })
+    .await
+    .map_err(|error| E::from(error.to_string()))?
 }
 
 #[tauri::command]
@@ -180,33 +198,46 @@ fn provider_snapshot(state: &State<Provider>) -> Result<ProviderConfig, llm::Err
 }
 
 #[tauri::command]
-fn verdict_health() -> Value {
-    memos::health()
+async fn verdict_health() -> Value {
+    tauri::async_runtime::spawn_blocking(memos::health)
+        .await
+        .unwrap_or_else(memos::safe_error)
 }
 
 #[tauri::command]
-fn verdict_ensure_cube() -> Value {
-    memos::ensure()
+async fn verdict_ensure_cube() -> Value {
+    tauri::async_runtime::spawn_blocking(memos::ensure)
+        .await
+        .unwrap_or_else(memos::safe_error)
 }
 
 #[tauri::command]
-fn verdict_list(project_id: String, concept: Option<String>) -> Value {
-    memos::list(project_id, concept)
+async fn verdict_list(project_id: String, concept: Option<String>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || memos::list(project_id, concept))
+        .await
+        .unwrap_or_else(memos::safe_error)
 }
 
 #[tauri::command]
-fn verdict_confirm(input: memos::VerdictInput) -> Value {
-    memos::confirm(input)
+async fn verdict_confirm(input: memos::VerdictInput) -> Value {
+    tauri::async_runtime::spawn_blocking(move || memos::confirm(input))
+        .await
+        .unwrap_or_else(memos::safe_error)
 }
 
 #[tauri::command]
-fn verdict_supersede(memory_id: String, input: memos::VerdictInput) -> Value {
-    memos::supersede(memory_id, input)
+async fn verdict_supersede(memory_id: String, input: memos::VerdictInput) -> Value {
+    tauri::async_runtime::spawn_blocking(move || memos::supersede(memory_id, input))
+        .await
+        .unwrap_or_else(memos::safe_error)
 }
 
 #[tauri::command]
-fn provider_health(state: State<Provider>) -> Result<ProviderHealth, llm::Error> {
-    Ok(llm::health(&provider_snapshot(&state)?))
+async fn provider_health(state: State<'_, Provider>) -> Result<ProviderHealth, llm::Error> {
+    let config = provider_snapshot(&state)?;
+    tauri::async_runtime::spawn_blocking(move || llm::health(&config))
+        .await
+        .map_err(|error| llm::Error::from(error.to_string()))
 }
 
 #[tauri::command]
@@ -312,26 +343,38 @@ fn provider_key_source(state: State<Provider>) -> Result<KeySource, llm::Error> 
 }
 
 #[tauri::command]
-fn llm_generate(state: State<Provider>, request: ChatRequest) -> Result<String, llm::Error> {
-    llm::generate(&provider_snapshot(&state)?, &request)
+async fn llm_generate(
+    state: State<'_, Provider>,
+    request: ChatRequest,
+) -> Result<String, llm::Error> {
+    let config = provider_snapshot(&state)?;
+    tauri::async_runtime::spawn_blocking(move || llm::generate(&config, &request))
+        .await
+        .map_err(|error| llm::Error::from(error.to_string()))?
 }
 
 /// Harness 的非流式通道：除最终正文外还能安全回传结构化 tool_calls。普通标题和
 /// 概念任务继续走 llm_generate，避免旧调用方意外把工具协议当正文。
 #[tauri::command]
-fn llm_complete(
-    state: State<Provider>,
+async fn llm_complete(
+    state: State<'_, Provider>,
     request: ChatRequest,
 ) -> Result<llm::Completion, llm::Error> {
-    llm::complete(&provider_snapshot(&state)?, &request)
+    let config = provider_snapshot(&state)?;
+    tauri::async_runtime::spawn_blocking(move || llm::complete(&config, &request))
+        .await
+        .map_err(|error| llm::Error::from(error.to_string()))?
 }
 
 /// 能力探测只返回布尔协议结果；前端按 baseUrl+model 缓存，Rust 不写入密钥或原始回复。
 #[tauri::command]
-fn provider_probe_capability(
-    state: State<Provider>,
+async fn provider_probe_capability(
+    state: State<'_, Provider>,
 ) -> Result<llm::ProviderCapabilityResult, llm::Error> {
-    Ok(llm::probe_capability(&provider_snapshot(&state)?))
+    let config = provider_snapshot(&state)?;
+    tauri::async_runtime::spawn_blocking(move || llm::probe_capability(&config))
+        .await
+        .map_err(|error| llm::Error::from(error.to_string()))
 }
 
 /// 流式生成。事件走 Tauri `Channel`，替代浏览器里的 SSE 解析循环。
@@ -757,14 +800,14 @@ fn note_library_project_scope(
 }
 
 #[tauri::command]
-fn note_library_search(
-    db: State<Db>,
+async fn note_library_search(
+    db: State<'_, Db>,
     run_id: String,
     project_id: String,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<notes::PublicNoteHit>, notes::Error> {
-    with_db!(db, conn, {
+    with_db_blocking(Arc::clone(&db.0), move |conn| {
         Ok(
             notes::search_project_for_run(conn, &run_id, &project_id, &query, limit)?
                 .iter()
@@ -772,16 +815,17 @@ fn note_library_search(
                 .collect(),
         )
     })
+    .await
 }
 
 #[tauri::command]
-fn note_library_read(
-    db: State<Db>,
+async fn note_library_read(
+    db: State<'_, Db>,
     run_id: String,
     project_id: String,
     chunk_ids: Vec<String>,
 ) -> Result<Vec<notes::PublicNoteChunk>, notes::Error> {
-    with_db!(db, conn, {
+    with_db_blocking(Arc::clone(&db.0), move |conn| {
         Ok(
             notes::read_project_for_run(conn, &run_id, &project_id, &chunk_ids)?
                 .iter()
@@ -789,6 +833,7 @@ fn note_library_read(
                 .collect(),
         )
     })
+    .await
 }
 
 #[tauri::command]
@@ -900,30 +945,32 @@ fn attachment_promote(
 }
 
 #[tauri::command]
-fn attachment_search(
-    db: State<Db>,
+async fn attachment_search(
+    db: State<'_, Db>,
     run_id: String,
     project_id: String,
     card_id: String,
     query: String,
     limit: usize,
 ) -> Result<Vec<notes::PublicNoteHit>, attachments::Error> {
-    with_db!(db, conn, {
+    with_db_blocking(Arc::clone(&db.0), move |conn| {
         attachments::search_for_run(conn, &run_id, &project_id, &card_id, &query, limit)
     })
+    .await
 }
 
 #[tauri::command]
-fn attachment_read(
-    db: State<Db>,
+async fn attachment_read(
+    db: State<'_, Db>,
     run_id: String,
     project_id: String,
     card_id: String,
     chunk_ids: Vec<String>,
 ) -> Result<Vec<notes::PublicNoteChunk>, attachments::Error> {
-    with_db!(db, conn, {
+    with_db_blocking(Arc::clone(&db.0), move |conn| {
         attachments::read_for_run(conn, &run_id, &project_id, &card_id, &chunk_ids)
     })
+    .await
 }
 
 #[tauri::command]

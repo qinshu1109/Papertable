@@ -13,6 +13,7 @@ use std::error::Error as _;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use tauri::ipc::Channel;
 
 #[derive(Debug)]
@@ -849,10 +850,13 @@ impl SseTap {
     }
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(15))
-        .build()
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(15))
+            .build()
+    })
 }
 
 pub fn health(config: &ProviderConfig) -> ProviderHealth {
@@ -1348,6 +1352,7 @@ pub fn probe_capability(config: &ProviderConfig) -> ProviderCapabilityResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_http::{serve_keep_alive, TestResponse};
 
     #[test]
     fn reasoning_is_dropped_before_any_frontend_event() {
@@ -1362,6 +1367,20 @@ mod tests {
         };
         let wire = serde_json::to_string(&event).unwrap();
         assert!(!wire.contains("the user"), "推理不得进入发往前端的事件");
+    }
+
+    #[test]
+    fn consecutive_requests_reuse_the_shared_http_connection() {
+        let (url, server) =
+            serve_keep_alive(vec![TestResponse::json("{}"), TestResponse::json("{}")]);
+        for _ in 0..2 {
+            assert_eq!(
+                agent().get(&url).call().unwrap().into_string().unwrap(),
+                "{}"
+            );
+        }
+        assert_eq!(server.join().unwrap().len(), 2);
+        assert!(std::ptr::eq(agent(), agent()));
     }
 
     #[test]
