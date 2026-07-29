@@ -41,8 +41,8 @@ verify: 共享连接后的三段能力探测有逐阶段耗时；工具调用发
 - [x] 用同一组 5 个真实问题对比 TASK-019 基线，记录 `preflightMs`、`firstVisibleMs`、`totalMs` 与主线程心跳。
 - [x] 用 10 个真实资料问题验收必要工具调用、实际 read、`readableIds`、受控引用和无固定调用上限。
 - [x] 运行 `pnpm verify`、`pnpm test:e2e`、Rust 测试与严格 clippy，并完成真实旗舰模型回归。
-- [ ] 构建并安装 Desktop 候选，核对版本/commit、连接测试、能力探测、窗口响应和流式预览。
-- [ ] 将完整前后对比、失败样本、截图和发布结论保存到 `outputs/task-023/`，交监督者独立验收。
+- [x] 构建并安装 Desktop 候选，核对版本/commit、连接测试、能力探测、窗口响应和流式预览。
+- [x] 将完整前后对比、失败样本、截图和发布结论保存到 `outputs/task-023/`，交监督者独立验收。
 
 ## 任务进度
 
@@ -59,3 +59,5 @@ verify: 共享连接后的三段能力探测有逐阶段耗时；工具调用发
 - 2026-07-29T20:58:21+08:00：冻结 q1～q5 真实旗舰中位数为 `preflight=1ms / firstVisible=31648ms / total=31648ms / heartbeatGap=254ms`；对 TASK-019 的 `1/36516/36516ms`，前置耗时持平、首个正文与总耗时均改善 4868ms（13.33%）。10/10 资料题经内容复核完成；原 q2 失败与权威来源复跑均保留。
 - 2026-07-29T20:59:47+08:00：用与串行基线相同的 300ms loopback provider 重测三次，并行结果 `679/618/618ms`、中位数 `618ms`；较串行 `926ms` 改善 `308ms`（33.26%）。各阶段耗时约 306～329ms，总耗时贴合 `max(阶段1+阶段2, 阶段3)`；9 个请求使用 2 个共享 TCP 连接。
 - 2026-07-29T21:02:33+08:00：协议 v2、q2 严格门禁与最终证据加入后，从头复跑 `pnpm verify`（276/276 Node/TS、102/102 Rust，1 个既有 live MemOS 测试按设计忽略、生产构建）、Playwright 44/44、Rust fmt、严格 Clippy 全目标/全 feature `-D warnings` 与 `git diff --check`，全部通过。
+- 2026-07-29T21:13:20+08:00：从候选提交 `90e509d47` 执行 `pnpm desktop:signed`，ad-hoc 签名构建并安装到唯一位置 `/Applications/Papertable.app`；`codesign --verify --deep --strict` 通过，bundle `com.papertable.app`、版本 `0.1.0`、二进制内 commit `90e509d47`，provider 配置保持 `0600`。已卸载构建 DMG，`/Applications` 与 `/Volumes` 只剩一个安装包。
+- 2026-07-29T21:13:20+08:00：安装版可见界面验收通过。普通“测试连接”在 `595ms` 返回且没有能力探测状态；手动重新探测在 `584ms` 内显示阶段 1/3 进行中，最终三段为 `4080/2239/3163ms` 且全部通过。探测中窗口状态采样 `92ms`。真实提问在 `492ms` 内显示“正在探索”，随后显示第 2 轮、1 次检索、命中 4 段；生成中窗口采样 `68ms`，最终正文正常落卡。四张截图及完整发布结论见 `outputs/task-023/screenshots/` 与 `verification.md`。所有执行复选项已完成，任务保持 `in_progress`，等待监督者独立复核、推送与合入后再标记 `done`。

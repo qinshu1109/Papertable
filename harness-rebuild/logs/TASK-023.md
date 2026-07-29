@@ -40,10 +40,6 @@
   TypeScript normalizer both reject/drop raw detail, reply, tool arguments,
   key, and reasoning fields.
 
-## Candidate result
-
-- In progress.
-
 ## Verification
 
 - Targeted Node integration:
@@ -113,4 +109,30 @@ src/lib/provider/capabilityGate.test.ts` — 15/15 passed.
   beginning: `pnpm verify` (276/276 Node/TS, 102/102 Rust plus one existing
   live-MemOS ignore, production build), Playwright 44/44, Rust fmt, strict
   Clippy all-targets/all-features with `-D warnings`, and `git diff --check`.
-- Real-provider and installed-candidate verification remain in progress.
+- `2026-07-29T21:13:20+08:00` — Built the committed candidate with
+  `pnpm desktop:signed`, installed it at `/Applications/Papertable.app`, and
+  ejected the build DMG. `codesign --verify --deep --strict` passed; the only
+  remaining app bundle is the installed copy with bundle ID
+  `com.papertable.app`, version `0.1.0`, ad-hoc signature, and binary commit
+  `90e509d47`. The provider file is still mode `0600`.
+- `2026-07-29T21:13:20+08:00` — Exercised the installed app through visible
+  macOS UI. Ordinary connection test returned in 595ms without starting a
+  capability probe. Manual re-probe exposed the Channel event immediately:
+  at 584ms stage 1 and stage 3 were running while stage 2 was not yet run.
+  The final stage durations were `4080/2239/3163ms`, all passed. An in-flight
+  accessibility/UI sample returned in 92ms.
+- `2026-07-29T21:13:20+08:00` — Sent a real question in the installed app.
+  The first running state appeared in 492ms, then showed round 2, one search,
+  four hits, and zero reads while the provider was still running. A live
+  window sample returned in 68ms and the final answer rendered. Screenshots:
+  `outputs/task-023/screenshots/installed-capability-probe-running.jpeg`,
+  `installed-capability-probe-passed.jpeg`,
+  `installed-agent-streaming.jpeg`, and `installed-agent-final.jpeg`.
+
+## Candidate result
+
+- All executor gates passed. Candidate commit: `90e509d47`.
+- Release recommendation: **accept**, subject only to independent supervisor
+  diff review, push, remote CI, and merge.
+- Task status deliberately remains `in_progress` until those supervisor gates
+  complete.

@@ -27,3 +27,11 @@
 | Ten questions       | Each completed answer that makes a sourced claim has actual search, actual read, non-empty `readableIds`, and only controlled citations; no fixed 4-round/8-call cap |
 | Regression          | `pnpm verify`, full Playwright, Rust tests, fmt, strict Clippy, Desktop build                                                                                        |
 | Installed candidate | Build/version/commit, provider health, capability stages, window heartbeat, final preview, and real-provider interaction                                             |
+
+## Final outcome
+
+All gates passed for source candidate `90e509d47`. The installed bundle at
+`/Applications/Papertable.app` reported the same commit, passed provider health
+without starting capability probing, showed live Channel progress and final
+stage timings, remained responsive during both probing and real generation,
+and rendered the final preview. See `verification.md` and `screenshots/`.

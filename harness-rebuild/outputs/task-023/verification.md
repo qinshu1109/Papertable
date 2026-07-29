@@ -1,7 +1,7 @@
 # TASK-023 verification
 
-Candidate status: `in_progress` until the installed bundle and supervisor merge
-are complete.
+Candidate status: executor gates passed; remains `in_progress` until the
+supervisor push, remote CI, and merge are complete.
 
 ## Capability result
 
@@ -25,8 +25,10 @@ Raw data:
 - Provider model: `claude-opus-5`.
 - Real material: 123 `harness-rebuild` Markdown files, 913 chunks.
 - Frozen q1-q5 median:
-  `preflight=1ms / firstVisible=31648ms / total=31648ms /
-  heartbeatGap=254ms`.
+  - `preflight=1ms`
+  - `firstVisible=31648ms`
+  - `total=31648ms`
+  - `heartbeatGap=254ms`
 - TASK-019 median:
   `preflight=1ms / firstVisible=36516ms / total=36516ms`.
 - First visible and total improved **4868ms / 13.33%**; preflight remained
@@ -35,8 +37,10 @@ Raw data:
   returned by search, and controlled citations.
 - q3 completed after eight tool calls and nine provider requests while the
   Desktop runtime had no fixed 4-round/8-call termination.
-- The installed-window heartbeat remains the decisive UI responsiveness gate;
-  the Node evidence runner rebuilds its lexical index on the same event loop.
+- Installed-window samples returned in 92ms during capability probing and
+  68ms during real answer generation. The Node evidence runner's 254ms gap is
+  not the decisive UI gate because it rebuilds its lexical index on its own
+  event loop.
 
 Raw data:
 
@@ -66,5 +70,43 @@ Raw data:
 - `cargo fmt --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `git diff --check`: passed.
-- Desktop build/install/window verification: pending.
+- Desktop build/install/window verification: passed.
 
+## Installed Desktop candidate
+
+- Source candidate: `90e509d47`.
+- Command: `pnpm desktop:signed`.
+- Installed path: `/Applications/Papertable.app` (the build DMG was ejected;
+  no second Papertable bundle remains under `/Applications` or `/Volumes`).
+- `codesign --verify --deep --strict`: passed.
+- Bundle/version/signature: `com.papertable.app / 0.1.0 / ad-hoc`.
+- The installed binary contains build commit `90e509d47`; the Settings build
+  panel showed the same commit and installed binary path.
+- Provider configuration remains `-rw-------` (`0600`) and the API secret was
+  masked in Settings.
+- Ordinary “测试连接” returned in 595ms and did not enter capability-probe
+  progress.
+- Manual “立即重新探测” showed stage 1 and independent stage 3 running while
+  stage 2 was still pending. Final durations were:
+  `toolCallEmission=4080ms`,
+  `toolResultAcceptance=2239ms`,
+  `streamingToolCallDelta=3163ms`; all passed.
+- A real installed-app question showed its first running state in 492ms,
+  advanced to round 2 with one search and four hits, remained responsive
+  (68ms UI sample), and rendered the final body.
+
+Screenshots:
+
+- `screenshots/installed-capability-probe-running.jpeg`
+- `screenshots/installed-capability-probe-passed.jpeg`
+- `screenshots/installed-agent-streaming.jpeg`
+- `screenshots/installed-agent-final.jpeg`
+
+## Release conclusion
+
+**Accept.** The capability latency optimization preserves the stage 1 → stage
+2 dependency, runs independent stage 3 concurrently, fails closed, emits only
+safe progress metadata, and passes deterministic, real-provider, full
+regression, installed-app identity, and visible-window responsiveness gates.
+The original q2 and admission failures remain in the raw evidence rather than
+being hidden.
