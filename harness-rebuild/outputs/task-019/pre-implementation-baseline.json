@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "kind": "pre-implementation-baseline",
+  "model": "claude-opus-5",
+  "capabilityCache": "warm",
+  "cases": [
+    {
+      "caseId": "q1",
+      "preflightMs": 3,
+      "firstVisibleMs": 24909,
+      "totalMs": 24909,
+      "modelRequests": 4,
+      "toolCalls": 3,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    },
+    {
+      "caseId": "q2",
+      "preflightMs": 1,
+      "firstVisibleMs": 36516,
+      "totalMs": 36516,
+      "modelRequests": 3,
+      "toolCalls": 3,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    },
+    {
+      "caseId": "q3",
+      "preflightMs": 0,
+      "firstVisibleMs": 22970,
+      "totalMs": 22970,
+      "modelRequests": 3,
+      "toolCalls": 3,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    },
+    {
+      "caseId": "q4",
+      "preflightMs": 1,
+      "firstVisibleMs": 67828,
+      "totalMs": 67828,
+      "modelRequests": 3,
+      "toolCalls": 2,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    },
+    {
+      "caseId": "q5",
+      "preflightMs": 1,
+      "firstVisibleMs": 60857,
+      "totalMs": 60858,
+      "modelRequests": 3,
+      "toolCalls": 3,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    }
+  ],
+  "median": {
+    "preflightMs": 1,
+    "firstVisibleMs": 36516,
+    "totalMs": 36516
+  }
+}

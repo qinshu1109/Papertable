@@ -61,6 +61,11 @@ const project = (): PortableProject => ({
             searchQueries: ["量子"],
             hitCount: 1,
             readChunkIds: ["chunk-quantum"],
+            performance: {
+              preflightMs: 12,
+              firstVisibleMs: 345,
+              totalMs: 456,
+            },
           },
         },
       ],
@@ -114,6 +119,11 @@ test("native project package preserves graph, snapshots and cards", async () => 
     "chunk-quantum",
   );
   assert.equal(restored.cards[1].turns[0].agentRun?.mode, "unavailable");
+  assert.deepEqual(restored.cards[1].turns[0].agentRun?.performance, {
+    preflightMs: 12,
+    firstVisibleMs: 345,
+    totalMs: 456,
+  });
 });
 
 test("Markdown 和 Canvas 导出给人可读的笔记引用，但不公开 answerMode frontmatter", async () => {

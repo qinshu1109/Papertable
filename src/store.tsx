@@ -58,6 +58,7 @@ import {
   runAgentTurn,
   type AgentOutcome,
 } from "./lib/agent";
+import { agentRunPerformance } from "./lib/agentPerformance";
 import {
   agentTerminalErrorMessage,
   createAgentTerminalState,
@@ -130,6 +131,7 @@ import { EDGE_META } from "./types";
 import type {
   AnswerMode,
   AgentExecutionMode,
+  AgentRunTrace,
   AppSettings,
   AttentionMetrics,
   BuiltContext,
@@ -1408,6 +1410,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         ? "manual-reprobe"
         : "ttl-expired",
       expected?: { baseUrl: string; model: string },
+      onModelRequest?: () => void,
     ) => {
       const current = latestRef.current.settings;
       const baseUrl =
@@ -1432,7 +1435,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             latestRef.current = { ...latestRef.current, settings: next };
             return next;
           }),
-        probe: probeProviderCapabilities,
+        probe: () => {
+          onModelRequest?.();
+          return probeProviderCapabilities();
+        },
         onReprobing: (active) =>
           setReprobingCapabilityKeys((previous) => {
             const next = new Set(previous);
@@ -1767,6 +1773,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       relation?: EdgeType;
       retryOf?: string;
       resumeTurnId?: string;
+      requestedAt?: number;
     }) => {
       const target = input.cardsSnapshot.find(
         (card) => card.id === input.cardId,
@@ -1778,6 +1785,27 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           )
         : undefined;
       if (input.resumeTurnId && !existingTurn) return;
+      const sentAt = input.requestedAt ?? Date.now();
+      let firstModelRequestAt: number | undefined;
+      let firstVisibleAt: number | undefined;
+      const markModelRequest = () => {
+        firstModelRequestAt ??= Date.now();
+      };
+      const markVisible = () => {
+        firstVisibleAt ??= Date.now();
+      };
+      const withPerformance = (
+        trace: AgentRunTrace,
+        finishedAt = Date.now(),
+      ): AgentRunTrace => ({
+        ...trace,
+        performance: agentRunPerformance({
+          sentAt,
+          firstModelRequestAt,
+          firstVisibleAt: firstVisibleAt ?? finishedAt,
+          finishedAt,
+        }),
+      });
       const aiId = existingTurn?.id ?? uid("turn");
       const aiTurn: Turn = existingTurn
         ? {
@@ -1832,7 +1860,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const gate = createAnswerGate();
       let answer = "";
       const throttle = createStreamThrottle<string>({
-        commit: (content) =>
+        commit: (content) => {
+          if (content.trim()) markVisible();
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
@@ -1843,7 +1872,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 ? { ...turn, content }
                 : turn,
             ),
-          })),
+          }));
+        },
         schedule: (callback, delay) => window.setTimeout(callback, delay),
         cancel: (id) => window.clearTimeout(id),
         // 当前可见卡片保持平滑；切到别的卡片、别的项目或把应用放到后台后，
@@ -1962,7 +1992,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // 可用只读资料库时才进入 Harness；不可用范围也不能触发探测请求。
         const capability =
           libraryIds.length || attachmentCardId
-            ? await ensureProviderCapability()
+            ? await ensureProviderCapability(
+                false,
+                "ttl-expired",
+                undefined,
+                markModelRequest,
+              )
             : undefined;
         if (
           (libraryIds.length || attachmentCardId) &&
@@ -2060,6 +2095,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             answer = nextAnswer;
             throttle.push(answer);
           },
+          onModelRequest: markModelRequest,
           audit: agentAudit,
           protocolRecovery: {
             invalidateAndReprobe: () =>
@@ -2084,6 +2120,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         if (!controller.signal.aborted) {
           // 收尾 flush 只在正常结束时发生；中断路径永远不会走到这里。
           answer = outcome.directAnswer ?? gate.finish();
+          if (answer.trim()) markVisible();
           throttle.dispose();
           if (!answer.trim())
             throw new AgentRunFailure(
@@ -2100,7 +2137,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           const cited = controlledCitations(answer, outcome.readChunks);
           answer = cited.content;
           const agentRun = withHistoricalRetrievalEvidence(
-            outcome.trace,
+            withPerformance(outcome.trace),
             outcome.readChunks,
             outcome.searchHits ?? [],
           );
@@ -2157,12 +2194,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           });
         } else if (!controller.signal.aborted) {
           throttle.dispose();
+          markVisible();
           const message =
             error instanceof Error ? error.message : "模型生成失败。";
           const agentRun =
             error instanceof AgentRunFailure
               ? withHistoricalRetrievalEvidence(
-                  error.trace,
+                  withPerformance(error.trace),
                   error.readChunks,
                   error.searchHits,
                 )
@@ -2195,8 +2233,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }));
           showToast({ text: message });
         } else if (error instanceof AgentRunFailure) {
+          markVisible();
           const agentRun = withHistoricalRetrievalEvidence(
-            error.trace,
+            withPerformance(error.trace),
             error.readChunks,
             error.searchHits,
           );
@@ -2452,6 +2491,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               snapshotsSnapshot: [...snapshots, snapshot],
               references: [],
               relation: input.type,
+              requestedAt: newCard.turns[0].createdAt,
             }),
         }).catch(() => {
           showToast({
@@ -2481,11 +2521,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           !candidate.trashed,
       );
       if (!card) return;
+      const sentAt = Date.now();
       const userTurn: Turn = {
         id: uid("turn"),
         role: "user",
         content: text.trim(),
-        createdAt: Date.now(),
+        createdAt: sentAt,
         status: "complete",
       };
       const nextCard = { ...card, turns: [...card.turns, userTurn] };
@@ -2528,6 +2569,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         cardId: card.id,
         cardsSnapshot: nextCards,
         references: activeReferences,
+        requestedAt: sentAt,
       });
     },
     [
@@ -2547,7 +2589,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     if (!card) return;
     const user = [...card.turns].reverse().find((turn) => turn.role === "user");
     if (!user) return showToast({ text: "没有可重新生成的用户提问。" });
-    void streamAnswer({ cardId: card.id, cardsSnapshot: cards, references });
+    void streamAnswer({
+      cardId: card.id,
+      cardsSnapshot: cards,
+      references,
+      requestedAt: Date.now(),
+    });
   }, [
     cards,
     currentCardId,
@@ -2570,6 +2617,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         cardsSnapshot: cards,
         references,
         resumeTurnId: turnId,
+        requestedAt: Date.now(),
       }).finally(() => continuationClaimsRef.current.delete(turnId));
     },
     [

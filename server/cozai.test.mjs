@@ -12,7 +12,12 @@ import {
   providerErrorMessage,
   relayOpenAiStream,
 } from "./cozai.mjs";
-import { fakeCompletion, fakeToolCalls } from "./fake-provider.mjs";
+import {
+  emitFakeStream,
+  fakeCompletion,
+  fakeProviderDelayMs,
+  fakeToolCalls,
+} from "./fake-provider.mjs";
 
 /** 把若干条上游 SSE 帧喂给中继，返回它写出的全部文本。 */
 async function relay(frames) {
@@ -41,6 +46,35 @@ test("provider errors are mapped to readable Chinese messages", () => {
   assert.match(friendlyProviderError(401), /密钥/);
   assert.match(friendlyProviderError(429), /限流/);
   assert.match(friendlyProviderError(503), /暂时不可用/);
+});
+
+test("fake provider delay is deterministic, bounded and disabled by default", async () => {
+  assert.equal(fakeProviderDelayMs(undefined), 0);
+  assert.equal(fakeProviderDelayMs("125"), 125);
+  assert.equal(fakeProviderDelayMs("-1"), 0);
+  assert.equal(fakeProviderDelayMs("999999"), 60_000);
+  assert.equal(fakeProviderDelayMs("invalid"), 0);
+  const sleeps = [];
+  const chunks = [];
+  await emitFakeStream({
+    payload: {
+      task: "agent",
+      messages: [{ role: "user", content: "延迟验收" }],
+      tools: [{ function: { name: "search_notes" } }],
+    },
+    write: (chunk) => chunks.push(chunk),
+    signal: new AbortController().signal,
+    delayMs: 250,
+    sleepFor: async (ms) => {
+      sleeps.push(ms);
+    },
+  });
+  assert.deepEqual(sleeps, [250]);
+  const output = chunks
+    .map((chunk) => new TextDecoder().decode(chunk))
+    .join("");
+  assert.match(output, /tool-call-delta/);
+  assert.match(output, /event: done/);
 });
 
 test("provider error contract never forwards an upstream response body", () => {
