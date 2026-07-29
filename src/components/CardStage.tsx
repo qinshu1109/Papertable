@@ -38,7 +38,10 @@ import type {
   AgentTimelineNode,
   TrajectoryPromotionDraft,
 } from "../lib/agentTimeline";
-import { desktopTurnsForDisplay } from "../lib/desktopUi";
+import {
+  desktopAgentProgressText,
+  desktopTurnsForDisplay,
+} from "../lib/desktopUi";
 import { cutoffBeforeRerouteRound, isGoldEligible } from "../lib/verdicts";
 import { GoldAdoptionDialog } from "./GoldAdoptionDialog";
 
@@ -1697,6 +1700,14 @@ function TurnBlock({
   const [more, setMore] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState(false);
   const [questionDraft, setQuestionDraft] = useState("");
+  const [heartbeatNow, setHeartbeatNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!IS_DESKTOP_BUILD || !streaming || turn.role !== "ai") return;
+    const update = () => setHeartbeatNow(Date.now());
+    update();
+    const timer = window.setInterval(update, 1_000);
+    return () => window.clearInterval(timer);
+  }, [streaming, turn.createdAt, turn.role]);
   const terminal = turn.agentRun?.terminal;
   const resumableBudgetExit =
     terminal?.result === "partial" &&
@@ -1710,6 +1721,17 @@ function TurnBlock({
     Boolean(turn.agentRun) &&
     !terminal &&
     (turn.status === "stopped" || turn.status === "interrupted");
+  const agentProgress = turn.agentProgress ?? {
+    phase: turn.agentPhase ?? ("answering" as const),
+    round: (turn.agentRun?.budget?.used.rounds ?? 0) + 1,
+    searchCount: turn.agentRun?.searchQueries.length ?? 0,
+    hitCount: turn.agentRun?.hitCount ?? 0,
+    readCount: turn.agentRun?.readChunkIds.length ?? 0,
+  };
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor((heartbeatNow - turn.createdAt) / 1_000),
+  );
 
   if (turn.role === "user") {
     return (
@@ -1861,7 +1883,21 @@ function TurnBlock({
         />
       )}
 
-      {streaming && turn.content.length === 0 && (
+      {streaming && IS_DESKTOP_BUILD && (
+        <div
+          className="thinking"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          data-testid={`agent-progress-${turn.id}`}
+        >
+          <span className="dot-pulse" />
+          {desktopAgentProgressText(agentProgress)}
+          <span aria-hidden="true"> · {elapsedSeconds} 秒</span>
+        </div>
+      )}
+
+      {streaming && !IS_DESKTOP_BUILD && turn.content.length === 0 && (
         <div className="thinking" role="status" aria-live="polite">
           <span className="dot-pulse" />
           {turn.agentPhase === "searching"
@@ -1896,7 +1932,7 @@ function TurnBlock({
         </div>
       )}
 
-      {streaming && turn.agentRun && (
+      {streaming && turn.agentRun && !IS_DESKTOP_BUILD && (
         <div className="thinking" role="status" aria-live="polite">
           <span className="dot-pulse" />
           {IS_DESKTOP_BUILD ? "正在继续完成本轮…" : "正在继续深挖同一轮…"}

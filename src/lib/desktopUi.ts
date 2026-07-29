@@ -1,9 +1,19 @@
-import type { Turn } from "../types";
+import type { AgentProgress, Turn } from "../types";
 
 export const PROJECT_NAME_LIMIT = 60;
 
 export function normalizeProjectName(value: string): string {
   return value.normalize("NFC").replace(/\s+/gu, " ").trim();
+}
+
+export function desktopAgentProgressText(progress: AgentProgress): string {
+  const label =
+    progress.phase === "reading"
+      ? "正在阅读"
+      : progress.phase === "answering"
+        ? "正在整理"
+        : "正在探索";
+  return `${label} · 第 ${progress.round} 轮 · 已检索 ${progress.searchCount} 次 · 命中 ${progress.hitCount} 段 · 已读 ${progress.readCount} 段`;
 }
 
 /**

@@ -270,6 +270,13 @@ test("cold-start recovery settles streaming assistant turns and later context ex
         streaming: true,
         status: "streaming",
         agentPhase: "answering",
+        agentProgress: {
+          phase: "answering",
+          round: 2,
+          searchCount: 1,
+          hitCount: 2,
+          readCount: 1,
+        },
       },
       {
         id: "stopped",
@@ -303,6 +310,7 @@ test("cold-start recovery settles streaming assistant turns and later context ex
   assert.equal(partial?.streaming, false);
   assert.equal(partial?.content, "保留给用户的半句");
   assert.equal(partial?.agentPhase, undefined);
+  assert.equal(partial?.agentProgress, undefined);
 
   const built = buildContext({
     cards: recovered.cards,

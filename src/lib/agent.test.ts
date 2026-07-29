@@ -8,6 +8,7 @@ import {
   type AgentRuntime,
 } from "./agent";
 import type {
+  AgentProgress,
   BuiltContext,
   ProviderCapability,
   ProviderMessage,
@@ -110,7 +111,7 @@ test("failed capability probe refuses Agent admission without provider or host r
       yield { type: "done" };
     },
   });
-  const phases: string[] = [];
+  const phases: AgentProgress[] = [];
   const visible: string[] = [];
 
   await assert.rejects(
@@ -212,6 +213,90 @@ test("ordinary no-library chat remains a single deterministic provider stream", 
   assert.equal(searches, 0);
   assert.equal(reads, 0);
   assert.deepEqual(dispatchOrder, ["dispatch", "stream"]);
+});
+
+test("native progress reports only round and aggregate retrieval counts", async () => {
+  const first = chunk("progress-first");
+  const second = chunk("progress-second");
+  const progress: AgentProgress[] = [];
+  let request = 0;
+  await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: (value) => progress.push(value),
+    onToken: () => undefined,
+    runtime: baseRuntime({
+      stream: () => {
+        request += 1;
+        if (request === 1)
+          return events([
+            {
+              type: "tool-call-delta",
+              index: 0,
+              id: "progress-search",
+              name: "search_notes",
+              arguments: '{"query":"SECRET_QUERY"}',
+            },
+            { type: "done", finishReason: "tool_calls" },
+          ]);
+        if (request === 2)
+          return events([
+            {
+              type: "tool-call-delta",
+              index: 0,
+              id: "progress-read",
+              name: "read_notes",
+              arguments: `{"chunkIds":["${first.id}"]}`,
+            },
+            { type: "done", finishReason: "tool_calls" },
+          ]);
+        if (request === 3)
+          return events([{ type: "done", finishReason: "length" }]);
+        return events([
+          { type: "token", text: "完成。", channel: "final" },
+          { type: "done", finishReason: "stop" },
+        ]);
+      },
+      search: async () => [hit(first), hit(second)],
+      read: async () => [first],
+    }),
+  });
+
+  assert.ok(
+    progress.some(
+      (value) =>
+        value.phase === "searching" &&
+        value.searchCount === 1 &&
+        value.hitCount === 2,
+    ),
+  );
+  assert.ok(
+    progress.some(
+      (value) => value.phase === "reading" && value.readCount === 1,
+    ),
+  );
+  const finalProgress = progress[progress.length - 1];
+  assert.deepEqual(finalProgress, {
+    phase: "searching",
+    round: 3,
+    searchCount: 1,
+    hitCount: 2,
+    readCount: 1,
+  });
+  assert.deepEqual(Object.keys(finalProgress ?? {}).sort(), [
+    "hitCount",
+    "phase",
+    "readCount",
+    "round",
+    "searchCount",
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(progress),
+    /SECRET_QUERY|progress-first|progress-second|chunkIds/,
+  );
 });
 
 test("desktop library runs record usage past legacy limits and stop on the minimum sufficient path", async () => {
@@ -993,6 +1078,7 @@ function budgetExhaustionRuntime(options: {
 
 test("exhausted round budget plus successful final synthesis is partial and truncated", async () => {
   const visible: string[] = [];
+  const progress: AgentProgress[] = [];
   const requests: Parameters<AgentRuntime["stream"]>[0][] = [];
   const outcome = await runAgentTurn({
     built: built("general"),
@@ -1000,7 +1086,7 @@ test("exhausted round budget plus successful final synthesis is partial and trun
     libraryIds: ["library-a"],
     capability: capability("native-tools"),
     signal: new AbortController().signal,
-    onPhase: () => undefined,
+    onPhase: (value) => progress.push(value),
     onToken: (event) => visible.push(event.text),
     runtime: budgetExhaustionRuntime({ final: "success", requests }),
   });
@@ -1035,6 +1121,29 @@ test("exhausted round budget plus successful final synthesis is partial and trun
   assert.doesNotMatch(finalContext, /budget-unread-hit/);
   assert.doesNotMatch(finalContext, /尚未通过 read_notes 读取/);
   assert.doesNotMatch(finalContext, /你必须主动使用只读工具检索这些材料/);
+  assert.equal(progress[progress.length - 1]?.phase, "answering");
+  const evidenceContent =
+    finalRequest?.messages[finalRequest.messages.length - 1]?.content ?? "";
+  const compactEvidence = evidenceContent.split("\n", 2)[1] ?? "";
+  const parsedEvidence = JSON.parse(compactEvidence) as Record<string, unknown>;
+  const prettyEvidence = JSON.stringify(parsedEvidence, null, 2);
+  assert.equal(compactEvidence, JSON.stringify(parsedEvidence));
+  assert.deepEqual(JSON.parse(compactEvidence), JSON.parse(prettyEvidence));
+  assert.deepEqual(Object.keys(parsedEvidence), [
+    "schemaVersion",
+    "objective",
+    "answerMode",
+    "stop",
+    "evidenceBoundary",
+    "verifiedReadChunks",
+  ]);
+  assert.ok(
+    Buffer.byteLength(compactEvidence) < Buffer.byteLength(prettyEvidence),
+  );
+  assert.ok(
+    Math.ceil(compactEvidence.length / 1.7) <
+      Math.ceil(prettyEvidence.length / 1.7),
+  );
 });
 
 test("transport retry attempts do not consume the remaining semantic round", async () => {

@@ -286,6 +286,13 @@ test("a committed continuation claim is recovered as interrupted, not as the old
       content: "A-42 已确认，B-99 尚未查清。",
       createdAt: 1,
       status: "complete",
+      agentProgress: {
+        phase: "searching",
+        round: 2,
+        searchCount: 2,
+        hitCount: 1,
+        readCount: 1,
+      },
       agentRun: {
         ...trace,
         terminal: { result: "partial", reason: "rounds_exhausted" },
@@ -296,6 +303,7 @@ test("a committed continuation claim is recovered as interrupted, not as the old
   assert.equal(recovered.status, "interrupted");
   assert.equal(recovered.agentRun?.terminal, undefined);
   assert.equal(recovered.content, "A-42 已确认，B-99 尚未查清。");
+  assert.equal(recovered.agentProgress, undefined);
 });
 
 test("bounded partial adds budget to the same run and resumes without replaying completed tools", async () => {

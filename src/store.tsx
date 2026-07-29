@@ -58,6 +58,7 @@ import {
   runAgentTurn,
   type AgentOutcome,
 } from "./lib/agent";
+import { readAgentPreflight } from "./lib/agentPreflight";
 import { agentRunPerformance } from "./lib/agentPerformance";
 import {
   agentTerminalErrorMessage,
@@ -131,6 +132,7 @@ import { EDGE_META } from "./types";
 import type {
   AnswerMode,
   AgentExecutionMode,
+  AgentProgress,
   AgentRunTrace,
   AppSettings,
   AttentionMetrics,
@@ -1741,7 +1743,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 ...card,
                 turns: card.turns.map((turn) =>
                   turn.id === id
-                    ? { ...turn, streaming: false, status: "stopped" }
+                    ? {
+                        ...turn,
+                        streaming: false,
+                        status: "stopped",
+                        agentPhase: undefined,
+                        agentProgress: undefined,
+                      }
                     : turn,
                 ),
               }
@@ -1857,6 +1865,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }),
       });
       const aiId = existingTurn?.id ?? uid("turn");
+      const initialProgress: AgentProgress = {
+        phase: "searching",
+        round: (existingTurn?.agentRun?.budget?.used.rounds ?? 0) + 1,
+        searchCount: existingTurn?.agentRun?.searchQueries.length ?? 0,
+        hitCount: existingTurn?.agentRun?.hitCount ?? 0,
+        readCount: existingTurn?.agentRun?.readChunkIds.length ?? 0,
+      };
       const aiTurn: Turn = existingTurn
         ? {
             ...existingTurn,
@@ -1864,6 +1879,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             status: "streaming",
             error: undefined,
             agentPhase: "searching",
+            agentProgress: initialProgress,
           }
         : {
             id: aiId,
@@ -1873,6 +1889,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             streaming: true,
             status: "streaming",
             model: settings.model,
+            agentPhase: "searching",
+            agentProgress: initialProgress,
           };
       const newAgentRunId = uid("agent-run");
       let agentAudit = {
@@ -1943,45 +1961,61 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         const question =
           [...target.turns].reverse().find((turn) => turn.role === "user")
             ?.content ?? "";
-        const verdictContext = existingTurn?.verdictTrace
-          ? {
-              trace: existingTurn.verdictTrace,
-              items: verdictContextFromTrace(existingTurn.verdictTrace),
-            }
-          : await loadVerdictContext({
-              host: verdicts,
-              projectId: target.projectId,
-              question,
-              title: target.title,
-              concepts: target.concepts,
+        const preflight = await readAgentPreflight({
+          verdict: () =>
+            existingTurn?.verdictTrace
+              ? Promise.resolve({
+                  trace: existingTurn.verdictTrace,
+                  items: verdictContextFromTrace(existingTurn.verdictTrace),
+                })
+              : loadVerdictContext({
+                  host: verdicts,
+                  projectId: target.projectId,
+                  question,
+                  title: target.title,
+                  concepts: target.concepts,
+                }),
+          persistVerdict: async (verdictContext) => {
+            const auditedAiTurn = {
+              ...aiTurn,
+              verdictTrace: verdictContext.trace,
+            };
+            updateCard(input.cardId, (card) => ({
+              ...card,
+              turns: card.turns.map((turn) =>
+                turn.id === aiId ? auditedAiTurn : turn,
+              ),
+            }));
+            // Agent audit events reference this Turn. Its frozen verdict must
+            // be durable before any append-only event can be written.
+            await applyChanges({
+              projects: { upserts: [] },
+              cards: { upserts: [] },
+              turns: { upserts: [{ ...auditedAiTurn, cardId: input.cardId }] },
+              edges: { upserts: [] },
+              anchors: { upserts: [] },
+              snapshots: { upserts: [] },
+              references: { upserts: [] },
+              view: null,
+              settings: null,
             });
-        const auditedAiTurn = {
-          ...aiTurn,
-          verdictTrace: verdictContext.trace,
-        };
-        updateCard(input.cardId, (card) => ({
-          ...card,
-          turns: card.turns.map((turn) =>
-            turn.id === aiId ? auditedAiTurn : turn,
-          ),
-        }));
-        // TASK-005 budget events reference the turn row. Commit that one row
-        // before the first append-only Agent event instead of racing the
-        // ordinary 500 ms streaming autosave.
-        await applyChanges({
-          projects: { upserts: [] },
-          cards: { upserts: [] },
-          turns: { upserts: [{ ...auditedAiTurn, cardId: input.cardId }] },
-          edges: { upserts: [] },
-          anchors: { upserts: [] },
-          snapshots: { upserts: [] },
-          references: { upserts: [] },
-          view: null,
-          settings: null,
+          },
+          resumeAudit: () =>
+            input.resumeTurnId
+              ? loadAgentAudit(input.resumeTurnId)
+              : Promise.resolve(null),
+          libraryIds: () => noteLibraries.projectLibraryIds(target.projectId),
+          attachments: () =>
+            input.resumeTurnId
+              ? Promise.resolve<Attachment[]>([])
+              : attachments.list(input.cardId),
         });
-        const resumeAudit = input.resumeTurnId
-          ? await loadAgentAudit(input.resumeTurnId)
-          : null;
+        const {
+          verdict: verdictContext,
+          resumeAudit,
+          libraryIds: currentlyBoundLibraryIds,
+          attachments: attachmentRows,
+        } = preflight;
         const built = buildContext({
           cards: input.cardsSnapshot,
           edges: input.edgesSnapshot ?? edges,
@@ -1998,9 +2032,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         // 资料库绑定和“当前可用”是不同事实。桌面端在这一轮开始时重新检查
         // Vault 根目录，失效库绝不能继续把旧 SQLite 索引喂给模型。后续搜索/read
         // 仍会在 Rust 宿主侧再次检查，防止本轮运行中目录又被移走。
-        const currentlyBoundLibraryIds = await noteLibraries.projectLibraryIds(
-          target.projectId,
-        );
         const frozenLibraryIds =
           resumeAudit?.kind === "event-sourced"
             ? resumeAudit.run.checkpoint.hostScope?.libraryIds
@@ -2014,39 +2045,43 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             attachmentScope(resumeAudit.run.checkpoint.hostScope?.cardId ?? "")
             ? resumeAudit.run.checkpoint.hostScope.cardId
             : undefined;
-        const attachmentRows = input.resumeTurnId
-          ? []
-          : await attachments.list(input.cardId);
         const attachmentCardId = input.resumeTurnId
           ? frozenAttachmentCardId
           : attachmentRows.length
             ? input.cardId
             : undefined;
-        const libraries = scopeLibraryIds.length
-          ? await noteLibraries.listLibraries()
-          : [];
+        const liveScopePromise =
+          vault.available && scopeLibraryIds.length
+            ? desktopProjectNoteScope(target.projectId).then(
+                (resolved) => ({ ok: true as const, resolved }),
+                () => ({ ok: false as const }),
+              )
+            : Promise.resolve(null);
+        const [libraries, liveScope] = await Promise.all([
+          scopeLibraryIds.length
+            ? noteLibraries.listLibraries()
+            : Promise.resolve<NoteLibrary[]>([]),
+          liveScopePromise,
+        ]);
         let libraryIds = scopeLibraryIds;
         let unavailableLibraries: Array<{ name: string; reason: string }> = [];
-        if (vault.available && scopeLibraryIds.length) {
-          try {
-            const resolved = await desktopProjectNoteScope(target.projectId);
-            libraryIds = resolved.availableLibraryIds.filter((id) =>
-              scopeLibraryIds.includes(id),
-            );
-            unavailableLibraries = resolved.unavailableLibraries
-              .filter((library) => scopeLibraryIds.includes(library.id))
-              .map(({ name, reason }) => ({ name, reason }));
-          } catch {
-            // Scope status itself is a host operation.  If it cannot be read,
-            // fail closed rather than silently falling back to stale indexes.
-            libraryIds = [];
-            unavailableLibraries = scopeLibraryIds.map((id) => ({
-              name:
-                libraries.find((library) => library.id === id)?.name ??
-                "已绑定资料库",
-              reason: "无法确认资料库当前是否可用。",
-            }));
-          }
+        if (liveScope?.ok) {
+          libraryIds = liveScope.resolved.availableLibraryIds.filter((id) =>
+            scopeLibraryIds.includes(id),
+          );
+          unavailableLibraries = liveScope.resolved.unavailableLibraries
+            .filter((library) => scopeLibraryIds.includes(library.id))
+            .map(({ name, reason }) => ({ name, reason }));
+        } else if (liveScope) {
+          // Scope status itself is a host operation. If it cannot be read,
+          // fail closed rather than silently falling back to stale indexes.
+          libraryIds = [];
+          unavailableLibraries = scopeLibraryIds.map((id) => ({
+            name:
+              libraries.find((library) => library.id === id)?.name ??
+              "已绑定资料库",
+            reason: "无法确认资料库当前是否可用。",
+          }));
         }
         const allBoundLibrariesUnavailable =
           scopeLibraryIds.length > 0 &&
@@ -2064,6 +2099,27 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             id: attachmentScope(attachmentCardId),
             name: "当前卡片附件",
           });
+        if (resumeAudit?.kind === "event-sourced") {
+          agentAudit = {
+            runId: resumeAudit.run.id,
+            turnId: aiId,
+            appendStep: appendAgentStep,
+            hostScope: resumeAudit.run.checkpoint.hostScope,
+            eventIdSuffix: `resume-${resumeAudit.run.lastSequence}`,
+            objective: resumeAudit.run.checkpoint.objective,
+          };
+        } else {
+          agentAudit.hostScope = {
+            projectId: target.projectId,
+            libraryIds: [...libraryIds],
+            ...(attachmentCardId
+              ? {
+                  cardId: attachmentCardId,
+                  attachmentScope: attachmentScope(attachmentCardId),
+                }
+              : {}),
+          };
+        }
         // 普通卡片聊天不需要先花一次真实模型请求探测工具能力。只有本轮仍有
         // 可用只读资料库时才进入 Harness；不可用范围也不能触发探测请求。
         const capability =
@@ -2122,25 +2178,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           : undefined;
         if (resumeAudit?.kind === "event-sourced") {
           continuationClaimed = true;
-          agentAudit = {
-            runId: resumeAudit.run.id,
-            turnId: aiId,
-            appendStep: appendAgentStep,
-            hostScope: resumeAudit.run.checkpoint.hostScope,
-            eventIdSuffix: `resume-${resumeAudit.run.lastSequence}`,
-            objective: resumeAudit.run.checkpoint.objective,
-          };
-        } else {
-          agentAudit.hostScope = {
-            projectId: target.projectId,
-            libraryIds: [...libraryIds],
-            ...(attachmentCardId
-              ? {
-                  cardId: attachmentCardId,
-                  attachmentScope: attachmentScope(attachmentCardId),
-                }
-              : {}),
-          };
         }
         const builtForRun = withNoteScopeAvailabilityNotice(
           built,
@@ -2155,12 +2192,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           capability,
           resume,
           signal: controller.signal,
-          onPhase: (agentPhase) =>
+          onPhase: (agentProgress) =>
             updateCard(input.cardId, (card) => ({
               ...card,
               turns: card.turns.map((turn) =>
                 turn.id === aiId && turn.status === "streaming"
-                  ? { ...turn, agentPhase }
+                  ? {
+                      ...turn,
+                      agentPhase: agentProgress.phase,
+                      agentProgress,
+                    }
                   : turn,
               ),
             })),
@@ -2227,6 +2268,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                     streaming: false,
                     status: "complete",
                     agentPhase: undefined,
+                    agentProgress: undefined,
                     agentRun,
                     citations: cited.citations,
                   }
@@ -2302,6 +2344,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                         ? answer
                         : answer || "生成失败。",
                     agentPhase: undefined,
+                    agentProgress: undefined,
                     ...(agentRun ? { agentRun } : {}),
                   }
                 : turn,
@@ -2324,6 +2367,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                     streaming: false,
                     status: "stopped",
                     agentPhase: undefined,
+                    agentProgress: undefined,
                     agentRun: {
                       ...agentRun,
                       terminal: undefined,
