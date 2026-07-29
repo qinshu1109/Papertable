@@ -344,6 +344,28 @@ async function importReadOnlyFixture(page: import("@playwright/test").Page) {
   await expect(page.getByText(/已建立只读资料库：1 篇笔记/)).toBeVisible();
 }
 
+async function askLibraryQuestion(
+  page: import("@playwright/test").Page,
+  question: string,
+) {
+  await page.getByRole("textbox", { name: "提问输入框" }).fill(question);
+  await page.getByRole("button", { name: "发送" }).click();
+}
+
+async function latestAssistantTurn(page: import("@playwright/test").Page) {
+  const state = await workspaceCounts(page);
+  return (
+    state.turns as Array<{
+      role?: string;
+      content: string;
+      createdAt: number;
+      status?: string;
+    }>
+  )
+    .filter((turn) => turn.role === "ai")
+    .sort((left, right) => right.createdAt - left.createdAt)[0];
+}
+
 async function seedLongAnswer(page: import("@playwright/test").Page) {
   const content =
     "# 一段用于长文阅读器验收的回答\n\n" +
@@ -1643,6 +1665,196 @@ test("a read-only library uses bounded tools, renders a controlled citation, and
   await expect(
     page.getByText("在已绑定的只读资料库中没有找到足够证据"),
   ).toBeVisible();
+});
+
+test("final synthesis previews stream ephemerally and only the validated repair is committed", async ({
+  page,
+}) => {
+  await openExploration(page);
+  await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
+  await importReadOnlyFixture(page);
+  await page.evaluate(() => {
+    const target = window as typeof window & {
+      task022PreviewAudit?: {
+        sawPreview: boolean;
+        sawProtocolPrefix: boolean;
+        sawCitationMarker: boolean;
+      };
+    };
+    target.task022PreviewAudit = {
+      sawPreview: false,
+      sawProtocolPrefix: false,
+      sawCitationMarker: false,
+    };
+    const inspect = () => {
+      const text = document.body.innerText;
+      const audit = target.task022PreviewAudit!;
+      audit.sawPreview ||= Boolean(
+        document.querySelector('[data-synthesis-preview="true"]'),
+      );
+      audit.sawProtocolPrefix ||= /<too|tool_call>/u.test(text);
+      audit.sawCitationMarker ||= text.includes("[[source:");
+    };
+    new MutationObserver(inspect).observe(document.body, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    inspect();
+  });
+
+  await askLibraryQuestion(page, "安全最终预览：海蓝计划的内部代号是什么？");
+  const preview = page.locator('[data-synthesis-preview="true"]');
+  await expect(preview).toContainText("安全最终预览第一句已经进入临时预览");
+  expect(await latestAssistantTurn(page)).toEqual(
+    expect.objectContaining({ content: "", status: "streaming" }),
+  );
+  await expect(preview).not.toContainText("[[source:");
+  await expect(page.getByText(/后续正文持续到达/)).toBeVisible();
+  await expect(preview).toHaveCount(0);
+  await expect(page.getByLabel("笔记引用").last()).toBeVisible();
+
+  await askLibraryQuestion(
+    page,
+    "预览协议重发：海蓝计划内部代号 ORBIT-97，只保留修复后的回答",
+  );
+  await expect(page.getByText("协议修复后的唯一正式回答。")).toBeVisible();
+  await expect(page.getByRole("article")).toContainText("协议修复 1 次");
+  await expect(preview).toHaveCount(0);
+  await expect(page.getByRole("article")).not.toContainText(
+    "旧预览草稿不得保留",
+  );
+  await expect(page.getByRole("article")).not.toContainText("<tool_call>");
+  await expect
+    .poll(async () => {
+      const turn = await latestAssistantTurn(page);
+      return { content: turn?.content, status: turn?.status };
+    })
+    .toEqual({
+      content: "协议修复后的唯一正式回答。",
+      status: "complete",
+    });
+
+  await askLibraryQuestion(
+    page,
+    "预览伪引用：海蓝计划内部代号 ORBIT-97，验证引用控制标记",
+  );
+  await expect(preview).toContainText("可信事实正在逐字预览");
+  await expect(preview).not.toContainText("[[source:");
+  await expect(page.getByText("伪引用不会成为有效引用。")).toBeVisible();
+  await expect(preview).toHaveCount(0);
+  const current = await latestAssistantTurn(page);
+  expect(current?.content).not.toContain("[[source:");
+  expect(current?.content).not.toContain("forged-preview-id");
+
+  await page.evaluate(() => {
+    const target = window as typeof window & {
+      task022NoSentinelPreview?: boolean;
+    };
+    target.task022NoSentinelPreview = false;
+    const inspect = () => {
+      target.task022NoSentinelPreview ||= Boolean(
+        document.querySelector('[data-synthesis-preview="true"]'),
+      );
+    };
+    new MutationObserver(inspect).observe(document.body, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    inspect();
+  });
+  await askLibraryQuestion(
+    page,
+    "预览无哨兵：海蓝计划内部代号 ORBIT-97，完整结束前不要展示",
+  );
+  await expect(
+    page.getByText("这是没有哨兵的最终综合，只能在完整校验后整体提交。"),
+  ).toBeVisible();
+  await expect(preview).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            task022NoSentinelPreview?: boolean;
+          }
+        ).task022NoSentinelPreview,
+    ),
+  ).toBe(false);
+
+  const audit = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          task022PreviewAudit?: {
+            sawPreview: boolean;
+            sawProtocolPrefix: boolean;
+            sawCitationMarker: boolean;
+          };
+        }
+      ).task022PreviewAudit,
+  );
+  expect(audit).toEqual({
+    sawPreview: true,
+    sawProtocolPrefix: false,
+    sawCitationMarker: false,
+  });
+  const persisted = JSON.stringify((await workspaceCounts(page)).turns);
+  expect(persisted).not.toContain("旧预览草稿不得保留");
+  expect(persisted).not.toContain("tool_call");
+  expect(persisted).not.toContain("[[source:");
+  expect(persisted).not.toContain("forged-preview-id");
+});
+
+test("stopping or reloading discards final synthesis preview without changing formal content", async ({
+  page,
+}) => {
+  await openExploration(page);
+  await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
+  await importReadOnlyFixture(page);
+  const preview = page.locator('[data-synthesis-preview="true"]');
+
+  await askLibraryQuestion(
+    page,
+    "预览停止：海蓝计划内部代号 ORBIT-97，不要把临时正文落盘",
+  );
+  await expect(preview).toContainText("预览停止第一句已经进入临时预览");
+  expect(await latestAssistantTurn(page)).toEqual(
+    expect.objectContaining({ content: "", status: "streaming" }),
+  );
+  await page.getByRole("button", { name: "停止生成" }).click();
+  await expect(preview).toHaveCount(0);
+  await expect(
+    page.getByText("已停止，未产生可显示的最终文本。"),
+  ).toBeVisible();
+  await page.waitForTimeout(700);
+  expect(await latestAssistantTurn(page)).toEqual(
+    expect.objectContaining({ content: "", status: "stopped" }),
+  );
+
+  await askLibraryQuestion(
+    page,
+    "预览崩溃：海蓝计划内部代号 ORBIT-97，重载后必须丢弃临时正文",
+  );
+  await expect(preview).toContainText("预览崩溃第一句已经进入临时预览");
+  expect(await latestAssistantTurn(page)).toEqual(
+    expect.objectContaining({ content: "", status: "streaming" }),
+  );
+  await page.reload();
+  await continueExploration(page);
+  await expect(preview).toHaveCount(0);
+  expect(await latestAssistantTurn(page)).toEqual(
+    expect.objectContaining({ content: "", status: "interrupted" }),
+  );
+  await page.waitForTimeout(700);
+  expect(JSON.stringify((await workspaceCounts(page)).turns)).not.toContain(
+    "第一句已经进入临时预览",
+  );
 });
 
 test("a card attachment stays scoped, promotes explicitly, and keeps frozen evidence after deletion", async ({

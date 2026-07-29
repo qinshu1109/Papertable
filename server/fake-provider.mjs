@@ -75,6 +75,47 @@ function lastUserMessage(payload) {
   );
 }
 
+const TASK_022_TAGS = [
+  "安全最终预览",
+  "预览协议重发",
+  "预览停止",
+  "预览崩溃",
+  "预览无哨兵",
+  "预览伪引用",
+  "预览长度重发",
+  "预览空响应重发",
+];
+
+function task022Tag(payload) {
+  const text = lastUserMessage(payload);
+  return TASK_022_TAGS.find((tag) => text.includes(tag)) ?? null;
+}
+
+function finalSynthesis(payload) {
+  const choice = payload.toolChoice ?? payload.tool_choice;
+  return (
+    payload.task === "agent" &&
+    choice === "none" &&
+    !Array.isArray(payload.tools)
+  );
+}
+
+function finalSynthesisRepair(payload) {
+  return (payload.messages ?? []).some((message) =>
+    message?.content?.includes("协议修复：上一次最终综合"),
+  );
+}
+
+function finalEvidenceChunkId(payload) {
+  const text = (payload.messages ?? [])
+    .map((message) => message?.content ?? "")
+    .join("\n");
+  return (
+    text.match(/"verifiedReadChunks":\[\{"chunkId":"([^"]+)"/u)?.[1] ??
+    "forged-preview-id"
+  );
+}
+
 function requestedToolName(payload) {
   const tools = Array.isArray(payload.tools) ? payload.tools : [];
   if (!tools.length) return null;
@@ -180,6 +221,33 @@ export function fakeCompletion(payload) {
     .filter((message) => message?.role === "system")
     .map((message) => message.content ?? "")
     .join("\n");
+  const previewTag = task022Tag(payload);
+  if (previewTag && finalSynthesis(payload)) {
+    const id = finalEvidenceChunkId(payload);
+    if (previewTag === "预览协议重发")
+      return finalSynthesisRepair(payload)
+        ? `${S}协议修复后的唯一正式回答。[[source:${id}]]`
+        : `${S}${"旧预览草稿不得保留。".repeat(8)}<tool_call>泄漏协议</tool_call>`;
+    if (previewTag === "预览无哨兵")
+      return "这是没有哨兵的最终综合，只能在完整校验后整体提交。";
+    if (previewTag === "预览伪引用")
+      return (
+        `${S}可信事实正在逐字预览。[[source:${id}]]` +
+        "引用控制标记在正式校验前只按普通控制数据处理。".repeat(6) +
+        "伪引用不会成为有效引用。[[source:forged-preview-id]]"
+      );
+    if (previewTag === "预览长度重发" && finalSynthesisRepair(payload))
+      return `${S}长度修复后的唯一正式回答。[[source:${id}]]`;
+    if (previewTag === "预览空响应重发" && finalSynthesisRepair(payload))
+      return `${S}空响应修复后的唯一正式回答。[[source:${id}]]`;
+    return (
+      `${S}${previewTag}第一句已经进入临时预览。` +
+      "后续正文持续到达，但在完整协议、长度和引用门禁通过前不会写入正式轮次。".repeat(
+        8,
+      ) +
+      `[[source:${id}]]`
+    );
+  }
   if (payload.task === "agent" && systemText.includes("只读笔记检索规划器")) {
     return JSON.stringify({ queries: [topic] });
   }
@@ -229,17 +297,52 @@ export async function emitFakeStream({
     return;
   }
   const content = fakeCompletion(payload);
+  const previewTag = task022Tag(payload);
+  const isFinalSynthesis = finalSynthesis(payload);
+  const isRepair = finalSynthesisRepair(payload);
+  if (previewTag === "预览空响应重发" && isFinalSynthesis && !isRepair) {
+    write(sseEvent("done", { stopped: false }));
+    return;
+  }
   // 真实网关会在本机丢弃独立草稿；前端仍以正文哨兵而非服务端标记放行。
   const channel = "unknown";
   // 按码点切块。曾经用 `content.match(/.{1,8}/gu)`，而 `.` 不匹配换行符——它会
   // 静默吞掉流式内容里的每一个 \n，段落边界因此永远不会到达前端。
   const points = Array.from(content);
-  for (let i = 0; i < points.length; i += 8) {
+  const protocolStart =
+    previewTag === "预览协议重发" && isFinalSynthesis && !isRepair
+      ? points.join("").indexOf("<tool_call>")
+      : -1;
+  const chunks =
+    protocolStart >= 0
+      ? [
+          points.slice(0, protocolStart + 4).join(""),
+          points.slice(protocolStart + 4, protocolStart + 9).join(""),
+          points.slice(protocolStart + 9).join(""),
+        ]
+      : Array.from({ length: Math.ceil(points.length / 8) }, (_, index) =>
+          points.slice(index * 8, index * 8 + 8).join(""),
+        );
+  for (const text of chunks) {
     if (signal?.aborted) break;
-    write(
-      sseEvent("token", { text: points.slice(i, i + 8).join(""), channel }),
-    );
+    write(sseEvent("token", { text, channel }));
     await sleepFor(25);
   }
-  write(sseEvent("done", { stopped: Boolean(signal?.aborted) }));
+  const forceSynthesis =
+    previewTag &&
+    !isFinalSynthesis &&
+    (payload.messages ?? []).some(
+      (message) =>
+        message?.role === "tool" &&
+        (message?.content ?? "").includes('"chunks"'),
+    );
+  write(
+    sseEvent("done", {
+      stopped: Boolean(signal?.aborted),
+      ...(forceSynthesis ||
+      (previewTag === "预览长度重发" && isFinalSynthesis && !isRepair)
+        ? { finishReason: "length" }
+        : {}),
+    }),
+  );
 }

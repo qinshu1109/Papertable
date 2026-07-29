@@ -181,6 +181,7 @@ export function CardStage() {
     continueAgentRun,
     lastCreated,
     streamingTurnId,
+    synthesisPreviews,
     showToast,
   } = useStore();
 
@@ -376,9 +377,10 @@ export function CardStage() {
     [currentCardId, setCurrentCard],
   );
 
-  const streamingContentLength =
-    card?.turns.find((turn) => turn.id === streamingTurnId)?.content.length ??
-    0;
+  const streamingContentLength = streamingTurnId
+    ? (card?.turns.find((turn) => turn.id === streamingTurnId)?.content
+        .length ?? 0) + (synthesisPreviews[streamingTurnId]?.length ?? 0)
+    : 0;
 
   /* ---------- 流式时只在用户仍跟随末尾时自动滚动 ---------- */
   useEffect(() => {
@@ -1123,6 +1125,7 @@ export function CardStage() {
                     index={aiTurns.findIndex((t) => t.id === turn.id) + 1}
                     isBranchPoint={flashTurn === turn.id}
                     streaming={streamingTurnId === turn.id}
+                    previewContent={synthesisPreviews[turn.id] ?? ""}
                     selectionActive={
                       !IS_DESKTOP_BUILD &&
                       sel?.scope === "selection" &&
@@ -1657,6 +1660,7 @@ function TurnBlock({
   index,
   isBranchPoint,
   streaming,
+  previewContent,
   selectionActive,
   onConcept,
   onChild,
@@ -1678,6 +1682,7 @@ function TurnBlock({
   index: number;
   isBranchPoint: boolean;
   streaming: boolean;
+  previewContent: string;
   selectionActive: boolean;
   onConcept: (term: string, blockText: string, el: HTMLElement) => void;
   onChild: () => void;
@@ -1732,6 +1737,7 @@ function TurnBlock({
     0,
     Math.floor((heartbeatNow - turn.createdAt) / 1_000),
   );
+  const displayContent = turn.content || previewContent;
 
   if (turn.role === "user") {
     return (
@@ -1897,7 +1903,7 @@ function TurnBlock({
         </div>
       )}
 
-      {streaming && !IS_DESKTOP_BUILD && turn.content.length === 0 && (
+      {streaming && !IS_DESKTOP_BUILD && !displayContent && (
         <div className="thinking" role="status" aria-live="polite">
           <span className="dot-pulse" />
           {turn.agentPhase === "searching"
@@ -1961,17 +1967,23 @@ function TurnBlock({
         </div>
       )}
 
-      <div className="md" data-turn-ai={turn.id}>
+      <div
+        className="md"
+        data-turn-ai={turn.id}
+        data-synthesis-preview={
+          !turn.content && previewContent ? "true" : undefined
+        }
+      >
         <Markdown
           content={
-            unicodeLength(turn.content) > TURN_PREVIEW_LIMIT
-              ? `${unicodeSlice(turn.content, TURN_PREVIEW_LIMIT)}\n\n…`
-              : turn.content
+            unicodeLength(displayContent) > TURN_PREVIEW_LIMIT
+              ? `${unicodeSlice(displayContent, TURN_PREVIEW_LIMIT)}\n\n…`
+              : displayContent
           }
           concepts={card.concepts}
           onConcept={onConcept}
         />
-        {streaming && turn.content.length > 0 && <span className="caret" />}
+        {streaming && displayContent.length > 0 && <span className="caret" />}
       </div>
       {unicodeLength(turn.content) > TURN_PREVIEW_LIMIT && (
         <div className="long-turn-preview">
