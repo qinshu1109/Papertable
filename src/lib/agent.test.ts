@@ -16,6 +16,7 @@ import type {
 } from "../types";
 import type { NoteChunk, NoteHit } from "./notes/types";
 import { ProviderError, providerErrorMessage } from "./provider/http";
+import type { SynthesisPreviewEvent } from "./synthesisPreview";
 
 const capability = (mode: ProviderCapability["mode"]): ProviderCapability => ({
   schemaVersion: 1,
@@ -983,7 +984,13 @@ test("controlled citations delete forged markers instead of making them renderab
 });
 
 function budgetExhaustionRuntime(options: {
-  final: "success" | "empty" | "tool-call";
+  final:
+    | "success"
+    | "empty"
+    | "tool-call"
+    | "leak-then-success"
+    | "length-then-success"
+    | "empty-then-success";
   requests?: Parameters<AgentRuntime["stream"]>[0][];
   onSearch?: () => void;
 }): AgentRuntime {
@@ -1051,6 +1058,58 @@ function budgetExhaustionRuntime(options: {
           },
           { type: "done", finishReason: "stop" },
         ]);
+      if (options.final === "leak-then-success")
+        return request === 5
+          ? events([
+              {
+                type: "token",
+                text: "<<<PAPERTABLE_ANSWER>>>旧草稿。<too",
+                channel: "unknown",
+              },
+              {
+                type: "token",
+                text: "l_call>不得提交",
+                channel: "unknown",
+              },
+              { type: "done", finishReason: "stop" },
+            ])
+          : events([
+              {
+                type: "token",
+                text: `<<<PAPERTABLE_ANSWER>>>修复后的正式回答。[[source:${allowed.id}]]`,
+                channel: "unknown",
+              },
+              { type: "done", finishReason: "stop" },
+            ]);
+      if (options.final === "length-then-success")
+        return request === 5
+          ? events([
+              {
+                type: "token",
+                text: "<<<PAPERTABLE_ANSWER>>>长度截断旧预览",
+                channel: "unknown",
+              },
+              { type: "done", finishReason: "length" },
+            ])
+          : events([
+              {
+                type: "token",
+                text: "<<<PAPERTABLE_ANSWER>>>长度修复正式回答",
+                channel: "unknown",
+              },
+              { type: "done", finishReason: "stop" },
+            ]);
+      if (options.final === "empty-then-success")
+        return request <= 7
+          ? events([{ type: "done", finishReason: "stop" }])
+          : events([
+              {
+                type: "token",
+                text: "<<<PAPERTABLE_ANSWER>>>空响应修复正式回答",
+                channel: "unknown",
+              },
+              { type: "done", finishReason: "stop" },
+            ]);
       if (options.final === "tool-call")
         return events([
           {
@@ -1246,6 +1305,79 @@ test("exhausted budget plus empty synthesis and exhausted repair fails protocol 
     "no partial or fabricated answer may be emitted",
   );
 });
+
+test("final synthesis preview attempts reset independently while formal tokens wait for validation", async () => {
+  const previews: SynthesisPreviewEvent[] = [];
+  const formal: string[] = [];
+  const outcome = await runAgentTurn({
+    built: built("general"),
+    projectId: "project-a",
+    libraryIds: ["library-a"],
+    capability: capability("native-tools"),
+    signal: new AbortController().signal,
+    onPhase: () => undefined,
+    onToken: (event) => formal.push(event.text),
+    onSynthesisPreview: (event) => previews.push(event),
+    runtime: budgetExhaustionRuntime({ final: "leak-then-success" }),
+  });
+
+  assert.deepEqual(
+    previews.filter((event) => event.type === "reset"),
+    [
+      { type: "reset", attempt: 1 },
+      { type: "reset", attempt: 2 },
+    ],
+  );
+  assert.deepEqual(formal, [
+    "<<<PAPERTABLE_ANSWER>>>修复后的正式回答。[[source:budget-evidence]]",
+  ]);
+  assert.deepEqual(outcome.terminal, {
+    result: "partial",
+    reason: "rounds_exhausted",
+  });
+  assert.ok(
+    outcome.trace.errors?.some((message) =>
+      message.includes("same-model-complete-final-answer-resend-requested"),
+    ),
+  );
+});
+
+for (const scenario of [
+  {
+    name: "length truncation",
+    final: "length-then-success" as const,
+    resets: 2,
+    answer: "长度修复正式回答",
+  },
+  {
+    name: "empty response with transport retries",
+    final: "empty-then-success" as const,
+    resets: 4,
+    answer: "空响应修复正式回答",
+  },
+]) {
+  test(`${scenario.name} resets every preview attempt and commits only the repaired answer`, async () => {
+    const previews: SynthesisPreviewEvent[] = [];
+    const formal: string[] = [];
+    await runAgentTurn({
+      built: built("general"),
+      projectId: "project-a",
+      libraryIds: ["library-a"],
+      capability: capability("native-tools"),
+      signal: new AbortController().signal,
+      onPhase: () => undefined,
+      onToken: (event) => formal.push(event.text),
+      onSynthesisPreview: (event) => previews.push(event),
+      runtime: budgetExhaustionRuntime({ final: scenario.final }),
+    });
+
+    assert.equal(
+      previews.filter((event) => event.type === "reset").length,
+      scenario.resets,
+    );
+    assert.deepEqual(formal, [`<<<PAPERTABLE_ANSWER>>>${scenario.answer}`]);
+  });
+}
 
 test("final synthesis explicitly disables tools and never executes provider tool calls", async () => {
   const visible: string[] = [];

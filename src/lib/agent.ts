@@ -57,6 +57,7 @@ import {
   normalizeCompletedSearchForResume,
   type AgentResumeSeed,
 } from "./agentResume";
+import type { SynthesisPreviewEvent } from "./synthesisPreview";
 
 const MAX_READS = 4;
 const MAX_SEARCH = 8;
@@ -116,6 +117,8 @@ export interface AgentTurnInput {
   onPhase: (progress: AgentProgress) => void;
   /** Receives only final-answer raw tokens; never tools / planning output. */
   onToken: (event: Extract<ProviderStreamEvent, { type: "token" }>) => void;
+  /** Ephemeral, attempt-scoped final synthesis preview; never a Turn field. */
+  onSynthesisPreview?: (event: SynthesisPreviewEvent) => void;
   /** Local dispatch boundary; called immediately before each provider request. */
   onModelRequest?: () => void;
   /**
@@ -377,6 +380,8 @@ async function streamRound(input: {
   runtime: AgentRuntime;
   /** Native final synthesis buffers until the complete round is validated. */
   emitTokens?: boolean;
+  previewAttempt?: number;
+  onSynthesisPreview?: AgentTurnInput["onSynthesisPreview"];
   onUsage?: (usage: ProviderUsage | undefined) => Promise<unknown>;
   expectedGatewayResponseShape?: string;
 }): Promise<{
@@ -413,6 +418,17 @@ async function streamRound(input: {
           }),
     })) {
       events.push(event);
+      if (
+        event.type === "token" &&
+        input.previewAttempt !== undefined &&
+        input.onSynthesisPreview
+      )
+        input.onSynthesisPreview({
+          type: "token",
+          attempt: input.previewAttempt,
+          text: event.text,
+          channel: event.channel,
+        });
       if (
         event.type === "token" &&
         !input.withTools &&
@@ -1235,6 +1251,7 @@ async function runNativeStateMachine(
       );
   };
   let state: NativeAgentState = { kind: "requesting-model", round: 0 };
+  let synthesisPreviewAttempt = 0;
 
   while (true) {
     switch (state.kind) {
@@ -1823,18 +1840,26 @@ async function runNativeStateMachine(
               runtime.now(),
             );
           const output = await classifiedProviderRequest({
-            request: () =>
-              streamRound({
+            request: () => {
+              const previewAttempt = ++synthesisPreviewAttempt;
+              input.onSynthesisPreview?.({
+                type: "reset",
+                attempt: previewAttempt,
+              });
+              return streamRound({
                 messages: synthesisMessages,
                 signal: input.signal,
                 withTools: false,
                 onToken: input.onToken,
                 runtime,
                 emitTokens: false,
+                previewAttempt,
+                onSynthesisPreview: input.onSynthesisPreview,
                 onUsage: (usage) => budget.provider(usage, "synthesis"),
                 expectedGatewayResponseShape:
                   input.capability?.gatewayResponseShape,
-              }),
+              });
+            },
             signal: input.signal,
             runtime,
             budget,

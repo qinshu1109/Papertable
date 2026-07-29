@@ -7,6 +7,33 @@ import type {
 const ZERO_WIDTH_RE = /[\u200b-\u200d\ufeff]/g;
 const TOOL_PROTOCOL_TAG_RE =
   /<\s*\/?\s*(?:tool_calls?|function_calls?|tool_use|invoke|parameter)(?:\s[^<>]*)?>|<\|[^|<>]+\|>/iu;
+const TOOL_PROTOCOL_TAG_PREFIXES = [
+  "tool_call",
+  "tool_calls",
+  "function_call",
+  "function_calls",
+  "tool_use",
+  "invoke",
+  "parameter",
+];
+
+export function visibleProtocolPrefix(value: string): boolean {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(ZERO_WIDTH_RE, "")
+    .toLowerCase();
+  const start = normalized.lastIndexOf("<");
+  if (start < 0) return false;
+  const tail = normalized.slice(start);
+  if (tail.includes(">")) return false;
+  const compact = tail.replace(/\s+/g, "");
+  if ("<|".startsWith(compact) || compact.startsWith("<|")) return true;
+  const candidate = compact.replace(/^<\//, "<");
+  return TOOL_PROTOCOL_TAG_PREFIXES.some(
+    (name) =>
+      `<${name}`.startsWith(candidate) || candidate.startsWith(`<${name}`),
+  );
+}
 
 export const PROTOCOL_RETRY_CLASSIFICATION = {
   unauthorized: {
@@ -240,5 +267,8 @@ export function visibleProtocolLeak(
     )
     .map((event) => event.text)
     .join("");
-  return text ? normalizeToolProtocolText(text).containsProtocolTag : false;
+  return text
+    ? normalizeToolProtocolText(text).containsProtocolTag ||
+        visibleProtocolPrefix(text)
+    : false;
 }

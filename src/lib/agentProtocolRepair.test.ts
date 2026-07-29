@@ -7,6 +7,7 @@ import {
   normalizeToolProtocolText,
   PROTOCOL_RETRY_CLASSIFICATION,
   visibleProtocolLeak,
+  visibleProtocolPrefix,
 } from "./agentProtocolRepair";
 
 test("retry classification table covers every provider row with bounded policy", () => {
@@ -135,6 +136,18 @@ test("full-width protocol tags normalize for detection but are never stripped in
         text: "＜tool_call＞",
         channel: "final",
       },
+    ]),
+    true,
+  );
+});
+
+test("split visible protocol prefixes remain blocked at the response boundary", () => {
+  assert.equal(visibleProtocolPrefix("<too"), true);
+  assert.equal(visibleProtocolPrefix("</ function_ca"), true);
+  assert.equal(visibleProtocolPrefix("<table"), false);
+  assert.equal(
+    visibleProtocolLeak([
+      { type: "token", text: "正文<tool_", channel: "unknown" },
     ]),
     true,
   );

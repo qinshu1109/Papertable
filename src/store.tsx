@@ -85,6 +85,7 @@ import {
   visibleModelOutput,
 } from "./lib/modelOutput";
 import { createStreamThrottle } from "./lib/streamThrottle";
+import { createSynthesisPreviewGate } from "./lib/synthesisPreview";
 import { vault } from "./lib/vault";
 import {
   DEFAULT_VAULT_SUBTREE,
@@ -491,6 +492,8 @@ interface Ctx {
   streamingCardIds: ReadonlySet<string>;
   backgroundGenerationCount: number;
   streamingTurnId: string | null;
+  /** Final synthesis draft held only in React memory, keyed by Turn id. */
+  synthesisPreviews: Readonly<Record<string, string>>;
   lastCreated: { cardId: string; type: EdgeType } | null;
   hydrated: boolean;
   provider: ProviderHealth | null;
@@ -693,6 +696,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [streamingTurnsByCard, setStreamingTurnsByCard] = useState<
     Record<string, string>
   >({});
+  const [synthesisPreviews, setSynthesisPreviews] = useState<
+    Record<string, string>
+  >({});
   const [lastCreated, setLastCreated] = useState<{
     cardId: string;
     type: EdgeType;
@@ -702,6 +708,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     ReadonlySet<string>
   >(new Set());
   const streamingTurnsRef = useRef<Record<string, string>>({});
+  const synthesisPreviewGatesRef = useRef(
+    new Map<
+      string,
+      {
+        attempt: number;
+        gate: ReturnType<typeof createSynthesisPreviewGate>;
+      }
+    >(),
+  );
   const generationTasksRef = useRef(
     new Map<
       string,
@@ -1722,6 +1737,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setStreamingTurnsByCard(next);
   }, []);
 
+  const clearSynthesisPreview = useCallback((turnId: string) => {
+    synthesisPreviewGatesRef.current.delete(turnId);
+    setSynthesisPreviews((current) => {
+      if (!(turnId in current)) return current;
+      const next = { ...current };
+      delete next[turnId];
+      return next;
+    });
+  }, []);
+
   const stopStream = useCallback(
     (cardId = currentCardId) => {
       const id = streamingTurnsRef.current[cardId];
@@ -1731,6 +1756,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // 先 flush 再标 stopped，停止不会丢掉最后几十毫秒的可见内容。
       task?.flush();
       task?.controller.abort();
+      clearSynthesisPreview(id);
       generationTasksRef.current.delete(id);
       unregisterGeneration(cardId, id);
       // 只重建拥有这条轮次的卡片、以及那一条轮次。之前这里无条件重建了每张卡片
@@ -1757,7 +1783,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         ),
       );
     },
-    [currentCardId, unregisterGeneration],
+    [clearSynthesisPreview, currentCardId, unregisterGeneration],
   );
 
   const runBackgroundTasks = useCallback(
@@ -2212,6 +2238,34 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             answer = nextAnswer;
             throttle.push(answer);
           },
+          onSynthesisPreview: (event) => {
+            if (event.type === "reset") {
+              synthesisPreviewGatesRef.current.set(aiId, {
+                attempt: event.attempt,
+                gate: createSynthesisPreviewGate(),
+              });
+              setSynthesisPreviews((current) => {
+                if (!(aiId in current)) return current;
+                const next = { ...current };
+                delete next[aiId];
+                return next;
+              });
+              return;
+            }
+            const active = synthesisPreviewGatesRef.current.get(aiId);
+            if (!active || active.attempt !== event.attempt) return;
+            const nextPreview = active.gate.push(event.text, event.channel);
+            setSynthesisPreviews((current) => {
+              if (nextPreview.blocked || !nextPreview.content) {
+                if (!(aiId in current)) return current;
+                const next = { ...current };
+                delete next[aiId];
+                return next;
+              }
+              if (current[aiId] === nextPreview.content) return current;
+              return { ...current, [aiId]: nextPreview.content };
+            });
+          },
           onModelRequest: markModelRequest,
           audit: agentAudit,
           protocolRecovery: {
@@ -2258,6 +2312,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             outcome.readChunks,
             outcome.searchHits ?? [],
           );
+          clearSynthesisPreview(aiId);
           updateCard(input.cardId, (card) => ({
             ...card,
             turns: card.turns.map((turn) =>
@@ -2391,6 +2446,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
       } finally {
         throttle.dispose();
+        clearSynthesisPreview(aiId);
         generationTasksRef.current.delete(aiId);
         unregisterGeneration(input.cardId, aiId);
       }
@@ -2402,6 +2458,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       settings.model,
       showToast,
       snapshots,
+      clearSynthesisPreview,
       unregisterGeneration,
       updateCard,
     ],
@@ -4257,6 +4314,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     generationTasksRef.current.clear();
     streamingTurnsRef.current = {};
     setStreamingTurnsByCard({});
+    synthesisPreviewGatesRef.current.clear();
+    setSynthesisPreviews({});
     pendingRerouteOperationRef.current = null;
     setPendingRerouteVerdict(null);
     await clearWorkspace();
@@ -4311,6 +4370,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       streamingCardIds,
       backgroundGenerationCount,
       streamingTurnId,
+      synthesisPreviews,
       lastCreated,
       hydrated,
       provider,
@@ -4425,6 +4485,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       streamingCardIds,
       backgroundGenerationCount,
       streamingTurnId,
+      synthesisPreviews,
       lastCreated,
       hydrated,
       provider,
