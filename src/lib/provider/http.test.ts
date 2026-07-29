@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   ProviderError,
   getProviderHealth,
+  normalizeCapabilityProbeProgressEvent,
   normalizeProviderCapabilityResult,
   providerErrorMessage,
   streamModel,
@@ -138,17 +139,18 @@ test("web stream preserves normalized provider usage on done", async () => {
 test("web and Tauri probes share one fail-closed public capability normalizer", () => {
   const wire = {
     mode: "native-tools",
-    protocolAdapterVersion: "openai-native-tools-v1",
+    protocolAdapterVersion: "openai-native-tools-v2",
     gatewayResponseShape: "openai-chat-completions-v1",
-    toolCallEmission: { status: "passed" },
-    toolResultAcceptance: { status: "passed" },
-    streamingToolCallDelta: { status: "passed" },
+    toolCallEmission: { status: "passed", durationMs: 91.4 },
+    toolResultAcceptance: { status: "passed", durationMs: 102 },
+    streamingToolCallDelta: { status: "passed", durationMs: 45 },
     testedAt: "2026-07-28T00:00:00.000Z",
   };
   const web = normalizeProviderCapabilityResult(wire);
   const tauri = normalizeProviderCapabilityResult(structuredClone(wire));
   assert.deepEqual(tauri, web);
   assert.equal(web.mode, "native-tools");
+  assert.equal(web.toolCallEmission.durationMs, 91);
   assert.equal(
     normalizeProviderCapabilityResult({ ...wire, mode: "unavailable" }).mode,
     "unavailable",
@@ -164,4 +166,30 @@ test("web and Tauri probes share one fail-closed public capability normalizer", 
   });
   assert.equal(malformed.mode, "unavailable");
   assert.equal(malformed.streamingToolCallDelta.status, "failed");
+});
+
+test("capability progress accepts only stage, state and duration", () => {
+  assert.deepEqual(
+    normalizeCapabilityProbeProgressEvent({
+      stage: "streamingToolCallDelta",
+      status: "passed",
+      durationMs: 44.7,
+      detail: "must not cross the channel",
+      apiKey: "must not cross the channel",
+      rawReply: { choices: [] },
+      toolArguments: '{"secret":true}',
+    }),
+    {
+      stage: "streamingToolCallDelta",
+      status: "passed",
+      durationMs: 45,
+    },
+  );
+  assert.equal(
+    normalizeCapabilityProbeProgressEvent({
+      stage: "unknown",
+      status: "passed",
+    }),
+    null,
+  );
 });

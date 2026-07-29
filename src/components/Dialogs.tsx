@@ -23,7 +23,10 @@ import {
 } from "../lib/provider";
 import { useStore } from "../store";
 import type { ImportInput } from "../types";
-import type { CapabilityStageResult } from "../types";
+import type {
+  CapabilityProbeProgressEvent,
+  CapabilityStageResult,
+} from "../types";
 
 const IMPORT_FORMATS = [
   {
@@ -74,11 +77,23 @@ function noteLibraryIsUsable(
   return !availability || availability === "ready";
 }
 
-function capabilityStageLabel(stage: CapabilityStageResult | undefined) {
+function capabilityStageLabel(
+  stage: CapabilityStageResult | undefined,
+  progress?: CapabilityProbeProgressEvent,
+) {
+  if (progress?.status === "started") return "进行中";
+  if (progress?.status === "passed")
+    return `通过 · ${progress.durationMs ?? 0} ms`;
+  if (progress?.status === "failed")
+    return `未通过 · ${progress.durationMs ?? 0} ms`;
   if (!stage) return "尚未探测";
-  if (stage.status === "passed") return "通过";
+  const timing =
+    typeof stage.durationMs === "number" && stage.status !== "not-run"
+      ? ` · ${stage.durationMs} ms`
+      : "";
+  if (stage.status === "passed") return `通过${timing}`;
   if (stage.status === "not-run") return "未完成";
-  return "未通过";
+  return `未通过${timing}`;
 }
 
 function localProbeTime(value: number | undefined) {
@@ -369,6 +384,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     providerCapability,
     providerCapabilityTtlMs,
     capabilityReprobing,
+    capabilityProbeProgress,
     reprobeProviderCapability,
     setProviderCapabilityTtlMs,
     refreshProvider,
@@ -602,14 +618,25 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           </p>
           <div className="attention-metrics capability-stage-grid">
             <span>工具调用发出</span>
-            <b>{capabilityStageLabel(providerCapability?.toolCallEmission)}</b>
+            <b>
+              {capabilityStageLabel(
+                providerCapability?.toolCallEmission,
+                capabilityProbeProgress?.toolCallEmission,
+              )}
+            </b>
             <span>工具结果回灌</span>
             <b>
-              {capabilityStageLabel(providerCapability?.toolResultAcceptance)}
+              {capabilityStageLabel(
+                providerCapability?.toolResultAcceptance,
+                capabilityProbeProgress?.toolResultAcceptance,
+              )}
             </b>
             <span>流式工具调用增量</span>
             <b>
-              {capabilityStageLabel(providerCapability?.streamingToolCallDelta)}
+              {capabilityStageLabel(
+                providerCapability?.streamingToolCallDelta,
+                capabilityProbeProgress?.streamingToolCallDelta,
+              )}
             </b>
           </div>
           {[

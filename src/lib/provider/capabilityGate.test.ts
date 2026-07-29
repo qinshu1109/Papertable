@@ -21,9 +21,9 @@ const passedProbe = (
   mode: "native-tools",
   protocolAdapterVersion: PROTOCOL_ADAPTER_VERSION,
   gatewayResponseShape: OPENAI_GATEWAY_RESPONSE_SHAPE,
-  toolCallEmission: { status: "passed" },
-  toolResultAcceptance: { status: "passed" },
-  streamingToolCallDelta: { status: "passed" },
+  toolCallEmission: { status: "passed", durationMs: 91 },
+  toolResultAcceptance: { status: "passed", durationMs: 102 },
+  streamingToolCallDelta: { status: "passed", durationMs: 45 },
   testedAt: "2026-07-28T00:00:00.000Z",
   ...overrides,
 });
@@ -74,6 +74,9 @@ test("default TTL is 24 hours and expiry requires a fresh probe", async () => {
   assert.equal(probes, 1);
   assert.equal(result.ttlMs, 24 * 60 * 60 * 1_000);
   assert.equal(result.expiresAt - result.testedAt, DEFAULT_CAPABILITY_TTL_MS);
+  assert.equal(result.toolCallEmission.durationMs, 91);
+  assert.equal(result.toolResultAcceptance.durationMs, 102);
+  assert.equal(result.streamingToolCallDelta.durationMs, 45);
   assert.ok(isCapabilityAdmitted(result, now + 1));
 });
 

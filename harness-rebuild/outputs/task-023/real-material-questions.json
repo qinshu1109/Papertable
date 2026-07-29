@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "frozenAt": "2026-07-29T20:16:15+08:00",
+  "material": "harness-rebuild Markdown documents imported as a read-only Desktop library",
+  "cases": [
+    {
+      "id": "q1",
+      "question": "根据资料，Papertable 为什么必须坚持只读笔记边界？请给出最关键的两个原因。"
+    },
+    {
+      "id": "q2",
+      "question": "如果模型没有真正读取资料就直接回答，现有设计应如何识别并阻止？"
+    },
+    {
+      "id": "q3",
+      "question": "总结原生工具协议不可降级的理由，并说明失败时用户应该看到什么。"
+    },
+    {
+      "id": "q4",
+      "question": "资料里的引用治理如何避免模型引用没有读过的片段？"
+    },
+    {
+      "id": "q5",
+      "question": "把这套 Harness 的最小充分执行路径整理成三步，并指出什么时候应该停止探索。"
+    },
+    {
+      "id": "q6",
+      "question": "ADR-001 对旗舰模型与降级路径作了哪些硬约束？这些约束保护的产品承诺是什么？"
+    },
+    {
+      "id": "q7",
+      "question": "ADR-006 规定续跑工作集由哪些类别构成？哪些历史内容不能直接作为当前证据？"
+    },
+    {
+      "id": "q8",
+      "question": "ADR-007 允许哪些确定性协议修复，遇到歧义时为什么必须要求同一模型重发？"
+    },
+    {
+      "id": "q9",
+      "question": "TASK-020 为什么要复用 HTTP 连接池但仍为每次 MemOS 调用建立新会话？"
+    },
+    {
+      "id": "q10",
+      "question": "TASK-022 的最终回答预览为什么只能保存在内存？正式正文在什么条件下才允许提交？"
+    }
+  ]
+}

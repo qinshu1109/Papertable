@@ -41,6 +41,7 @@ import {
   generateModel,
   getProviderHealth,
   probeProviderCapabilities,
+  type CapabilityProbeProgressHandler,
   type ProviderHealth,
 } from "./lib/provider";
 import {
@@ -138,6 +139,7 @@ import type {
   AppSettings,
   AttentionMetrics,
   BuiltContext,
+  CapabilityProbeProgressEvent,
   Card,
   CardEdge,
   ConceptPreviewCacheEntry,
@@ -501,6 +503,9 @@ interface Ctx {
   providerCapability?: ProviderCapability;
   providerCapabilityTtlMs: number;
   capabilityReprobing: boolean;
+  capabilityProbeProgress?: Partial<
+    Record<CapabilityProbeProgressEvent["stage"], CapabilityProbeProgressEvent>
+  >;
   reprobeProviderCapability: () => Promise<void>;
   setProviderCapabilityTtlMs: (ttlMs: number) => void;
   noteLibraries: NoteLibrary[];
@@ -707,6 +712,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [reprobingCapabilityKeys, setReprobingCapabilityKeys] = useState<
     ReadonlySet<string>
   >(new Set());
+  const [capabilityProbeProgress, setCapabilityProbeProgress] = useState<{
+    key: string;
+    stages: Partial<
+      Record<
+        CapabilityProbeProgressEvent["stage"],
+        CapabilityProbeProgressEvent
+      >
+    >;
+  } | null>(null);
   const streamingTurnsRef = useRef<Record<string, string>>({});
   const synthesisPreviewGatesRef = useRef(
     new Map<
@@ -809,6 +823,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       : "unavailable";
   const currentCapabilityKey = `${providerBaseUrl}\u001f${settings.model}`;
   const capabilityReprobing = reprobingCapabilityKeys.has(currentCapabilityKey);
+  const currentCapabilityProbeProgress =
+    capabilityReprobing && capabilityProbeProgress?.key === currentCapabilityKey
+      ? capabilityProbeProgress.stages
+      : undefined;
 
   const activeProposals = useMemo(
     () => activeProposalsForProject(proposals, activeProjectId),
@@ -1502,15 +1520,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }),
         probe: () => {
           onModelRequest?.();
-          return probeProviderCapabilities();
+          const onProgress: CapabilityProbeProgressHandler = (event) =>
+            setCapabilityProbeProgress((previous) => ({
+              key,
+              stages: {
+                ...(previous?.key === key ? previous.stages : {}),
+                [event.stage]: event,
+              },
+            }));
+          return probeProviderCapabilities(onProgress);
         },
-        onReprobing: (active) =>
+        onReprobing: (active) => {
+          if (active) setCapabilityProbeProgress({ key, stages: {} });
           setReprobingCapabilityKeys((previous) => {
             const next = new Set(previous);
             if (active) next.add(key);
             else next.delete(key);
             return next;
-          }),
+          });
+        },
       });
     },
     [],
@@ -4380,6 +4408,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         settings.providerCapabilityTtlMs,
       ),
       capabilityReprobing,
+      capabilityProbeProgress: currentCapabilityProbeProgress,
       reprobeProviderCapability,
       setProviderCapabilityTtlMs,
       noteLibraries: noteLibraryList,
@@ -4493,6 +4522,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       providerCapability,
       settings.providerCapabilityTtlMs,
       capabilityReprobing,
+      currentCapabilityProbeProgress,
       reprobeProviderCapability,
       setProviderCapabilityTtlMs,
       noteLibraryList,

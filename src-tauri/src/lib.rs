@@ -366,15 +366,18 @@ async fn llm_complete(
         .map_err(|error| llm::Error::from(error.to_string()))?
 }
 
-/// 能力探测只返回布尔协议结果；前端按 baseUrl+model 缓存，Rust 不写入密钥或原始回复。
+/// 能力探测只返回协议结果和阶段耗时；Channel 也只发送阶段、状态和耗时。
 #[tauri::command]
 async fn provider_probe_capability(
     state: State<'_, Provider>,
+    progress: Channel<llm::CapabilityProbeProgressEvent>,
 ) -> Result<llm::ProviderCapabilityResult, llm::Error> {
     let config = provider_snapshot(&state)?;
-    tauri::async_runtime::spawn_blocking(move || llm::probe_capability(&config))
-        .await
-        .map_err(|error| llm::Error::from(error.to_string()))
+    tauri::async_runtime::spawn_blocking(move || {
+        llm::probe_capability_with_progress(&config, Some(progress))
+    })
+    .await
+    .map_err(|error| llm::Error::from(error.to_string()))
 }
 
 /// 流式生成。事件走 Tauri `Channel`，替代浏览器里的 SSE 解析循环。

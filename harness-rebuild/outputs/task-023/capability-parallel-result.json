@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "kind": "post-task-023-parallel-capability",
+  "capturedAt": "2026-07-29T20:59:47+08:00",
+  "provider": "loopback-openai-compatible",
+  "providerDelayMsPerRequest": 300,
+  "expectedParallelShape": "max(stage1 + stage2, stage3)",
+  "runs": [
+    {
+      "run": 1,
+      "totalMs": 679,
+      "toolCallEmission": { "status": "passed", "durationMs": 327 },
+      "toolResultAcceptance": { "status": "passed", "durationMs": 306 },
+      "streamingToolCallDelta": { "status": "passed", "durationMs": 329 }
+    },
+    {
+      "run": 2,
+      "totalMs": 618,
+      "toolCallEmission": { "status": "passed", "durationMs": 307 },
+      "toolResultAcceptance": { "status": "passed", "durationMs": 306 },
+      "streamingToolCallDelta": { "status": "passed", "durationMs": 307 }
+    },
+    {
+      "run": 3,
+      "totalMs": 618,
+      "toolCallEmission": { "status": "passed", "durationMs": 307 },
+      "toolResultAcceptance": { "status": "passed", "durationMs": 306 },
+      "streamingToolCallDelta": { "status": "passed", "durationMs": 306 }
+    }
+  ],
+  "medianTotalMs": 618,
+  "serialBaselineMedianMs": 926,
+  "improvementMs": 308,
+  "improvementPercent": 33.26,
+  "assertions": {
+    "allStagesPassed": true,
+    "stageTwoRemainedDependent": true,
+    "stageThreeRanInParallel": true,
+    "medianMatchesMaxShape": true
+  }
+}

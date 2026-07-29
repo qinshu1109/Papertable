@@ -546,7 +546,6 @@ function strictNoEvidenceOutcome(
   if (
     input.built.answerMode !== "sources-only" ||
     readChunks.length > 0 ||
-    searchHits.length > 0 ||
     hasFrozenSourceMaterial(input)
   )
     return null;

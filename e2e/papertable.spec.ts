@@ -274,7 +274,7 @@ async function seedCapabilityUi(
               baseUrl: health.baseUrl,
               model: health.model,
               mode: kind === "partial" ? "unavailable" : "native-tools",
-              protocolAdapterVersion: "openai-native-tools-v1",
+              protocolAdapterVersion: "openai-native-tools-v2",
               gatewayResponseShape: "openai-chat-completions-v1",
               toolCallEmission: { status: "passed" },
               toolResultAcceptance:
@@ -640,7 +640,7 @@ async function seedSameRunResumeFixture(page: import("@playwright/test").Page) {
                 baseUrl: "local-test-provider",
                 model: "papertable-test-model",
                 mode: "native-tools",
-                protocolAdapterVersion: "openai-native-tools-v1",
+                protocolAdapterVersion: "openai-native-tools-v2",
                 gatewayResponseShape: "openai-chat-completions-v1",
                 toolCallEmission: { status: "passed" },
                 toolResultAcceptance: { status: "passed" },
@@ -1365,7 +1365,9 @@ test("rapid double-clicking send starts one model run", async ({ page }) => {
 test("settings shows the three-stage Agent gate, TTL, expiry and re-probing state", async ({
   page,
 }) => {
+  let capabilityRequests = 0;
   await page.route("**/api/llm/capabilities", async (route) => {
+    capabilityRequests += 1;
     await new Promise((resolve) => setTimeout(resolve, 250));
     await route.continue();
   });
@@ -1375,10 +1377,15 @@ test("settings shows the three-stage Agent gate, TTL, expiry and re-probing stat
   const dialog = page.getByRole("dialog", { name: "设置" });
   const gate = dialog.getByLabel("Agent 能力准入");
   await expect(gate).toContainText("Agent 模式不可用");
+  const beforeConnectionTest = capabilityRequests;
+  await dialog.getByRole("button", { name: "测试连接" }).click();
+  await expect(dialog.getByRole("button", { name: "测试连接" })).toBeEnabled();
+  expect(capabilityRequests).toBe(beforeConnectionTest);
   await gate.getByRole("button", { name: "立即重新探测" }).click();
   await expect(gate).toContainText("正在重新探测同一接口");
   await expect(gate).toContainText("三段握手全部通过");
-  await expect(gate.getByText("通过", { exact: true })).toHaveCount(3);
+  await expect(gate.getByText(/通过 · \d+ ms/)).toHaveCount(3);
+  expect(capabilityRequests).toBe(beforeConnectionTest + 1);
   await expect(gate).toContainText("上次探测：");
   await expect(gate).toContainText("到期时间：");
   const ttl = gate.getByRole("spinbutton", {

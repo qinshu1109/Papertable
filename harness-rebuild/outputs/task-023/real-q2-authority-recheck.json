@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "kind": "task-023-real-material-acceptance",
+  "generatedAt": "2026-07-29T12:58:09.855Z",
+  "model": "claude-opus-5",
+  "material": {
+    "label": "harness-rebuild Markdown",
+    "files": 123,
+    "chunks": 916
+  },
+  "capability": {
+    "mode": "native-tools",
+    "totalMs": 5458,
+    "toolCallEmission": {
+      "status": "passed",
+      "durationMs": 3044
+    },
+    "toolResultAcceptance": {
+      "status": "passed",
+      "durationMs": 2409
+    },
+    "streamingToolCallDelta": {
+      "status": "passed",
+      "durationMs": 3044
+    }
+  },
+  "constraints": {
+    "runtimeTarget": "desktop",
+    "fixedToolCallLimit": false,
+    "caseFilter": "q2",
+    "performancePayloadExcludes": "key, absolute paths, prompts, queries, tool arguments, raw replies, reasoning"
+  },
+  "firstFiveMedian": {
+    "preflightMs": 3,
+    "firstVisibleMs": 18642,
+    "totalMs": 18642,
+    "heartbeatMaxGapMs": 327
+  },
+  "rows": [
+    {
+      "caseId": "q2",
+      "preflightMs": 3,
+      "firstVisibleMs": 18642,
+      "totalMs": 18642,
+      "heartbeatMaxGapMs": 327,
+      "modelRequests": 3,
+      "searchCalls": 1,
+      "readCalls": 1,
+      "actualReadCount": 1,
+      "readableIdsValid": true,
+      "controlledCitationCount": 1,
+      "citationChunkIds": ["note-98a25d684702:24c5a79aa03f"],
+      "citationPaths": ["tasks/TASK-023.md"],
+      "answer": "现有设计通过两道防线来识别并阻止这种行为：\n\n**第一道：`readChunks`硬门禁（sources-only 状态机）**\n\n在 sources-only 模式下，状态机在释放任何 deferred token 之前，会检查 `readChunks` 是否有实际记录。判断逻辑是：\n\n- 只有 search hit、但没有对应的实际 `read_notes` 调用 → 直接返回 `refused/insufficient_evidence`，不输出任何回答。\n- 有真实 read 记录，或宿主冻结了正式来源 → 才允许继续生成。\n\n这是核心拦截点，把\"搜索到了\"和\"真正读取了\"严格区分开来。\n\n**第二道：引用清洗（第二道防线）**\n\n即使第一道侥幸漏过，引用清洗会在输出阶段再次检验每个 `` 是否对应已读 chunk，防止模型编造或引用未读取的 chunkId。\n\n**通用模式不受影响**\n\n普通（非 sources-only）模式允许只汇报搜索命中而不强制 read，不被这条严格门禁误伤——这条规则是sources-only 专属收紧项。\n\n简而言之：**检查 `readChunks` 是否非空是识别手段，`refused/insufficient_evidence` 是阻止手段**，两者配合构成完整的防护链路。",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 2
+    }
+  ],
+  "allPassed": true
+}

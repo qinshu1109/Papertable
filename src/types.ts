@@ -144,6 +144,17 @@ export interface CapabilityStageResult {
   status: CapabilityStageStatus;
   /** Sanitised explanation only; never an upstream body or protocol payload. */
   detail?: string;
+  /** Safe aggregate timing only; never carries request or response data. */
+  durationMs?: number;
+}
+
+export type CapabilityProbeStage =
+  "toolCallEmission" | "toolResultAcceptance" | "streamingToolCallDelta";
+
+export interface CapabilityProbeProgressEvent {
+  stage: CapabilityProbeStage;
+  status: "started" | "passed" | "failed";
+  durationMs?: number;
 }
 
 /** Safe capability cache key is base URL + model; never contains a secret. */

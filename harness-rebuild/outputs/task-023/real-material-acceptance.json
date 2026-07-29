@@ -1,0 +1,283 @@
+{
+  "schemaVersion": 1,
+  "kind": "task-023-real-material-acceptance",
+  "generatedAt": "2026-07-29T12:47:58.173Z",
+  "model": "claude-opus-5",
+  "material": {
+    "label": "harness-rebuild Markdown",
+    "files": 123,
+    "chunks": 913
+  },
+  "capability": {
+    "mode": "native-tools",
+    "totalMs": 5362,
+    "toolCallEmission": {
+      "status": "passed",
+      "durationMs": 2967
+    },
+    "toolResultAcceptance": {
+      "status": "passed",
+      "durationMs": 2391
+    },
+    "streamingToolCallDelta": {
+      "status": "passed",
+      "durationMs": 3395
+    }
+  },
+  "constraints": {
+    "runtimeTarget": "desktop",
+    "fixedToolCallLimit": false,
+    "performancePayloadExcludes": "key, absolute paths, prompts, queries, tool arguments, raw replies, reasoning"
+  },
+  "firstFiveMedian": {
+    "preflightMs": 1,
+    "firstVisibleMs": 31648,
+    "totalMs": 31648,
+    "heartbeatMaxGapMs": 254
+  },
+  "rows": [
+    {
+      "caseId": "q1",
+      "preflightMs": 3,
+      "firstVisibleMs": 22955,
+      "totalMs": 22955,
+      "heartbeatMaxGapMs": 260,
+      "modelRequests": 3,
+      "searchCalls": 1,
+      "readCalls": 1,
+      "actualReadCount": 2,
+      "readableIdsValid": true,
+      "controlledCitationCount": 1,
+      "citationChunkIds": ["note-103f28c67b43:c35522c90252"],
+      "citationPaths": ["sources/research/papertable.md"],
+      "answer": "根据资料，最关键的两个原因如下：\n\n**1. 无写路径——从架构上杜绝笔记损坏**\n\nVault 侧只暴露索引、搜索、读取命令，`notes.rs` 从未暴露任何写入或删除 Vault 文件的公开函数。这意味着模型在任何情况下都无法修改用户笔记，从根本上消除了 Agent 误操作或被利用后破坏本地数据的风险。\n\n**2. 提示注入防御——防止笔记内容劫持 Agent 行为**\n\n笔记内容属于\"未经验证的资料\"，而非系统指令。`agent.ts:134` 明确声明，凡是笔记中要求改变规则、调用其他工具、泄露数据或扩大读取范围的文字，一律忽略；`agent.ts:833-863` 的 `controlledCitations` 还会剔除任何未实际读取的引用 id。若允许写入，攻击者便可将恶意指令植入笔记，在下次读取时反向控制 Agent。\n\n简言之：**只读边界既保护用户数据不被篡改，也防止笔记成为提示注入的攻击载体。**",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 2
+    },
+    {
+      "caseId": "q2",
+      "preflightMs": 0,
+      "firstVisibleMs": 36686,
+      "totalMs": 36686,
+      "heartbeatMaxGapMs": 251,
+      "modelRequests": 5,
+      "searchCalls": 3,
+      "readCalls": 1,
+      "actualReadCount": 2,
+      "readableIdsValid": true,
+      "controlledCitationCount": 2,
+      "citationChunkIds": [
+        "note-103f28c67b43:c35522c90252",
+        "note-103f28c67b43:c240965c1d3b"
+      ],
+      "citationPaths": ["sources/research/papertable.md"],
+      "answer": "现有设计对这个问题有两个直接机制，但也存在一个结构性盲区。\n\n---\n\n**识别：controlledCitations 清洗**\n\n`agent.ts:833-863` 的 `controlledCitations` 在输出阶段扫描模型回答中的所有引用 id，**剔除任何未经实际 `read_notes` 调用读取过的 chunkId**。这意味着模型如果直接捏造一个 ``，该引用在最终输出里会被抹掉——用户看到的引用集合只包含本轮真正读取过的片段。\n\n**阻止（工具层）：readableIds 门禁**\n\n`agent.ts:493-497` 维护本轮 `readableIds` 集合：只有`search_notes` 实际返回过的 chunkId 才进入这个集合。调用 `read_notes` 时，传入的所有 chunkId 若全部不在集合内，直接抛出 `\"只能读取本轮 search_notes 已返回的片段\"`。这从工具调用层阻断了猜测或伪造 chunkId 的行为。\n\n---\n\n**结构性盲区**\n\n这两层覆盖的是\"工具调用路径上的伪造\"。但如果模型完全绕开工具、直接凭训练知识生成答案（既不调用 `search_notes` 也不调用 `read_notes`），现有设计**没有技术手段在运行时检测到这一点**。`controlledCitations` 只能清洗引用标记，无法判断正文内容是否来自资料。\n\n现有设计用**提示层规则**（`agent.ts:134`、`agent.ts:189` 明确声明\"必须先用工具检索，不能凭借记忆回答\"） 来约束这种行为，但这是软约束，不是硬门禁。要将其变为硬约束，需要在回答输出前引入额外的验证步骤（例如：检查本轮是否有过`read_notes` 调用，若无则拒绝输出或强制追加工具调用轮次）。",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 4
+    },
+    {
+      "caseId": "q3",
+      "preflightMs": 0,
+      "firstVisibleMs": 42454,
+      "totalMs": 42454,
+      "heartbeatMaxGapMs": 254,
+      "modelRequests": 9,
+      "searchCalls": 6,
+      "readCalls": 2,
+      "actualReadCount": 5,
+      "readableIdsValid": true,
+      "controlledCitationCount": 4,
+      "citationChunkIds": [
+        "note-a9b5803295cc:12b5db75edd0",
+        "note-a9b5803295cc:730b4d40add0",
+        "note-a9b5803295cc:a03fe234595e",
+        "note-65aeacf72ddc:b980c0402841"
+      ],
+      "citationPaths": [
+        "sources/original-package/decisions/ADR-001-仅旗舰原生工具不降级.md",
+        "decisions/ADR-001-仅旗舰原生工具不降级.md"
+      ],
+      "answer": "##原生工具协议不可降级的理由\n\n**核心问题：双阶段回退会静默掩盖故障**\n\n旧有设计将\"双阶段模式\"作为所有探测失败的兜底路径。这导致两个直接危害：\n\n1. **故障被静默掩盖**：协议层面的异常不会上报，而是悄悄用较差的回退路径继续执行，开发者和用户都无从察觉。\n\n2. **同会话答案质量漂移**：同一个会话里，部分轮次走原生工具、部分轮次走双阶段或宿主代搜，导致引用质量和推理能力在不知情的情况下悄然下降。\n\n3. **用户无法信任引用与证据链**：一旦协议故障被伪装成正常回答，所有的引用和证据链都失去可信基础。\n\n**决策**\n\nPapertable Agent 模式只运行在通过三段握手探测的云端旗舰模型上。探测失败等于显式准入拒绝；任何修复路径必须保持同模型、同原生工具协议，不得回落双阶段或宿主代搜。\n\n---\n\n## 失败时用户应该看到什么\n\n资料明确规定：**失败即拒绝准入**——用户应当看到一条明确的准入拒绝提示，而不是一个看似正常但实际走了降级路径的回答。\n\n换句话说，失败必须**显式可见**：用户看到\"该模型不可进入 Agent 模式\"这类明确错误，而不是沉默地继续执行并给出质量下降的结果。这样用户才能判断是否需要切换模型或修复协议配置，而不是在错误的回答上继续依赖。",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 8
+    },
+    {
+      "caseId": "q4",
+      "preflightMs": 1,
+      "firstVisibleMs": 25200,
+      "totalMs": 25201,
+      "heartbeatMaxGapMs": 365,
+      "modelRequests": 5,
+      "searchCalls": 4,
+      "readCalls": 1,
+      "actualReadCount": 2,
+      "readableIdsValid": true,
+      "controlledCitationCount": 2,
+      "citationChunkIds": [
+        "note-4c29b3436ff9:121805cb020a",
+        "note-891ed55247a9:5742b0333922"
+      ],
+      "citationPaths": [
+        "sources/original-package/decisions/ADR-004-引用资格与sources-only边界.md",
+        "decisions/ADR-004-引用资格与sources-only边界.md"
+      ],
+      "answer": "资料库中 **ADR-004** 专门规定了这套机制，核心是用\"实际读取\"作为唯一引用门槛：\n\n**规则层面**\n\n`[[source:]]` 标注只能指向经过 `read_notes` 实际读取的片段——搜索命中（search hit）不算，轨迹节点（可查看、恢复、提升的内容）也不算，二者均无引用资格。\n\n**何时可给出部分答案（四个条件须全部满足）**\n1. 至少实际读取了一段与问题直接相关的材料\n2. 同一旗舰模型综合成功\n3. 答案只使用已读材料\n4. 明确标注覆盖不完整\n\n\n\n**何时必须拒答**\n- 只有搜索命中、没有真实读取\n- 已读内容与问题不相关\n- 证据不足以支持最低结论\n\n特别说明：若证据已读但综合与修复全部失败，应报协议错误（按 ADR-003 处理），而不是以\"证据不足\"为由拒答——\"探索没做完\"不等于\"证据不足\"。\n\n**实际效果**：该规则从工具调用链路上切断了\"搜到即引用\"的路径，强制要求每个 `` 背后必须有对应的 `read_notes` 调用作为凭证。",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 5
+    },
+    {
+      "caseId": "q5",
+      "preflightMs": 1,
+      "firstVisibleMs": 31648,
+      "totalMs": 31648,
+      "heartbeatMaxGapMs": 221,
+      "modelRequests": 5,
+      "searchCalls": 2,
+      "readCalls": 2,
+      "actualReadCount": 5,
+      "readableIdsValid": true,
+      "controlledCitationCount": 5,
+      "citationChunkIds": [
+        "note-24d40b46bd70:4cb4b82c7416",
+        "note-32c9aa1180c1:bf7ea0fd463f",
+        "note-24d40b46bd70:4498a5197056",
+        "note-32c9aa1180c1:1a14ae69b084",
+        "note-24d40b46bd70:97a32c36cde5"
+      ],
+      "citationPaths": ["AGENTS.md", "CONTEXT.md"],
+      "answer": "根据资料，这套 Harness 的最小充分执行路径如下：\n\n---\n\n**第一步：定向加载上下文**\n\n按固定顺序读取：`CONTEXT.md → CURRENT.md → 本卡 → 本卡 depends_on 各卡的\"预期输出\"与实际产物 → 本卡引用的 ADR`。研究报告只按需查阅对应小节，不全量加载历史。  \n\n**第二步：执行单卡并同卡交付**\n\n确认本卡已解锁，从 `feat/readonly-note-harness-alpha` 最新已验收点建立专用分支，将卡改为 `in_progress` 并写日志。只做本卡规定的事：实现与测试同卡交付，卡外发现记入\"发现\"或 `memories/candidates/`，不顺手修。 \n\n**第三步：verify 全绿后停笔，等待监督者验收**\n\n执行 Agent 记录候选完成结果，**不得**自行将卡改为 `done`。共享 `CURRENT`、验收结论与 `done` 状态由监督者单写。 \n\n---\n\n**何时应该停止探索**\n\n出现以下任一情况，执行 Agent 立即停止写入并记录证据，转交监督者处理：\n\n-卡外共享文件发生冲突\n- 耗时超过预估的两倍\n- 需要扩大执行范围",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 4
+    },
+    {
+      "caseId": "q6",
+      "preflightMs": 1,
+      "firstVisibleMs": 21052,
+      "totalMs": 21052,
+      "heartbeatMaxGapMs": 235,
+      "modelRequests": 4,
+      "searchCalls": 2,
+      "readCalls": 1,
+      "actualReadCount": 2,
+      "readableIdsValid": true,
+      "controlledCitationCount": 2,
+      "citationChunkIds": [
+        "note-a9b5803295cc:a03fe234595e",
+        "note-a9b5803295cc:12b5db75edd0"
+      ],
+      "citationPaths": [
+        "sources/original-package/decisions/ADR-001-仅旗舰原生工具不降级.md"
+      ],
+      "answer": "ADR-001 的硬约束与它保护的产品承诺如下：\n\n**三条硬约束**\n\n1. **旗舰专属准入**：Agent 模式只能运行在通过\"三段握手探测\"验证的云端旗舰模型上。探测失败即等同于显式准入拒绝，该模型不得进入 Agent 模式。\n\n2. **协议异常原地修复，不得降级**：协议出现异常时，修复路径只能围绕同一模型、同一原生工具协议进行，任何场景下都不得回落到双阶段（two-stage）模式或宿主代搜（host-proxied search）。\n\n3. **禁止任何形式降级**：这一禁令是项目级别不可触碰约束，与只读边界七层、引用治理并列。\n\n**这些约束保护的产品承诺**\n\nADR-001 针对的历史问题是：双阶段模式曾作为\"所有探测失败的兜底\"，导致两个产品层面的信任风险——\n\n- **故障被静默掩盖**：降级路径让真实的协议失败无声消失，运维侧感知不到问题所在。\n- **同会话答案质量漂移**：同一会话内模型或协议悄然切换，用户得到的答案质量不一致，但没有任何可见信号。\n\n因此，这两条约束共同保护的产品承诺是：**Agent 模式的行为可观测、质量一致——要么在旗舰原生协议下正常运行，要么显式失败并给出可见信号，而不是静默降级为低质量替代路径**。",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 3
+    },
+    {
+      "caseId": "q7",
+      "preflightMs": 0,
+      "firstVisibleMs": 21368,
+      "totalMs": 21369,
+      "heartbeatMaxGapMs": 224,
+      "modelRequests": 3,
+      "searchCalls": 1,
+      "readCalls": 1,
+      "actualReadCount": 2,
+      "readableIdsValid": true,
+      "controlledCitationCount": 2,
+      "citationChunkIds": [
+        "note-7803c2d404ff:18e566cc4dd2",
+        "note-f196dc92890f:9b2368992f8f"
+      ],
+      "citationPaths": [
+        "sources/original-package/decisions/ADR-006-事件溯源与工作集分离.md",
+        "decisions/ADR-006-事件溯源与工作集分离.md"
+      ],
+      "answer": "**续跑工作集的七类构成**\n\nADR-006 规定，续跑时压缩仅作用于发给模型的工作集，该工作集只包含以下七类内容 ：\n\n1. 用户原始目标\n2. 去重后已执行搜索\n3. 已读相关原文\n4. 已确认引用\n5. 未解决问题\n6. 上次停止原因\n7. 新增预算\n\n---\n\n**哪些历史内容不能直接作为当前证据**\n\nADR-006 明确：完整历史不删，但模型不接收工作集七类之外的历史内容——也就是说，完整事件日志本身不直接送入模型上下文，不能充当当前推理的证据 。\n\n此外，旧 turn 的事件行带有 `schema_version` 标记，保留为 **legacy 只读状态，不回填**，因此这些旧版本 turn 数据无法被修改或直接作为当前 turn 的推理依据 。\n\n简言之：**历史事件日志中不属于以上七类的所有内容**，以及**所有旧 turn 的legacy 记录**，均不能直接作为当前证据使用。",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 2
+    },
+    {
+      "caseId": "q8",
+      "preflightMs": 1,
+      "firstVisibleMs": 23147,
+      "totalMs": 23147,
+      "heartbeatMaxGapMs": 240,
+      "modelRequests": 3,
+      "searchCalls": 1,
+      "readCalls": 1,
+      "actualReadCount": 2,
+      "readableIdsValid": true,
+      "controlledCitationCount": 2,
+      "citationChunkIds": [
+        "note-4040d3af9e81:73432adf9403",
+        "note-4040d3af9e81:9c76f90a9b16"
+      ],
+      "citationPaths": [
+        "sources/original-package/decisions/ADR-007-协议修复分类与确定性边界.md"
+      ],
+      "answer": "根据 ADR-007，以下是完整答案：\n\n**允许的确定性协议修复**\n\n针对 `tool_call` 参数畸形，只允许做以下操作 ：\n\n- **NFKC 规范化**：统一 Unicode兼容字符形式\n- **零宽字符清洗**：移除零宽空格等不可见字符\n- **全角标签还原**：将全角符号转为半角等价形式\n- **无损重组**：在不改变语义的前提下重新拼装参数结构\n\n这些操作有一个共同特征：结果是唯一且可预期的——同样的输入永远产生同样的输出，没有主观判断空间。\n\n**遇到歧义时为什么必须要求同一模型重发**\n\nADR-007 明确禁止猜工具名、伪造 token、假装调用成功 。原因在于：\n\n一旦清洗后参数仍有歧义（例如工具名拼写不确定、参数含义不明），任何\"猜测性修复\"本质上都是代替模型做了一次推理决策。这会引入两个问题：\n\n1. **语义污染**：系统悄悄改变了调用意图，但事件流里看起来像模型本身的输出，破坏了可追溯性。\n2. **错误放大**：错误猜测会被当作正确结果传入下游，比直接失败更难诊断。\n\n要求**同一模型**重发（而不是换模型或自行补全），是因为原始调用的上下文和能力边界只有发出该请求的模型自身最清楚；换模型重发可能引入能力差异或上下文断裂。这也是背景中提到\"聚合网关可能污染协议\"  这一风险的延伸——系统不应在协议层替模型做语义决策。\n\n**升级路径**\n\n若同一模型重发仍失败，才依次走：重建流 → 能力缓存失效重新握手 → 从最后稳定步骤重试 → 最终进入 `protocol_error` 。",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 2
+    },
+    {
+      "caseId": "q9",
+      "preflightMs": 1,
+      "firstVisibleMs": 24358,
+      "totalMs": 24363,
+      "heartbeatMaxGapMs": 264,
+      "modelRequests": 3,
+      "searchCalls": 2,
+      "readCalls": 1,
+      "actualReadCount": 1,
+      "readableIdsValid": true,
+      "controlledCitationCount": 1,
+      "citationChunkIds": ["note-c8abc7bdfa85:520c662cfad5"],
+      "citationPaths": ["tasks/TASK-020.md"],
+      "answer": "资料中对此有明确说明，两者处于不同协议层，目的各异：\n\n**复用连接池（`OnceLock<ureq::Agent>`）**\n\n`src-tauri/src/llm.rs` 与 `src-tauri/src/memos.rs` 用`OnceLock<ureq::Agent>` 在进程生命周期内持有同一个 `ureq::Agent`。`Agent` 内部维护 TCP 连接和 TLS 会话缓存——每次 HTTP 请求都走已建立的底层连接，省去TCP 三次握手和 TLS 握手的往返延迟。\n\n**每次 MemOS 调用仍建立新会话**\n\nMemOS 走 MCP 协议：每次逻辑调用都重新执行 `initialize` 握手、获取独立 session。这是协议语义层面的隔离——不同调用之间不共享 MCP 状态，避免上下文污染或状态残留。底层 TCP 连接虽由连接池复用，但 MCP 应用层的 session 生命周期与之解耦。\n\n**总结**\n\n| 层次 | 策略 | 原因 |\n|---|---|---|\n| TCP / TLS（传输层） | 复用（`OnceLock<Agent>`） | 避免重复握手，降低延迟 |\n| MCP session（应用层） | 每次新建| 保证调用间状态隔离，符合 MCP 协议语义 |\n\n两者并不冲突：连接池解决的是网络连接建立代价，独立 session 解决的是应用层状态隔离，各自在各自的层面上取最优策略。",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 3
+    },
+    {
+      "caseId": "q10",
+      "preflightMs": 1,
+      "firstVisibleMs": 18021,
+      "totalMs": 18021,
+      "heartbeatMaxGapMs": 281,
+      "modelRequests": 3,
+      "searchCalls": 1,
+      "readCalls": 1,
+      "actualReadCount": 2,
+      "readableIdsValid": true,
+      "controlledCitationCount": 2,
+      "citationChunkIds": [
+        "note-f49a1a0867e7:d3435d11d18b",
+        "note-f49a1a0867e7:7bb1e305c43a"
+      ],
+      "citationPaths": ["tasks/TASK-022.md"],
+      "answer": "**预览只存内存的原因**\n\n最终综合阶段原先以 `emitTokens: false` 整体缓冲，是因为如果把 token 流直接打开，协议泄漏或第一次需要修复的回答会进入 `Turn.content` 并被自动持久化（写入 Dexie / SQLite / 导出格式）。\n\n为了既能实时上屏、又不污染正式数据，TASK-022 引入了**双层输出**：临时预览仅存在于 Store 的内存 UI 状态，按每次综合 attempt 隔离，完全不属于 `Card`、`Turn`、Dexie、SQLite 或任何导出格式。\n\n预览本身还附加了哨兵闸门：完整协议标签出现时立即清空并封锁本 attempt，跨 chunk 的协议/引用前缀先扣留，`` 不进入预览。\n\n---\n\n**正式正文的提交条件**\n\n正式 `Turn.content` 必须在完整响应通过以下全部门禁后，才经现有 `AnswerGate` + `controlledCitations` 路径提交：\n\n- 协议门禁（无协议泄漏）\n- 空响应门禁\n- 长度门禁\n- 引用门禁\n\n只要四项全部通过，才允许写入持久化层；任何一项失败（或用户停止、窗口崩溃/重载、第一次综合需要修复），预览立即清空，正式正文保持原值不变。",
+      "terminalResult": "completed",
+      "terminalReason": "none",
+      "budgetEnforced": false,
+      "recordedToolCalls": 2
+    }
+  ],
+  "allPassed": true
+}

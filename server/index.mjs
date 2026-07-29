@@ -15,7 +15,8 @@ import {
   sseEvent,
 } from "./cozai.mjs";
 
-const PROTOCOL_ADAPTER_VERSION = "openai-native-tools-v1";
+const PROTOCOL_ADAPTER_VERSION = "openai-native-tools-v2";
+const TOOL_CONTINUATION_REASONING = "tool-call-continuation";
 import {
   emitFakeStream,
   fakeCompletion,
@@ -373,7 +374,14 @@ function providerPayload(payload, stream) {
         return {
           role: "assistant",
           content: message.content ?? null,
-          ...(calls.length ? { tool_calls: calls.map(normalizeToolCall) } : {}),
+          ...(calls.length
+            ? {
+                tool_calls: calls.map(normalizeToolCall),
+                // Some reasoning gateways require a non-empty continuation
+                // marker. Never echo the model's hidden reasoning.
+                reasoning_content: TOOL_CONTINUATION_REASONING,
+              }
+            : {}),
         };
       }
       if (message.role === "tool") {
@@ -405,6 +413,20 @@ async function providerFetch(payload, stream, signal) {
     body: JSON.stringify(providerPayload(payload, stream)),
     signal,
   });
+}
+
+async function withProviderTimeout(parentSignal, timeoutMs, run) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const timeout = setTimeout(abort, timeoutMs);
+  if (parentSignal?.aborted) abort();
+  else parentSignal?.addEventListener("abort", abort, { once: true });
+  try {
+    return await run(controller.signal);
+  } finally {
+    clearTimeout(timeout);
+    parentSignal?.removeEventListener("abort", abort);
+  }
 }
 
 const probeTool = {
@@ -458,9 +480,10 @@ function parseSseEventText(text, eventName) {
  */
 async function probeProviderCapabilities(signal) {
   const testedAt = new Date().toISOString();
-  const stage = (status, detail) => ({
+  const stage = (status, detail, durationMs = 0) => ({
     status,
     ...(detail ? { detail } : {}),
+    durationMs: Math.max(0, Math.round(durationMs)),
   });
   if (fakeModel) {
     return {
@@ -480,7 +503,7 @@ async function probeProviderCapabilities(signal) {
       gatewayResponseShape: "unknown",
       toolCallEmission: stage("failed", "未配置模型密钥。"),
       toolResultAcceptance: stage("not-run", "工具调用发出阶段未通过。"),
-      streamingToolCallDelta: stage("not-run", "未配置模型密钥。"),
+      streamingToolCallDelta: stage("failed", "未配置模型密钥。"),
       testedAt,
       unavailableReason: "未配置模型密钥，Agent 模式不可用。",
     };
@@ -505,111 +528,141 @@ async function probeProviderCapabilities(signal) {
   };
   let responseMessage;
   let calls = [];
-  try {
-    const response = await providerFetch(probeRequest(), false, signal);
-    const body = await response.text();
-    if (!response.ok) {
-      toolCallEmission = stage(
+  const streamingProbe = (async () => {
+    const started = performance.now();
+    try {
+      return await withProviderTimeout(signal, 45_000, async (stageSignal) => {
+        const response = await providerFetch(probeRequest(), true, stageSignal);
+        const chunks = [];
+        await relayOpenAiStream({
+          upstream: response,
+          write: (chunk) => chunks.push(new TextDecoder().decode(chunk)),
+          signal: stageSignal,
+          timeoutCode: "timeout",
+        });
+        const output = chunks.join("");
+        const deltas = parseSseEventText(output, "tool-call-delta");
+        const done = parseSseEventText(output, "done").at(-1);
+        observeShape(
+          typeof done?.gatewayResponseShape === "string"
+            ? done.gatewayResponseShape
+            : "unknown",
+          true,
+        );
+        return deltas.length
+          ? stage("passed", undefined, performance.now() - started)
+          : stage(
+              "failed",
+              "没有返回流式工具调用增量。",
+              performance.now() - started,
+            );
+      });
+    } catch (caught) {
+      return stage(
         "failed",
-        friendlyProviderError(response.status, body),
+        caught?.name === "AbortError"
+          ? "模型能力探测超时。"
+          : "模型不支持流式工具调用。",
+        performance.now() - started,
       );
-    } else {
-      const parsed = JSON.parse(body);
-      observeShape(gatewayResponseShape(parsed), true);
-      calls = extractToolCalls(parsed);
-      responseMessage = extractMessage(parsed);
-      toolCallEmission = calls.length
-        ? stage("passed")
-        : stage("failed", "没有返回强制工具调用。");
     }
+  })();
+  const emissionStarted = performance.now();
+  try {
+    await withProviderTimeout(signal, 90_000, async (stageSignal) => {
+      const response = await providerFetch(probeRequest(), false, stageSignal);
+      const body = await response.text();
+      if (!response.ok) {
+        toolCallEmission = stage(
+          "failed",
+          friendlyProviderError(response.status, body),
+          performance.now() - emissionStarted,
+        );
+      } else {
+        const parsed = JSON.parse(body);
+        observeShape(gatewayResponseShape(parsed), true);
+        calls = extractToolCalls(parsed);
+        responseMessage = extractMessage(parsed);
+        toolCallEmission = calls.length
+          ? stage("passed", undefined, performance.now() - emissionStarted)
+          : stage(
+              "failed",
+              "没有返回强制工具调用。",
+              performance.now() - emissionStarted,
+            );
+      }
+    });
   } catch (caught) {
     toolCallEmission = stage(
       "failed",
       caught?.name === "AbortError"
         ? "模型能力探测超时。"
         : "无法连接模型服务。",
+      performance.now() - emissionStarted,
     );
   }
 
   if (toolCallEmission.status === "passed") {
+    const acceptanceStarted = performance.now();
     try {
       const first = calls[0];
-      const response = await providerFetch(
-        {
-          ...probeRequest(),
-          messages: [
-            ...probeRequest().messages,
-            {
-              role: "assistant",
-              content: responseMessage || null,
-              toolCalls: calls,
-            },
-            {
-              role: "tool",
-              toolCallId: first.id,
-              content: '{"ok":true}',
-            },
-          ],
-          toolChoice: "none",
-        },
-        false,
-        signal,
-      );
-      const body = await response.text();
-      if (response.ok) {
-        // 2xx is enough: this specifically checks that the provider accepts
-        // assistant tool_calls + a tool-role result, not prose quality.
-        toolResultAcceptance = stage("passed");
-        try {
-          observeShape(gatewayResponseShape(JSON.parse(body)));
-        } catch {
-          // The acceptance stage is deliberately transport-only. The initial
-          // and streaming stages own response-shape validation.
-        }
-      } else {
-        toolResultAcceptance = stage(
-          "failed",
-          friendlyProviderError(response.status, body),
+      await withProviderTimeout(signal, 90_000, async (stageSignal) => {
+        const response = await providerFetch(
+          {
+            ...probeRequest(),
+            messages: [
+              ...probeRequest().messages,
+              {
+                role: "assistant",
+                content: responseMessage || null,
+                toolCalls: calls,
+              },
+              {
+                role: "tool",
+                toolCallId: first.id,
+                content: '{"ok":true}',
+              },
+            ],
+            toolChoice: "none",
+          },
+          false,
+          stageSignal,
         );
-      }
+        const body = await response.text();
+        if (response.ok) {
+          // 2xx is enough: this specifically checks that the provider accepts
+          // assistant tool_calls + a tool-role result, not prose quality.
+          toolResultAcceptance = stage(
+            "passed",
+            undefined,
+            performance.now() - acceptanceStarted,
+          );
+          try {
+            observeShape(gatewayResponseShape(JSON.parse(body)));
+          } catch {
+            // The acceptance stage is deliberately transport-only. The initial
+            // and streaming stages own response-shape validation.
+          }
+        } else {
+          toolResultAcceptance = stage(
+            "failed",
+            friendlyProviderError(response.status, body),
+            performance.now() - acceptanceStarted,
+          );
+        }
+      });
     } catch (caught) {
       toolResultAcceptance = stage(
         "failed",
         caught?.name === "AbortError"
           ? "模型能力探测超时。"
           : "模型不接受工具结果回填。",
+        performance.now() - acceptanceStarted,
       );
     }
   }
 
-  try {
-    const response = await providerFetch(probeRequest(), true, signal);
-    const chunks = [];
-    await relayOpenAiStream({
-      upstream: response,
-      write: (chunk) => chunks.push(new TextDecoder().decode(chunk)),
-      signal,
-    });
-    const output = chunks.join("");
-    const deltas = parseSseEventText(output, "tool-call-delta");
-    const done = parseSseEventText(output, "done").at(-1);
-    observeShape(
-      typeof done?.gatewayResponseShape === "string"
-        ? done.gatewayResponseShape
-        : "unknown",
-      true,
-    );
-    streamingToolCallDelta = deltas.length
-      ? stage("passed")
-      : stage("failed", "没有返回流式工具调用增量。");
-  } catch (caught) {
-    streamingToolCallDelta = stage(
-      "failed",
-      caught?.name === "AbortError"
-        ? "模型能力探测超时。"
-        : "模型不支持流式工具调用。",
-    );
-  }
+  streamingToolCallDelta = await streamingProbe;
 
   const nativeTools =
     toolCallEmission.status === "passed" &&
@@ -809,7 +862,7 @@ const server = http.createServer(async (req, res) => {
     if (!isLocalOrigin(req))
       return json(res, 403, { message: "仅允许本机页面探测模型能力。" });
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60_000);
+    req.once("aborted", () => controller.abort());
     try {
       return json(res, 200, await probeProviderCapabilities(controller.signal));
     } catch {
@@ -820,20 +873,21 @@ const server = http.createServer(async (req, res) => {
         toolCallEmission: {
           status: "failed",
           detail: "模型能力探测失败。",
+          durationMs: 0,
         },
         toolResultAcceptance: {
           status: "not-run",
           detail: "工具调用发出阶段未通过。",
+          durationMs: 0,
         },
         streamingToolCallDelta: {
-          status: "not-run",
+          status: "failed",
           detail: "模型能力探测失败。",
+          durationMs: 0,
         },
         testedAt: new Date().toISOString(),
         unavailableReason: "模型能力探测失败，Agent 模式不可用。",
       });
-    } finally {
-      clearTimeout(timeout);
     }
   }
 
