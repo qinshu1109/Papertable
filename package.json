@@ -20,6 +20,8 @@
     "acceptance:task-013": "tsx src/task013AcceptanceCli.ts --lane=deterministic",
     "acceptance:task-013:real": "tsx src/task013AcceptanceCli.ts --lane=real",
     "acceptance:task-013:all": "tsx src/task013AcceptanceCli.ts --lane=all",
+    "acceptance:task-018": "tsx src/task018AcceptanceCli.ts",
+    "acceptance:task-018:desktop": "tsx src/task018AcceptanceCli.ts --desktop-db=auto",
     "build:desktop": "PAPERTABLE_TARGET=desktop vite build",
     "dev:desktop": "PAPERTABLE_TARGET=desktop vite --host 127.0.0.1 --port 5173",
     "tauri": "tauri",

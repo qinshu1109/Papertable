@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const SCHEMA: &str = include_str!("schema.sql");
-const USER_VERSION: i64 = 11;
+const USER_VERSION: i64 = 13;
 const AGENT_EVENT_SCHEMA_VERSION: i64 = 1;
 const AGENT_EVENT_TYPES: &[&str] = &[
     "exploration-started",
@@ -120,6 +120,9 @@ pub struct Turn {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "skip_none")]
     pub favorite: Option<bool>,
+    /// MemOS gold 写成功后才存在；本地只保存关联，不保存判决真值。
+    #[serde(default, skip_serializing_if = "skip_none")]
+    pub verdict_id: Option<String>,
     /// 可审计的 Harness 运行轨迹；没有模型隐藏推理。
     #[serde(default, skip_serializing_if = "skip_none")]
     pub agent_run: Option<Value>,
@@ -129,6 +132,9 @@ pub struct Turn {
     /// 生成中可见的 Harness 阶段；只为恢复 UI，不含模型内部过程。
     #[serde(default, skip_serializing_if = "skip_none")]
     pub agent_phase: Option<String>,
+    /// 宿主冻结的判决审计；不参与 controlled citations。
+    #[serde(default, skip_serializing_if = "skip_none")]
+    pub verdict_trace: Option<Value>,
 }
 
 /// 落库的卡片行不含 turns，与 Dexie 侧的 `CardRecord` 一致。
@@ -394,6 +400,12 @@ fn migrate(conn: &Connection) -> Result<()> {
         if version < 7 && !has_column(conn, "turns", "agent_phase")? {
             conn.execute("ALTER TABLE turns ADD COLUMN agent_phase TEXT", [])?;
         }
+        if version < 12 && !has_column(conn, "turns", "verdict_trace")? {
+            conn.execute("ALTER TABLE turns ADD COLUMN verdict_trace TEXT", [])?;
+        }
+        if version < 13 && !has_column(conn, "turns", "verdict_id")? {
+            conn.execute("ALTER TABLE turns ADD COLUMN verdict_id TEXT", [])?;
+        }
         // Pre-v10 capability rows cannot prove all three admission stages and
         // must be invalidated rather than guessed into the current schema.
         if version < 10 {
@@ -552,7 +564,7 @@ fn read_card_records(conn: &Connection) -> Result<Vec<CardRecord>> {
 fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, card_id, role, content, created_at, streaming, status, error, model, favorite,
-                agent_run, citations, agent_phase
+                verdict_id, agent_run, citations, agent_phase, verdict_trace
          FROM turns ORDER BY card_id, created_at",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -570,6 +582,8 @@ fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
             row.get::<_, Option<String>>(10)?,
             row.get::<_, Option<String>>(11)?,
             row.get::<_, Option<String>>(12)?,
+            row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<String>>(14)?,
         ))
     })?;
     let mut output = Vec::new();
@@ -587,9 +601,11 @@ fn read_turns(conn: &Connection) -> Result<Vec<TurnRecord>> {
                 error: value.7,
                 model: value.8,
                 favorite: value.9.map(|flag| flag != 0),
-                agent_run: json_col(value.10)?,
-                citations: json_col(value.11)?,
-                agent_phase: value.12,
+                verdict_id: value.10,
+                agent_run: json_col(value.11)?,
+                citations: json_col(value.12)?,
+                agent_phase: value.13,
+                verdict_trace: json_col(value.14)?,
             },
         });
     }
@@ -1176,14 +1192,17 @@ fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
         // card_id 也在 DO UPDATE 里：改道会把一条轮次挂到另一张卡片下。
         tx.execute(
             "INSERT INTO turns (id, card_id, role, content, created_at, streaming, status,
-                                error, model, favorite, agent_run, citations, agent_phase)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                                error, model, favorite, verdict_id, agent_run, citations,
+                                agent_phase, verdict_trace)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(id) DO UPDATE SET
                card_id = excluded.card_id, role = excluded.role, content = excluded.content,
                created_at = excluded.created_at, streaming = excluded.streaming,
                status = excluded.status, error = excluded.error, model = excluded.model,
-               favorite = excluded.favorite, agent_run = excluded.agent_run,
-               citations = excluded.citations, agent_phase = excluded.agent_phase",
+               favorite = excluded.favorite, verdict_id = excluded.verdict_id,
+               agent_run = excluded.agent_run,
+               citations = excluded.citations, agent_phase = excluded.agent_phase,
+               verdict_trace = excluded.verdict_trace",
             params![
                 turn.id,
                 record.card_id,
@@ -1195,6 +1214,7 @@ fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
                 turn.error,
                 turn.model,
                 turn.favorite.map(|v| v as i64),
+                turn.verdict_id,
                 turn.agent_run
                     .as_ref()
                     .map(serde_json::to_string)
@@ -1204,6 +1224,10 @@ fn write_workspace(tx: &Transaction, upsert: &WorkspaceUpsert) -> Result<()> {
                     .map(serde_json::to_string)
                     .transpose()?,
                 turn.agent_phase,
+                turn.verdict_trace
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
             ],
         )?;
     }
@@ -1869,9 +1893,11 @@ mod tests {
                 error: None,
                 model: None,
                 favorite: None,
+                verdict_id: None,
                 agent_run: None,
                 citations: None,
                 agent_phase: None,
+                verdict_trace: None,
             },
         }
     }
@@ -1911,9 +1937,11 @@ mod tests {
                 error: None,
                 model: Some("test-model".into()),
                 favorite: None,
+                verdict_id: None,
                 agent_run: Some(json!({"mode":"two-stage","searchQueries":[]})),
                 citations: None,
                 agent_phase: Some("searching".into()),
+                verdict_trace: None,
             },
         }];
         singletons(&mut upsert);
@@ -2028,6 +2056,8 @@ mod tests {
         assert!(has_column(&conn, "turns", "agent_run").unwrap());
         assert!(has_column(&conn, "turns", "citations").unwrap());
         assert!(has_column(&conn, "turns", "agent_phase").unwrap());
+        assert!(has_column(&conn, "turns", "verdict_trace").unwrap());
+        assert!(has_column(&conn, "turns", "verdict_id").unwrap());
         let fts: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE name = 'note_chunks_fts'",
@@ -2180,10 +2210,18 @@ mod tests {
                 status: Some("complete".into()),
                 error: None,
                 model: Some("m".into()),
-                favorite: None,
+                favorite: Some(true),
+                verdict_id: Some("gold-1".into()),
                 agent_run: Some(json!({"mode":"two-stage","readChunkIds":["chunk-1"]})),
                 citations: Some(json!([{"chunkId":"chunk-1","excerpt":"证据"}])),
                 agent_phase: Some("reading".into()),
+                verdict_trace: Some(json!({
+                    "promptVersion":"verdict-v1",
+                    "injectionEnabled":true,
+                    "query":"问题 卡片",
+                    "availability":"available",
+                    "verdicts":[{"id":"v1","verdictType":"gold","snapshot":"保留证据"}]
+                })),
             },
         }];
         apply_changes(&mut conn, &update).unwrap();
@@ -2196,6 +2234,9 @@ mod tests {
         assert_eq!(turn.agent_run.unwrap()["mode"], "two-stage");
         assert_eq!(turn.citations.unwrap()[0]["chunkId"], "chunk-1");
         assert_eq!(turn.agent_phase.as_deref(), Some("reading"));
+        assert_eq!(turn.verdict_trace.unwrap()["verdicts"][0]["id"], "v1");
+        assert_eq!(turn.favorite, Some(true));
+        assert_eq!(turn.verdict_id.as_deref(), Some("gold-1"));
     }
 
     #[test]
@@ -2391,9 +2432,11 @@ mod tests {
                         error: None,
                         model: None,
                         favorite: None,
+                        verdict_id: None,
                         agent_run: None,
                         citations: None,
                         agent_phase: None,
+                        verdict_trace: None,
                     },
                 }];
                 singletons(&mut seed);

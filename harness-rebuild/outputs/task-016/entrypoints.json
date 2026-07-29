@@ -1,0 +1,23 @@
+{
+  "sharedBoundary": "src/store.tsx:createCard(type=branch)",
+  "entries": [
+    {
+      "ui": "CardStage relation bar / choose branch point",
+      "caller": "spawnBranch",
+      "cutoff": "sourceTurnId fallback"
+    },
+    {
+      "ui": "TurnBlock / edit question and reroute",
+      "caller": "rerouteEditedQuestion",
+      "cutoff": "turn immediately before the edited user turn, including explicit null"
+    }
+  ],
+  "unchanged": [
+    "branch edge type",
+    "sourceTurnId",
+    "contextCutoffTurnId",
+    "context snapshot",
+    "frozen sourceTurns",
+    "seed turn location"
+  ]
+}

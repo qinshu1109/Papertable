@@ -174,6 +174,203 @@ textarea {
   position: relative;
 }
 
+.verdict-ledger {
+  flex: 1;
+  min-height: 0;
+  padding: 44px clamp(22px, 5vw, 76px);
+}
+.verdict-ledger-inner {
+  width: min(920px, 100%);
+  margin: 0 auto;
+}
+.verdict-ledger-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--line);
+}
+.verdict-ledger-kicker {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink-3);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.verdict-ledger h1 {
+  margin: 0;
+  font-family: Georgia, "Songti SC", serif;
+  font-size: clamp(28px, 4vw, 42px);
+  font-weight: 500;
+}
+.verdict-ledger-head p,
+.exploration-fold p {
+  margin: 7px 0 0;
+  color: var(--ink-3);
+  font-size: 13px;
+}
+.continue-exploration,
+.verdict-ledger-state button,
+.exploration-fold button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 8px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-btn);
+  background: var(--card);
+  box-shadow: var(--sh-float);
+  font-size: 13px;
+  font-weight: 600;
+}
+.continue-exploration:hover,
+.verdict-ledger-state button:hover,
+.exploration-fold button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.verdict-ledger-state {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  margin: 72px auto;
+  color: var(--ink-3);
+  font-size: 13px;
+  text-align: center;
+}
+.verdict-ledger-state.unavailable {
+  width: min(480px, 100%);
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--card);
+}
+.verdict-ledger-state.unavailable > svg {
+  color: var(--danger);
+}
+.verdict-ledger-state.unavailable strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+.verdict-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+  margin-top: 28px;
+}
+.verdict-groups h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+}
+.verdict-entry {
+  margin-bottom: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--sh-card);
+}
+.verdict-entry-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.verdict-kind {
+  padding: 3px 8px;
+  border-radius: var(--r-chip);
+  font-size: 11px;
+  font-weight: 650;
+}
+.verdict-kind.gold {
+  color: #76541b;
+  background: #f4e8bd;
+}
+.verdict-kind.tombstone {
+  color: var(--branch);
+  background: var(--branch-soft);
+}
+.verdict-reuse,
+.verdict-old span {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.verdict-entry > p,
+.verdict-old p {
+  margin: 13px 0;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.verdict-concepts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.verdict-concepts span {
+  padding: 3px 7px;
+  border-radius: var(--r-chip);
+  background: var(--sunken);
+  color: var(--ink-2);
+  font-size: 11px;
+}
+.verdict-history {
+  margin-top: 13px;
+  padding-top: 11px;
+  border-top: 1px solid var(--line-soft);
+}
+.verdict-history summary,
+.exploration-fold summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+.verdict-old {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--sunken);
+  color: var(--ink-2);
+}
+.verdict-old p {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+.verdict-empty {
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  color: var(--ink-3);
+  font-size: 13px;
+  text-align: center;
+}
+.verdict-reuse-note {
+  margin: 18px 0 0;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.exploration-fold {
+  margin-top: 28px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.2);
+}
+.exploration-fold button {
+  margin-top: 12px;
+  box-shadow: none;
+}
+.ledger-mini-nav {
+  justify-content: flex-start;
+  gap: 8px;
+}
+.ledger-mini-nav strong {
+  font-size: 13px;
+}
+
 /* IndexedDB 水合完成前不开放可操作的 seed UI，避免冷启动的写入竞争。 */
 .workspace-bootstrap {
   display: grid;
@@ -1372,6 +1569,20 @@ textarea {
 }
 
 /* Harness citations are explicit evidence handles, never invisible prompt text. */
+.verdict-trace {
+  margin-top: 10px;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.verdict-trace summary {
+  cursor: pointer;
+}
+
+.verdict-trace > div {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
 .note-citation-row {
   display: flex;
   flex-wrap: wrap;
@@ -2639,6 +2850,33 @@ textarea {
   border-top: 1px solid var(--line-soft);
   background: var(--raised);
 }
+.gold-adoption-fields {
+  display: grid;
+  gap: 14px;
+}
+.gold-adoption-fields label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 620;
+}
+.gold-adoption-fields input {
+  width: 100%;
+}
+.gold-adoption-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+.verdict-draft-input {
+  width: 100%;
+  min-height: 112px;
+  resize: vertical;
+}
+.verdict-gate-error {
+  color: var(--danger);
+}
 
 /* Full-length model output is paged in a reader layer instead of mounting a
    huge Markdown tree inside the card's normal scroll container. */
@@ -3173,6 +3411,19 @@ textarea {
     height: 6px;
     border-radius: 99px;
     flex-shrink: 0;
+  }
+  .verdict-ledger {
+    padding: 24px 16px 36px;
+  }
+  .verdict-ledger-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .continue-exploration {
+    width: 100%;
+  }
+  .verdict-groups {
+    grid-template-columns: 1fr;
   }
   .mobile-proposal-sheet {
     position: fixed;

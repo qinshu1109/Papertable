@@ -1,4 +1,4 @@
--- Papertable · SQLite schema (user_version = 11)
+-- Papertable · SQLite schema (user_version = 12)
 --
 -- 列的取舍只有一条判据：当且仅当字段是 (a) 外键、(b) ORDER BY 键、
 -- (c) 按项目删除的 WHERE 键、(d) Rust 侧 vault 写入器需要解释的字段，
@@ -45,11 +45,15 @@ CREATE TABLE IF NOT EXISTS turns (
   error      TEXT,
   model      TEXT,
   favorite   INTEGER,
+  -- MemOS 写成功后才保存的 gold 判决关联；不是本地判决真值。
+  verdict_id TEXT,
   -- Harness Alpha 只保存可审计的工具轨迹与受控引用，绝不保存隐藏推理。
   agent_run  TEXT,
   citations  TEXT,
   -- 生成中的可见进度；刷新后仍能告诉用户正在检索、阅读还是组织最终回答。
-  agent_phase TEXT
+  agent_phase TEXT,
+  -- 本轮宿主冻结的判决注入审计；不授予笔记引用资格。
+  verdict_trace TEXT
 );
 
 -- v8：Agent 过程事件与当前恢复游标分离。turn_id 刻意不是外键：普通工作区快照会

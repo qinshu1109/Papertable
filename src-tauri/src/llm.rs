@@ -228,7 +228,14 @@ pub enum StreamEvent {
     },
 }
 
-const ALLOWED_TASKS: [&str; 5] = ["chat", "agent", "concept-preview", "title", "concepts"];
+const ALLOWED_TASKS: [&str; 6] = [
+    "chat",
+    "agent",
+    "concept-preview",
+    "title",
+    "concepts",
+    "verdict-draft",
+];
 const ALLOWED_ROLES: [&str; 4] = ["system", "user", "assistant", "tool"];
 const CLIENT_TOOLS: [&str; 2] = ["search_notes", "read_notes"];
 const PROBE_TOOL: &str = "papertable_probe";
@@ -1478,6 +1485,34 @@ mod tests {
             tool_choice: None,
         };
         assert!(validate(&bad_role).is_err());
+    }
+
+    #[test]
+    fn verdict_draft_is_allowed_without_tools() {
+        let request = ChatRequest {
+            task: "verdict-draft".into(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: Some("被裁掉的完整问答".into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            }],
+            temperature: Some(0.0),
+            tools: vec![],
+            tool_choice: None,
+        };
+        validate(&request).unwrap();
+
+        let mut with_tool = request;
+        with_tool.tools.push(ToolDefinition {
+            r#type: Some("function".into()),
+            function: ToolFunction {
+                name: "search_notes".into(),
+                description: None,
+                parameters: Some(json!({"type":"object"})),
+            },
+        });
+        assert!(validate(&with_tool).is_err());
     }
 
     #[test]

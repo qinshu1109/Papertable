@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "id": "replace-01",
+      "question": "替换为用户选定的真实老问题 01",
+      "verdict": "替换为该问题已确认的墓碑 01",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 01"
+    },
+    {
+      "id": "replace-02",
+      "question": "替换为用户选定的真实老问题 02",
+      "verdict": "替换为该问题已确认的墓碑 02",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 02"
+    },
+    {
+      "id": "replace-03",
+      "question": "替换为用户选定的真实老问题 03",
+      "verdict": "替换为该问题已确认的墓碑 03",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 03"
+    },
+    {
+      "id": "replace-04",
+      "question": "替换为用户选定的真实老问题 04",
+      "verdict": "替换为该问题已确认的墓碑 04",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 04"
+    },
+    {
+      "id": "replace-05",
+      "question": "替换为用户选定的真实老问题 05",
+      "verdict": "替换为该问题已确认的墓碑 05",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 05"
+    },
+    {
+      "id": "replace-06",
+      "question": "替换为用户选定的真实老问题 06",
+      "verdict": "替换为该问题已确认的墓碑 06",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 06"
+    },
+    {
+      "id": "replace-07",
+      "question": "替换为用户选定的真实老问题 07",
+      "verdict": "替换为该问题已确认的墓碑 07",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 07"
+    },
+    {
+      "id": "replace-08",
+      "question": "替换为用户选定的真实老问题 08",
+      "verdict": "替换为该问题已确认的墓碑 08",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 08"
+    },
+    {
+      "id": "replace-09",
+      "question": "替换为用户选定的真实老问题 09",
+      "verdict": "替换为该问题已确认的墓碑 09",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 09"
+    },
+    {
+      "id": "replace-10",
+      "question": "替换为用户选定的真实老问题 10",
+      "verdict": "替换为该问题已确认的墓碑 10",
+      "recurrenceRule": "替换为运行前冻结的复发判定规则 10"
+    }
+  ]
+}

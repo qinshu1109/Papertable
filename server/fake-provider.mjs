@@ -132,7 +132,12 @@ export function fakeToolCalls(payload) {
 }
 
 export function fakeScenario(payload) {
-  if (payload.task === "title" || payload.task === "concepts") return null;
+  if (
+    payload.task === "title" ||
+    payload.task === "concepts" ||
+    payload.task === "verdict-draft"
+  )
+    return null;
   const lastUser = lastUserMessage(payload);
   return (
     LEAK_SCENARIOS.find(
@@ -155,6 +160,12 @@ export function fakeCompletion(payload) {
   // 概念必须逐字出现在正文里；给概念浮层用例一个可点击的词。
   if (payload.task === "concepts")
     return lastUser.includes("量子退相干") ? `${S}["量子退相干"]` : `${S}[]`;
+  if (payload.task === "verdict-draft")
+    return (payload.messages ?? []).some((message) =>
+      message?.content?.includes("可独立复用的结论"),
+    )
+      ? `${S}这轮回答中最值得复用的一条结论`
+      : "旧方向依赖被裁掉对话中的旧前提，不再作为默认答案。";
   const systemText = (payload.messages ?? [])
     .filter((message) => message?.role === "system")
     .map((message) => message.content ?? "")

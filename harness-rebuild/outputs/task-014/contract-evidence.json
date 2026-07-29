@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "task": "TASK-014",
+  "adr": {
+    "id": "ADR-008",
+    "status": "accepted",
+    "source": "INPUT-20260729-001"
+  },
+  "mcp": {
+    "url": "http://127.0.0.1:8002/mcp",
+    "protocol_version": "2025-06-18",
+    "server_version": "2.13.0.2",
+    "narrow_rest_fallback_used": false
+  },
+  "cube": {
+    "id": "papertable-verdicts",
+    "created": true,
+    "second_ensure_created": false,
+    "max_memories": 2000,
+    "current_acceptance_memories": 5
+  },
+  "contracts": {
+    "node": {
+      "health": "passed",
+      "confirm": "passed",
+      "retry_returned_existing": true,
+      "project_list": "passed",
+      "concept_search": "passed",
+      "cross_project_matches": 0,
+      "supersede": "passed",
+      "active_chain_tails": 1,
+      "auditable_chain_records": 2
+    },
+    "rust": {
+      "health": "passed",
+      "confirm": "passed",
+      "retry_returned_existing": true,
+      "project_list": "passed",
+      "cross_project_matches": 0,
+      "supersede": "passed",
+      "active_chain_tails": 1,
+      "auditable_chain_records": 2
+    },
+    "write_policy": {
+      "status_exposed_to_host": "confirmed",
+      "semantic_type": "decision",
+      "client_id": "papertable",
+      "hot_policy": "exclude",
+      "brain_ignore_tag": true,
+      "hot_item_count_before_after": [45, 45],
+      "brain_page_count_before_after": [11, 11],
+      "locked_fields_non_empty": true,
+      "single_line_limit_unicode_characters": 500,
+      "delete_capability_exposed": false
+    },
+    "unavailable_state": {
+      "available": false,
+      "empty_success_used": false,
+      "upstream_detail_exposed": false
+    }
+  },
+  "backup_restore": {
+    "backup_schema_version": 1,
+    "contains_secrets": false,
+    "snapshot_verified": true,
+    "snapshot_files": 18,
+    "snapshot_total_memories": 154,
+    "snapshot_verdict_memories": 4,
+    "isolated_restore": true,
+    "restored_verdict_memories": 4,
+    "exact_verdict_records_match": true,
+    "temporary_artifacts_deleted": true
+  }
+}

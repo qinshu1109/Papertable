@@ -1,0 +1,6 @@
+{
+  "requestedProjectId": "project-a",
+  "foreignProjectId": "project-b",
+  "foreignVerdictId": "fixture-foreign",
+  "injectedIds": []
+}

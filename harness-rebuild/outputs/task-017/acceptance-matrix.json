@@ -1,0 +1,42 @@
+{
+  "task": "TASK-017",
+  "entrypoints": {
+    "webMoreMenu": "采纳本轮",
+    "desktopWholeTurnContextMenu": "采纳本轮",
+    "cardFavoriteUnchanged": true
+  },
+  "eligibility": {
+    "completeNonEmptyAi": "allowed",
+    "streaming": "blocked",
+    "stopped": "blocked",
+    "error": "blocked",
+    "empty": "blocked",
+    "userTurn": "blocked"
+  },
+  "dialog": {
+    "modelTask": "verdict-draft",
+    "conclusion": "one-line, editable, max 500 characters",
+    "conceptHandle": "empty by default, user-required, max 80 characters",
+    "explicitConfirmation": true,
+    "draftPersisted": false
+  },
+  "writes": {
+    "cancel": "no MemOS write and no local mint",
+    "draftFailure": "retry only; no confirmation and no local mint",
+    "writeFailure": "dialog retained for retry; no favorite/verdictId",
+    "successOrExisting": "favorite=true and verdictId stored after MemOS result",
+    "repeat": "same chain tail returned without another write",
+    "revision": "new verdict with supersedesMemoryId",
+    "source": ["projectId", "sourceCardId", "sourceTurnId"],
+    "concepts": ["user concept handle"]
+  },
+  "tests": {
+    "workflow": "src/lib/verdicts/adoption.test.ts",
+    "webUi": "e2e/papertable.spec.ts: web adopts a completed turn only after explicit gold confirmation",
+    "webPersistence": "src/lib/storage/dexie.test.ts",
+    "desktopPersistence": "src-tauri/src/db.rs",
+    "formatRoundTrip": "src/lib/formats.test.ts",
+    "nodeMemOSContract": "server/memos.test.mjs",
+    "rustMemOSContract": "src-tauri/src/memos.rs"
+  }
+}

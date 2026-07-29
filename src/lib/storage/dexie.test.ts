@@ -1131,6 +1131,31 @@ test("IndexedDB restores cards, drafts and scroll positions", async () => {
   assert.equal(await loadWorkspace(), null);
 });
 
+test("IndexedDB preserves the frozen verdict trace on its Turn", async () => {
+  await freshDb();
+  const state = snapshot();
+  state.cards[0].turns[0].verdictTrace = {
+    promptVersion: "verdict-v1",
+    injectionEnabled: true,
+    query: "你好 根卡",
+    availability: "available",
+    verdicts: [{ id: "v1", verdictType: "gold", snapshot: "保留证据" }],
+  };
+  state.cards[0].turns[0].favorite = true;
+  state.cards[0].turns[0].verdictId = "gold-1";
+  await saveWorkspace(state);
+  const restored = await loadWorkspace();
+  assert.deepEqual(restored?.cards[0].turns[0].verdictTrace, {
+    promptVersion: "verdict-v1",
+    injectionEnabled: true,
+    query: "你好 根卡",
+    availability: "available",
+    verdicts: [{ id: "v1", verdictType: "gold", snapshot: "保留证据" }],
+  });
+  assert.equal(restored?.cards[0].turns[0].favorite, true);
+  assert.equal(restored?.cards[0].turns[0].verdictId, "gold-1");
+});
+
 test("v4 workspace migrates through v8 without touching existing cards or backfilling events", async () => {
   // Construct a genuine v4 database before opening the current Dexie class.
   // This guards the real in-browser upgrade path rather than merely checking

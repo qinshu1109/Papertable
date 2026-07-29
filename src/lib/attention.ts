@@ -47,12 +47,24 @@ export function signalTier(event: InteractionEvent): SignalTier {
       return "medium";
     case "concept-preview-opened":
     case "card-dwell":
+    case "reroute-eligible":
+    case "tombstone-confirmed":
+    case "tombstone-rewritten":
+    case "tombstone-abandoned":
       return "weak";
   }
 }
 
 export function isPositiveSignal(event: InteractionEvent): boolean {
-  return event.type !== "favorite-set" || event.active !== false;
+  return (
+    ![
+      "reroute-eligible",
+      "tombstone-confirmed",
+      "tombstone-rewritten",
+      "tombstone-abandoned",
+    ].includes(event.type) &&
+    (event.type !== "favorite-set" || event.active !== false)
+  );
 }
 
 export function isStrongSignal(event: InteractionEvent): boolean {
@@ -181,6 +193,7 @@ export interface AttentionEventInput {
   relation?: EdgeType;
   concept?: string;
   active?: boolean;
+  editRatio?: number;
 }
 
 export function makeInteractionEvent(

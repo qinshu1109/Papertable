@@ -1,0 +1,41 @@
+{
+  "task": "TASK-018",
+  "status": "in_progress",
+  "ui": {
+    "defaultLedgerOnOpen": "passed",
+    "defaultLedgerOnProjectSwitch": "passed",
+    "memosOnlyTruth": "passed",
+    "goldAndTombstoneGroups": "passed",
+    "chainTailVisible": "passed",
+    "supersededHistoryUserExpanded": "passed",
+    "verdictTraceReuseCountOnly": "passed",
+    "unavailableAndRetry": "passed",
+    "explorationCollapsed": "passed",
+    "continueLastCard": "passed"
+  },
+  "technicalGates": {
+    "pnpmVerify": {
+      "status": "passed",
+      "nodeTsServerTests": 257,
+      "rustTests": 97,
+      "rustIgnored": 1
+    },
+    "playwright": { "status": "passed", "tests": 40 },
+    "desktopBundle": "passed",
+    "desktopComputerUse": "passed",
+    "directReadOnlyDesktopEventScorer": "passed",
+    "rustFmt": "passed",
+    "rustClippyDenyWarnings": "passed",
+    "liveRustMemosContract": "passed",
+    "workspaceValidation": { "status": "passed", "errors": 0 },
+    "gitDiffCheck": "passed",
+    "losslessAuditRoundTrip": "passed",
+    "ordinaryExportsExcludeVerdictTruthAndAudit": "passed",
+    "verdictCubeBackupRestore": "passed-via-task-014-exact-isolated-restore"
+  },
+  "eventGates": {
+    "realFlagshipAb": "in_progress-missing-user-frozen-ten-case-table",
+    "eligibleReroutes": "in_progress-0-of-20",
+    "firstTenDraftSettlements": "in_progress-0-of-10"
+  }
+}

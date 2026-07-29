@@ -1,5 +1,6 @@
 /**
- * 记忆适配层预留。第一阶段只使用 NoopProvider，不能因此产生网络请求或写入。
+ * 通用记忆仍保持显式 Noop。用户确认的判决使用 `lib/verdicts` 的窄接口；
+ * 它不向模型暴露写入或删除能力，也不会把 MemOS 变成通用 Agent 工具。
  */
 export interface MemoryQuery {
   projectId: string;

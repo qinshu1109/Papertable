@@ -144,6 +144,19 @@ test("本机假模型覆盖受限工具协议和能力探测", async () => {
     );
     assert.match(capabilityResult.testedAt, /^\d{4}-\d{2}-\d{2}T/);
 
+    const verdictDraft = await fetch(`${origin}/api/llm/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        task: "verdict-draft",
+        messages: [{ role: "user", content: "被裁掉的完整问答" }],
+      }),
+    });
+    assert.equal(verdictDraft.status, 200);
+    assert.deepEqual(await verdictDraft.json(), {
+      content: "旧方向依赖被裁掉对话中的旧前提，不再作为默认答案。",
+    });
+
     const completion = await fetch(`${origin}/api/llm/generate`, {
       method: "POST",
       headers: { "content-type": "application/json" },

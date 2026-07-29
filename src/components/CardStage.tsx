@@ -39,6 +39,8 @@ import type {
   TrajectoryPromotionDraft,
 } from "../lib/agentTimeline";
 import { desktopTurnsForDisplay } from "../lib/desktopUi";
+import { cutoffBeforeRerouteRound, isGoldEligible } from "../lib/verdicts";
+import { GoldAdoptionDialog } from "./GoldAdoptionDialog";
 
 const spring = {
   type: "spring" as const,
@@ -161,6 +163,10 @@ export function CardStage() {
     createCard,
     renameCard,
     rerouteEditedQuestion,
+    pendingRerouteVerdict,
+    confirmRerouteVerdict,
+    retryRerouteVerdictDraft,
+    skipRerouteVerdict,
     deleteCard,
     toggleFavoriteCard,
     addReference,
@@ -209,8 +215,25 @@ export function CardStage() {
   const [noteSource, setNoteSource] = useState<NoteCitation | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const [longTurnId, setLongTurnId] = useState<string | null>(null);
+  const [goldTurnId, setGoldTurnId] = useState<string | null>(null);
+  const [verdictDraft, setVerdictDraft] = useState("");
   const prevCard = useRef(currentCardId);
   const dwellRecordRef = useRef(recordCardDwell);
+
+  useEffect(() => {
+    setVerdictDraft(pendingRerouteVerdict?.draft ?? "");
+  }, [pendingRerouteVerdict?.cardId, pendingRerouteVerdict?.draft]);
+
+  useEffect(() => {
+    if (!pendingRerouteVerdict) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      skipRerouteVerdict();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pendingRerouteVerdict, skipRerouteVerdict]);
 
   const updateTempCards = useCallback((next: TempCard[]) => {
     tempCardsRef.current = next;
@@ -747,11 +770,17 @@ export function CardStage() {
   };
 
   const spawnBranch = (turnId: string, index: number) => {
+    const contextThroughTurnId = cutoffBeforeRerouteRound(card.turns, turnId);
+    if (contextThroughTurnId === undefined) {
+      showToast({ text: "无法定位这轮问题，请刷新后再改道。" });
+      return;
+    }
     rememberScroll();
     createCard({
       type: "branch",
       sourceCardId: card.id,
       sourceTurnId: turnId,
+      contextThroughTurnId,
       title: `${card.title} · 另一条路径`,
       origin: "manual",
       seedTurns: [
@@ -807,6 +836,9 @@ export function CardStage() {
   };
   const longTurn = longTurnId
     ? card.turns.find((turn) => turn.id === longTurnId)
+    : undefined;
+  const goldTurn = goldTurnId
+    ? card.turns.find((turn) => turn.id === goldTurnId)
     : undefined;
   const actionTurn = sel
     ? card.turns.find((turn) => turn.id === sel.turnId && turn.role === "ai")
@@ -1162,6 +1194,7 @@ export function CardStage() {
                     }}
                     onCitation={setNoteSource}
                     onOpenLongTurn={(turnId) => setLongTurnId(turnId)}
+                    onAdopt={() => setGoldTurnId(turn.id)}
                     copied={copied === turn.id}
                   />
                 ))}
@@ -1437,6 +1470,21 @@ export function CardStage() {
               <button
                 className="menu-item"
                 role="menuitem"
+                disabled={!isGoldEligible(actionTurn)}
+                onClick={() => {
+                  setGoldTurnId(actionTurn.id);
+                  setSel(null);
+                }}
+              >
+                <Star
+                  size={14}
+                  fill={actionTurn.favorite ? "currentColor" : "none"}
+                />
+                采纳本轮
+              </button>
+              <button
+                className="menu-item"
+                role="menuitem"
                 onClick={() => {
                   addReference(
                     {
@@ -1489,6 +1537,94 @@ export function CardStage() {
           onClose={() => setNoteSource(null)}
         />
       )}
+      {pendingRerouteVerdict && (
+        <div
+          className="overlay"
+          onClick={skipRerouteVerdict}
+          role="presentation"
+          data-testid="reroute-verdict-gate"
+        >
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reroute-verdict-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="modal-head">
+              <GitBranch size={17} />
+              <h3 id="reroute-verdict-title">确认这次改道留下的墓碑</h3>
+              <button
+                className="icon-btn"
+                onClick={skipRerouteVerdict}
+                aria-label="跳过墓碑并继续"
+              >
+                <X size={16} />
+              </button>
+            </header>
+            <div className="modal-body">
+              {pendingRerouteVerdict.status === "drafting" ? (
+                <p aria-live="polite">正在根据被裁掉的完整问答起草一句墓碑…</p>
+              ) : pendingRerouteVerdict.status === "draft-failed" ? (
+                <p className="verdict-gate-error" role="alert">
+                  {pendingRerouteVerdict.error}
+                </p>
+              ) : (
+                <>
+                  <p>
+                    这只是临时草稿。确认后才写入判决簿；你也可以改写或跳过。
+                  </p>
+                  <textarea
+                    className="verdict-draft-input"
+                    aria-label="墓碑草稿"
+                    value={verdictDraft}
+                    maxLength={500}
+                    disabled={pendingRerouteVerdict.status === "writing"}
+                    onChange={(event) => setVerdictDraft(event.target.value)}
+                    autoFocus
+                  />
+                  {pendingRerouteVerdict.error && (
+                    <p className="verdict-gate-error" role="alert">
+                      {pendingRerouteVerdict.error}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+            <footer className="modal-foot">
+              <button
+                className="btn"
+                disabled={pendingRerouteVerdict.status === "writing"}
+                onClick={skipRerouteVerdict}
+              >
+                跳过并继续
+              </button>
+              {pendingRerouteVerdict.status === "draft-failed" ? (
+                <button
+                  className="btn primary"
+                  onClick={retryRerouteVerdictDraft}
+                >
+                  重试起草
+                </button>
+              ) : (
+                <button
+                  className="btn primary"
+                  disabled={
+                    pendingRerouteVerdict.status === "drafting" ||
+                    pendingRerouteVerdict.status === "writing" ||
+                    !verdictDraft.trim()
+                  }
+                  onClick={() => void confirmRerouteVerdict(verdictDraft)}
+                >
+                  {pendingRerouteVerdict.status === "writing"
+                    ? "正在写入…"
+                    : "确认并继续"}
+                </button>
+              )}
+            </footer>
+          </section>
+        </div>
+      )}
       {longTurn && (
         <LongTurnViewer
           turn={longTurn}
@@ -1496,6 +1632,14 @@ export function CardStage() {
           onClose={() => setLongTurnId(null)}
           onCopy={() => copy(longTurn.content, longTurn.id)}
           copied={copied === longTurn.id}
+        />
+      )}
+      {goldTurn && (
+        <GoldAdoptionDialog
+          key={goldTurn.id}
+          card={card}
+          turn={goldTurn}
+          onClose={() => setGoldTurnId(null)}
         />
       )}
     </div>
@@ -1523,6 +1667,7 @@ function TurnBlock({
   onPromoteTrajectory,
   onCitation,
   onOpenLongTurn,
+  onAdopt,
   copied,
 }: {
   turn: Turn;
@@ -1546,6 +1691,7 @@ function TurnBlock({
   ) => void;
   onCitation: (citation: NoteCitation) => void;
   onOpenLongTurn: (turnId: string) => void;
+  onAdopt: () => void;
   copied: boolean;
 }) {
   const [more, setMore] = useState(false);
@@ -1674,9 +1820,19 @@ function TurnBlock({
                 onClick={() => setMore(false)}
               />
               <div className="menu" style={{ top: 30, right: 0 }}>
-                <button className="menu-item" onClick={() => setMore(false)}>
-                  <Star size={14} />
-                  收藏本轮
+                <button
+                  className="menu-item"
+                  disabled={!isGoldEligible(turn)}
+                  onClick={() => {
+                    onAdopt();
+                    setMore(false);
+                  }}
+                >
+                  <Star
+                    size={14}
+                    fill={turn.favorite ? "currentColor" : "none"}
+                  />
+                  采纳本轮
                 </button>
                 <button
                   className="menu-item"
@@ -1805,6 +1961,29 @@ function TurnBlock({
             </button>
           ))}
         </div>
+      )}
+      {turn.verdictTrace && (
+        <details
+          className="verdict-trace"
+          data-testid={`verdict-trace-${turn.id}`}
+        >
+          <summary>
+            判决审计 ·{" "}
+            {turn.verdictTrace.availability === "unavailable"
+              ? "MemOS 不可用"
+              : turn.verdictTrace.injectionEnabled
+                ? `注入 ${turn.verdictTrace.verdicts.length} 条`
+                : `A/B 关闭（命中 ${turn.verdictTrace.verdicts.length} 条）`}
+          </summary>
+          <div>Prompt：{turn.verdictTrace.promptVersion}</div>
+          <div>检索词：{turn.verdictTrace.query || "（空）"}</div>
+          {turn.verdictTrace.verdicts.map((verdict) => (
+            <div key={verdict.id}>
+              {verdict.verdictType === "gold" ? "金子" : "墓碑"} · {verdict.id}{" "}
+              · {verdict.snapshot}
+            </div>
+          ))}
+        </details>
       )}
     </div>
   );

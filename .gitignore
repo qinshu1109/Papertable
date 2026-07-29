@@ -9,3 +9,4 @@ playwright-report
 test-results
 *.tsbuildinfo
 artifacts
+harness-rebuild/outputs/task-018/*.private.json

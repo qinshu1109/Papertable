@@ -1,6 +1,7 @@
 mod attachments;
 mod db;
 mod llm;
+mod memos;
 mod notes;
 mod vault;
 mod watcher;
@@ -176,6 +177,31 @@ fn provider_snapshot(state: &State<Provider>) -> Result<ProviderConfig, llm::Err
         .lock()
         .map_err(|_| "配置锁被毒化".to_string())?
         .clone())
+}
+
+#[tauri::command]
+fn verdict_health() -> Value {
+    memos::health()
+}
+
+#[tauri::command]
+fn verdict_ensure_cube() -> Value {
+    memos::ensure()
+}
+
+#[tauri::command]
+fn verdict_list(project_id: String, concept: Option<String>) -> Value {
+    memos::list(project_id, concept)
+}
+
+#[tauri::command]
+fn verdict_confirm(input: memos::VerdictInput) -> Value {
+    memos::confirm(input)
+}
+
+#[tauri::command]
+fn verdict_supersede(memory_id: String, input: memos::VerdictInput) -> Value {
+    memos::supersede(memory_id, input)
 }
 
 #[tauri::command]
@@ -983,6 +1009,11 @@ pub fn run() {
             report_frontend_startup_failure,
             import_library,
             provider_health,
+            verdict_health,
+            verdict_ensure_cube,
+            verdict_list,
+            verdict_confirm,
+            verdict_supersede,
             provider_config,
             save_provider_config,
             provider_key_source,

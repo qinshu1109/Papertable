@@ -240,6 +240,16 @@ test("test-only provider is explicit and produces a streamable answer", () => {
   assert.match(answer, /上下文隔离/);
 });
 
+test("test-only provider returns the shared one-line verdict-draft contract", () => {
+  assert.equal(
+    fakeCompletion({
+      task: "verdict-draft",
+      messages: [{ role: "user", content: "被裁掉的完整问答" }],
+    }),
+    "旧方向依赖被裁掉对话中的旧前提，不再作为默认答案。",
+  );
+});
+
 test("test-only provider emits a deterministic tool request before a tool result", () => {
   const calls = fakeToolCalls({
     task: "chat",

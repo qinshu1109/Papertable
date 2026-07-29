@@ -1,0 +1,10 @@
+{
+  "promptVersion": "verdict-v1",
+  "injectionEnabled": false,
+  "availability": "available",
+  "query": "当前问题 卡片标题 概念",
+  "verdicts": [
+    { "id": "fixture-gold", "verdictType": "gold", "snapshot": "保留可核证据" }
+  ],
+  "injectedIds": []
+}

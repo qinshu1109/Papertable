@@ -58,6 +58,7 @@ export interface ContextProvenance {
     | "source-selection"
     | "branch-history"
     | "reference"
+    | "verdict"
     /** Historical tool provenance only; it is explicitly not current evidence. */
     | "historical-retrieval";
   label: string;
@@ -217,6 +218,27 @@ export interface BuiltContext {
   estimatedTokens: number;
 }
 
+export interface VerdictContextItem {
+  readonly id: string;
+  readonly verdictType: "tombstone" | "gold";
+  readonly content: string;
+}
+
+export interface VerdictTraceItem {
+  id: string;
+  verdictType: "tombstone" | "gold";
+  snapshot: string;
+}
+
+export interface VerdictTrace {
+  promptVersion: string;
+  injectionEnabled: boolean;
+  query: string;
+  availability: "available" | "unavailable";
+  verdicts: VerdictTraceItem[];
+  unavailableCode?: string;
+}
+
 export interface Turn {
   id: string;
   role: TurnRole;
@@ -229,12 +251,16 @@ export interface Turn {
   error?: string;
   model?: string;
   favorite?: boolean;
+  /** MemOS gold verdict linked only after a confirmed/idempotent write. */
+  verdictId?: string;
   /** Harness operational trace.  Never contains hidden reasoning. */
   agentRun?: AgentRunTrace;
   /** Only chunks actually read in this run can appear here. */
   citations?: NoteCitation[];
   /** Transient, user-visible Harness phase; persisted only to survive refresh. */
   agentPhase?: "searching" | "reading" | "answering";
+  /** Frozen host-side verdict audit for this answer; never citation evidence. */
+  verdictTrace?: VerdictTrace;
 }
 
 export interface ConceptPreviewCacheEntry {
@@ -285,7 +311,7 @@ export interface CardEdge {
   sourceBlockText?: string;
   sourceAnchorId?: string;
   contextSnapshotId?: string;
-  /** 仅用于“编辑并改道”的审计；sourceTurnId 仍指向用户看到的来源轮次。 */
+  /** 改道冻结历史的审计截止点；sourceTurnId 仍指向用户看到的来源轮次。 */
   contextCutoffTurnId?: string | null;
   contextPolicy: ContextPolicy;
 }
@@ -366,6 +392,10 @@ export type InteractionEventType =
   | "concept-promoted"
   | "title-edited"
   | "question-rerouted"
+  | "reroute-eligible"
+  | "tombstone-confirmed"
+  | "tombstone-rewritten"
+  | "tombstone-abandoned"
   | "card-reopened"
   | "concept-preview-opened"
   | "card-dwell";
@@ -384,6 +414,8 @@ export interface InteractionEvent {
   concept?: string;
   /** favorite-set 用；false 表示取消收藏，会抵消同一会话、同一目标的收藏。 */
   active?: boolean;
+  /** 墓碑改写距离除以较长文本长度；仅用于前十条质量统计。 */
+  editRatio?: number;
 }
 
 export type SessionEndReason =

@@ -21,6 +21,11 @@ import {
   fakeCompletion,
   fakeToolCalls,
 } from "./fake-provider.mjs";
+import {
+  createVerdictService,
+  McpClient,
+  unavailable as unavailableVerdicts,
+} from "./memos.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -45,6 +50,7 @@ const allowedTasks = new Set([
   "concept-preview",
   "title",
   "concepts",
+  "verdict-draft",
 ]);
 const allowedToolNames = new Set([
   "search_notes",
@@ -58,6 +64,9 @@ const managedConfigKeys = new Set([
   "COZAI_MODEL",
   "COZAI_API_KEY",
 ]);
+const verdicts = createVerdictService((name, args) =>
+  new McpClient().call(name, args),
+);
 
 function json(res, status, payload) {
   res.writeHead(status, {
@@ -656,6 +665,55 @@ async function serveStatic(req, res) {
 
 const server = http.createServer(async (req, res) => {
   const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  if (pathname.startsWith("/api/verdicts")) {
+    if (!isLocalOrigin(req))
+      return json(res, 403, {
+        available: false,
+        error: { code: "forbidden", message: "仅允许本机页面访问判决簿。" },
+      });
+    try {
+      if (req.method === "GET" && pathname === "/api/verdicts/health")
+        return json(res, 200, {
+          available: true,
+          data: await verdicts.health(),
+        });
+      if (req.method === "POST" && pathname === "/api/verdicts/ensure")
+        return json(res, 200, {
+          available: true,
+          data: await verdicts.ensureCube(),
+        });
+      if (req.method === "GET" && pathname === "/api/verdicts") {
+        const url = new URL(req.url, "http://localhost");
+        return json(res, 200, {
+          available: true,
+          data: await verdicts.list(
+            url.searchParams.get("projectId"),
+            url.searchParams.get("concept"),
+          ),
+        });
+      }
+      if (req.method === "POST" && pathname === "/api/verdicts/confirm") {
+        const input = await readJson(req);
+        return json(res, 200, {
+          available: true,
+          data: await verdicts.confirm(input),
+        });
+      }
+      if (req.method === "POST" && pathname === "/api/verdicts/supersede") {
+        const payload = await readJson(req);
+        return json(res, 200, {
+          available: true,
+          data: await verdicts.supersede(payload?.memoryId, payload?.input),
+        });
+      }
+      return json(res, 404, {
+        available: false,
+        error: { code: "not-found", message: "未找到判决簿操作。" },
+      });
+    } catch (error) {
+      return json(res, 503, unavailableVerdicts(error));
+    }
+  }
   if (req.method === "GET" && pathname === "/api/health") {
     if (fakeModel)
       return json(res, 200, {

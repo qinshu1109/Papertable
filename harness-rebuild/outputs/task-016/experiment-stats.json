@@ -1,0 +1,20 @@
+{
+  "events": [
+    "reroute-eligible",
+    "tombstone-confirmed",
+    "tombstone-rewritten",
+    "tombstone-abandoned"
+  ],
+  "excludedFromAttentionSignals": true,
+  "aggregates": [
+    "eligible",
+    "confirmed",
+    "rewritten",
+    "abandoned",
+    "confirmationRate",
+    "firstTenSettled",
+    "firstTenMajorRewriteOrAbandoned"
+  ],
+  "majorRewriteThreshold": 0.5,
+  "editMetric": "Unicode Levenshtein distance divided by the longer line length"
+}

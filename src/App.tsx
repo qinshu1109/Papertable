@@ -16,6 +16,7 @@ import type { VaultConflict } from "./types";
 import { incomingEdge, layoutGraph, pathToRoot } from "./lib/graph";
 import { scopeProject } from "./lib/projectScope";
 import { ProposalExplorer } from "./components/ProposalExplorer";
+import { VerdictLedger } from "./components/VerdictLedger";
 
 export function App() {
   const {
@@ -38,6 +39,7 @@ export function App() {
   } = useStore();
   const [sbCollapsed, setSbCollapsed] = useState(false);
   const [drawer, setDrawer] = useState(false);
+  const [explorationOpen, setExplorationOpen] = useState(false);
   const [modal, setModal] = useState<null | "import" | "export" | "settings">(
     null,
   );
@@ -127,6 +129,10 @@ export function App() {
     [nodes, hidden, cards],
   );
 
+  useEffect(() => {
+    setExplorationOpen(false);
+  }, [activeProjectId]);
+
   // `seed` 只是第一帧的安全占位，不是可操作的工作区。若在 IndexedDB 恢复前
   // 允许新建项目，后到的水合快照会覆盖这次内存操作，用户刷新后就像「项目丢了」。
   // 把整个工作台延后到恢复完成再开放，既避免竞争，也让「本地恢复中」有明确反馈。
@@ -159,62 +165,82 @@ export function App() {
       />
 
       <main className="workspace" ref={workspaceRef}>
-        {/* 移动端顶部横向迷你关系导航 */}
-        <div className="mini-nav">
-          <button
-            className="icon-btn"
-            onClick={() => setDrawer(true)}
-            aria-label="打开项目抽屉"
-            ref={drawerTriggerRef}
-          >
-            <Menu size={17} />
-          </button>
-          <div className="mini-track">
-            {orderedNodes.map((c) => {
-              const e = incomingEdge(projectEdges, c.id);
-              const cur = c.id === currentCardId;
-              const color = e ? EDGE_META[e.type].color : "var(--ink)";
-              return (
-                <button
-                  key={c.id}
-                  className={`mini-node${cur ? " cur" : ""}`}
-                  onClick={() => setCurrentCard(c.id)}
-                  style={
-                    path.includes(c.id) && !cur
-                      ? { borderColor: color }
-                      : undefined
-                  }
-                >
-                  <span
-                    className="mn-dot"
-                    style={{
-                      background: cur ? "#f6f1e9" : color,
-                      opacity: c.unread ? 1 : 0.75,
-                    }}
-                  />
-                  {c.title.length > 9 ? c.title.slice(0, 9) + "…" : c.title}
-                </button>
-              );
-            })}
-          </div>
-          <button
-            className={`icon-btn${activeProposals.length ? " active" : ""}`}
-            onClick={() => setProposalTrayOpen(true)}
-            aria-label={`查看幽灵分支，共 ${activeProposals.length} 条`}
-            title="查看幽灵分支"
-          >
-            <Sparkles size={16} />
-            {activeProposals.length > 0 && (
-              <span className="proposal-count">{activeProposals.length}</span>
-            )}
-          </button>
-        </div>
-
-        <CardStage />
-        <Composer onLocate={locate} />
+        {explorationOpen ? (
+          <>
+            {/* 移动端顶部横向迷你关系导航 */}
+            <div className="mini-nav">
+              <button
+                className="icon-btn"
+                onClick={() => setDrawer(true)}
+                aria-label="打开项目抽屉"
+                ref={drawerTriggerRef}
+              >
+                <Menu size={17} />
+              </button>
+              <div className="mini-track">
+                {orderedNodes.map((c) => {
+                  const e = incomingEdge(projectEdges, c.id);
+                  const cur = c.id === currentCardId;
+                  const color = e ? EDGE_META[e.type].color : "var(--ink)";
+                  return (
+                    <button
+                      key={c.id}
+                      className={`mini-node${cur ? " cur" : ""}`}
+                      onClick={() => setCurrentCard(c.id)}
+                      style={
+                        path.includes(c.id) && !cur
+                          ? { borderColor: color }
+                          : undefined
+                      }
+                    >
+                      <span
+                        className="mn-dot"
+                        style={{
+                          background: cur ? "#f6f1e9" : color,
+                          opacity: c.unread ? 1 : 0.75,
+                        }}
+                      />
+                      {c.title.length > 9 ? c.title.slice(0, 9) + "…" : c.title}
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                className={`icon-btn${activeProposals.length ? " active" : ""}`}
+                onClick={() => setProposalTrayOpen(true)}
+                aria-label={`查看幽灵分支，共 ${activeProposals.length} 条`}
+                title="查看幽灵分支"
+              >
+                <Sparkles size={16} />
+                {activeProposals.length > 0 && (
+                  <span className="proposal-count">
+                    {activeProposals.length}
+                  </span>
+                )}
+              </button>
+            </div>
+            <CardStage />
+            <Composer onLocate={locate} />
+          </>
+        ) : (
+          <>
+            <div className="mini-nav ledger-mini-nav">
+              <button
+                className="icon-btn"
+                onClick={() => setDrawer(true)}
+                aria-label="打开项目抽屉"
+                ref={drawerTriggerRef}
+              >
+                <Menu size={17} />
+              </button>
+              <strong>判决簿</strong>
+            </div>
+            <VerdictLedger onContinue={() => setExplorationOpen(true)} />
+          </>
+        )}
       </main>
 
-      <GraphNavigator />
+      {explorationOpen && <GraphNavigator />}
 
       {proposalTrayOpen && (
         <div

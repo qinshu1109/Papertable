@@ -1,0 +1,32 @@
+{
+  "contract": "only complete adjacent user/assistant rounds after the resolved cutoff are draft material",
+  "cases": [
+    {
+      "name": "explicit cutoff",
+      "cutoff": "a1",
+      "suffix": ["u2", "a2", "u3", "a3-stopped", "u4"],
+      "draftRounds": [["u2", "a2"]]
+    },
+    {
+      "name": "default branch cutoff",
+      "contextCutoffTurnId": "undefined",
+      "sourceTurnId": "a1",
+      "draftRounds": [["u2", "a2"]]
+    },
+    {
+      "name": "explicit null cutoff",
+      "contextCutoffTurnId": null,
+      "sourceTurnId": "a2",
+      "draftRounds": [
+        ["u1", "a1"],
+        ["u2", "a2"]
+      ]
+    },
+    {
+      "name": "empty suffix",
+      "cutoff": "a2",
+      "draftRounds": [],
+      "behavior": "persist and generate as an ordinary branch; no tombstone is proposed"
+    }
+  ]
+}

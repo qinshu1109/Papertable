@@ -1,0 +1,8 @@
+{
+  "promptVersion": "verdict-v1",
+  "injectionEnabled": true,
+  "availability": "unavailable",
+  "unavailableCode": "unavailable",
+  "verdicts": [],
+  "injectedIds": []
+}

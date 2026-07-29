@@ -35,6 +35,17 @@ function withoutLegacyReasoning(card: Card): Card {
   };
 }
 
+function withoutVerdictTrace(card: Card): Card {
+  if (!card.turns.some((turn) => turn.verdictTrace)) return card;
+  return {
+    ...card,
+    turns: card.turns.map(({ verdictTrace: _trace, ...turn }) => {
+      void _trace;
+      return turn;
+    }),
+  };
+}
+
 function projectWithoutLegacyReasoning(
   project: PortableProject,
 ): PortableProject {
@@ -92,7 +103,7 @@ function turnMarkdown(turn: Turn) {
 }
 
 export function cardMarkdown(project: PortableProject, input: Card) {
-  const card = withoutLegacyReasoning(input);
+  const card = withoutVerdictTrace(withoutLegacyReasoning(input));
   const meta = metadata(project, card);
   const frontmatter = Object.entries(meta)
     .filter(([, value]) => value !== undefined)

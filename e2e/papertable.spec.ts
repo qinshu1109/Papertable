@@ -1,5 +1,14 @@
 import { expect, test } from "@playwright/test";
 
+async function openExploration(page: import("@playwright/test").Page) {
+  await page.goto("/");
+  await continueExploration(page);
+}
+
+async function continueExploration(page: import("@playwright/test").Page) {
+  await page.getByRole("button", { name: "继续上次探索" }).click();
+}
+
 async function workspaceCounts(page: import("@playwright/test").Page) {
   return page.evaluate(async () => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -8,7 +17,15 @@ async function workspaceCounts(page: import("@playwright/test").Page) {
       request.onerror = () => reject(request.error);
     });
     const tx = db.transaction(
-      ["cards", "edges", "snapshots", "proposals", "turns", "references"],
+      [
+        "cards",
+        "edges",
+        "snapshots",
+        "proposals",
+        "turns",
+        "references",
+        "interactionEvents",
+      ],
       "readonly",
     );
     const count = (name: string) =>
@@ -42,6 +59,13 @@ async function workspaceCounts(page: import("@playwright/test").Page) {
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
+    const interactionEvents = await new Promise<unknown[]>(
+      (resolve, reject) => {
+        const request = tx.objectStore("interactionEvents").getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      },
+    );
     const [cardCount, edgeCount, snapshotCount] = await Promise.all([
       count("cards"),
       count("edges"),
@@ -57,9 +81,119 @@ async function workspaceCounts(page: import("@playwright/test").Page) {
       turns,
       edges,
       references,
+      interactionEvents,
     };
   });
 }
+
+test("project entry shows the MemOS verdict ledger before the preserved workspace", async ({
+  page,
+}) => {
+  const old = {
+    id: "old-tombstone",
+    projectId: "p-quantum",
+    verdictType: "tombstone",
+    sourceKind: "edge",
+    sourceId: "old-edge",
+    content: "旧版墓碑内容。",
+    concepts: ["旧方向"],
+    status: "confirmed",
+    idempotencyKey: "old-key",
+    supersedesMemoryId: null,
+  };
+  const tail = {
+    ...old,
+    id: "tail-tombstone",
+    sourceId: "tail-edge",
+    content: "不要再把已否决方向作为默认答案。",
+    idempotencyKey: "tail-key",
+    supersedesMemoryId: old.id,
+  };
+  const gold = {
+    ...old,
+    id: "gold-tail",
+    verdictType: "gold",
+    sourceKind: "turn",
+    sourceId: "gold-turn",
+    content: "保留可复用的已确认结论。",
+    concepts: ["证据纪律"],
+    idempotencyKey: "gold-key",
+  };
+  await page.route("**/api/verdicts**", async (route) => {
+    const projectId = new URL(route.request().url()).searchParams.get(
+      "projectId",
+    );
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        available: true,
+        data:
+          projectId === "p-quantum"
+            ? { verdicts: [tail, gold], history: [old, tail, gold] }
+            : { verdicts: [], history: [] },
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "判决簿" })).toBeVisible();
+  await expect(page.getByText(tail.content)).toBeVisible();
+  await expect(page.getByText(gold.content)).toBeVisible();
+  await expect(page.getByText(old.content)).toBeHidden();
+  await page.getByText("查看已替代版本（1）").click();
+  await expect(page.getByText(old.content)).toBeVisible();
+  await expect(page.getByText("复用 0 次").first()).toBeVisible();
+  await page.screenshot({
+    path: "harness-rebuild/outputs/task-018/screenshots/verdict-ledger.png",
+    fullPage: true,
+  });
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toHaveCount(
+    0,
+  );
+
+  await page.getByRole("button", { name: "继续上次探索" }).click();
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
+  await page
+    .getByRole("button", { name: "AI Agent 的上下文管理", exact: true })
+    .click();
+  await expect(page.getByRole("heading", { name: "判决簿" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "提问输入框" })).toHaveCount(
+    0,
+  );
+});
+
+test("verdict ledger exposes MemOS unavailability and retries without a local fallback", async ({
+  page,
+}) => {
+  let available = false;
+  await page.route("**/api/verdicts**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(
+        available
+          ? {
+              available: true,
+              data: { verdicts: [], history: [] },
+            }
+          : {
+              available: false,
+              error: {
+                code: "unavailable",
+                message: "判决簿服务当前不可用，请稍后重试。",
+              },
+            },
+      ),
+    });
+  });
+  await page.goto("/");
+  await expect(page.getByRole("alert")).toContainText(
+    "本地卡片不会被当作判决真值",
+  );
+  available = true;
+  await page.getByRole("button", { name: "重试" }).click();
+  await expect(page.getByText("还没有金子。")).toBeVisible();
+  await expect(page.getByText("还没有墓碑。")).toBeVisible();
+});
 
 async function seedPriorDaySignal(page: import("@playwright/test").Page) {
   const yesterday = Date.now() - 24 * 60 * 60 * 1000;
@@ -728,11 +862,12 @@ async function seedTerminalVisibilityFixtures(
 test("desktop flow creates a real streamed card without an API key", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(
     page.getByRole("button", { name: /CozAI · papertable-test-model/ }),
   ).toBeVisible();
   await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
   await page
     .getByRole("textbox", { name: "提问输入框" })
     .fill("请解释什么是上下文隔离？");
@@ -750,6 +885,85 @@ test("desktop flow creates a real streamed card without an API key", async ({
   ).toBeVisible();
 });
 
+test("web adopts a completed turn only after explicit gold confirmation", async ({
+  page,
+}) => {
+  await page.route("**/api/verdicts/confirm", async (route) => {
+    const input = route.request().postDataJSON() as {
+      projectId: string;
+      sourceId: string;
+      sourceCardId: string;
+      sourceTurnId: string;
+      content: string;
+      concepts: string[];
+    };
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        available: true,
+        data: {
+          created: true,
+          verdict: {
+            id: "gold-e2e",
+            ...input,
+            verdictType: "gold",
+            sourceKind: "turn",
+            status: "confirmed",
+            idempotencyKey: "gold-e2e-key",
+            supersedesMemoryId: null,
+          },
+        },
+      }),
+    });
+  });
+  await askInNewProject(page, "请给出一条值得采纳的结论");
+  await expect(page.getByText("这是本地验收用的流式回答")).toBeVisible();
+  const turnContent = page.locator("[data-turn-ai]").last();
+  const turn = turnContent.locator("..");
+  const turnId = await turnContent.getAttribute("data-turn-ai");
+  expect(turnId).toBeTruthy();
+
+  await turn.hover();
+  await turn.getByTitle("更多").click();
+  await expect(page.getByRole("button", { name: "采纳本轮" })).toBeEnabled();
+  await expect(page.getByText("收藏本轮", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "采纳本轮" }).click();
+  const dialog = page.getByRole("dialog", { name: "采纳本轮" });
+  await expect(dialog.getByRole("textbox", { name: "一行结论" })).toHaveValue(
+    "这轮回答中最值得复用的一条结论",
+  );
+  await dialog.getByRole("textbox", { name: "概念把手" }).fill("证据纪律");
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await page.waitForTimeout(700);
+  let stored = (await workspaceCounts(page)).turns as Array<{
+    id: string;
+    favorite?: boolean;
+    verdictId?: string;
+  }>;
+  expect(stored.find((item) => item.id === turnId)?.favorite).not.toBe(true);
+  expect(stored.find((item) => item.id === turnId)?.verdictId).toBeUndefined();
+
+  await turn.hover();
+  await turn.getByTitle("更多").click();
+  await page.getByRole("button", { name: "采纳本轮" }).click();
+  const confirmation = page.getByRole("dialog", { name: "采纳本轮" });
+  await confirmation
+    .getByRole("textbox", { name: "概念把手" })
+    .fill("证据纪律");
+  await confirmation.getByRole("button", { name: "确认采纳" }).click();
+  await expect(page.getByText("本轮已采纳为金子。")).toBeVisible();
+  await page.waitForTimeout(700);
+  stored = (await workspaceCounts(page)).turns as Array<{
+    id: string;
+    favorite?: boolean;
+    verdictId?: string;
+  }>;
+  expect(stored.find((item) => item.id === turnId)).toMatchObject({
+    favorite: true,
+    verdictId: "gold-e2e",
+  });
+});
+
 test("an empty project pauses the composer until a fresh root card is created", async ({
   page,
 }) => {
@@ -758,8 +972,9 @@ test("an empty project pauses the composer until a fresh root card is created", 
     if (request.url().includes("/api/llm/stream"))
       modelRequests.push(request.url());
   });
-  await page.goto("/");
+  await openExploration(page);
   await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
   // The prior card may still be in Framer Motion's short exit animation;
   // operate on the newly current card rather than treating the transient
   // exiting DOM as a second actionable card.
@@ -785,7 +1000,7 @@ test("an empty project pauses the composer until a fresh root card is created", 
 
 test("390px mobile layout has no horizontal overflow", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await openExploration(page);
   await expect(
     page.getByRole("button", { name: "打开项目抽屉" }),
   ).toBeVisible();
@@ -801,7 +1016,7 @@ test("mobile drawer actions close the drawer before opening a modal", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
 
   const drawerButton = page.getByRole("button", { name: "打开项目抽屉" });
@@ -827,7 +1042,7 @@ test("mobile drawer actions close the drawer before opening a modal", async ({
 test("concepts open as four independent temporary cards without replacing each other", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   const openConcept = async (term: string) => {
     await page
       .locator(".concept-term")
@@ -876,7 +1091,7 @@ test("concepts open as four independent temporary cards without replacing each o
 test("temporary follow-ups stay out of IndexedDB until an explicit reference or promotion", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("article")).toBeVisible();
   await page.waitForTimeout(200);
   const before = await workspaceCounts(page);
@@ -912,7 +1127,7 @@ test("temporary follow-ups stay out of IndexedDB until an explicit reference or 
 test("composer grows vertically and restores a separate in-memory draft per card", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   const textarea = page.getByRole("textbox", { name: "提问输入框" });
   const firstDraft = "长".repeat(1_200);
   await textarea.fill(firstDraft);
@@ -935,10 +1150,11 @@ test("composer grows vertically and restores a separate in-memory draft per card
 test("long answers stay lightweight in the card and open a paginated full reader", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await seedLongAnswer(page);
   await page.reload();
+  await continueExploration(page);
 
   const openReader = page.getByRole("button", { name: /查看完整内容/ });
   await expect(openReader).toBeVisible();
@@ -959,7 +1175,7 @@ test("long answers stay lightweight in the card and open a paginated full reader
 test("title editing shows the Unicode limit and never saves a truncated title", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   const title = page.locator(".card-title");
   await title.dblclick();
   const input = page.getByRole("textbox", { name: "编辑卡片标题" });
@@ -983,7 +1199,7 @@ test("compact desktop composer keeps controls and popovers inside the viewport",
   page,
 }) => {
   await page.setViewportSize({ width: 900, height: 600 });
-  await page.goto("/");
+  await openExploration(page);
   const contextButton = page.getByRole("button", { name: /本次上下文/ });
   await expect(contextButton).toBeVisible();
   const layout = await page.locator(".composer-control-row").evaluate((row) => {
@@ -1036,7 +1252,7 @@ test("compact desktop composer keeps controls and popovers inside the viewport",
 });
 
 test("rapid double-clicking send starts one model run", async ({ page }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   const before = await workspaceCounts(page);
   await page
@@ -1059,7 +1275,7 @@ test("settings shows the three-stage Agent gate, TTL, expiry and re-probing stat
     await new Promise((resolve) => setTimeout(resolve, 250));
     await route.continue();
   });
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await page.getByRole("button", { name: "设置", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "设置" });
@@ -1117,11 +1333,11 @@ test("settings shows the three-stage Agent gate, TTL, expiry and re-probing stat
 test("settings renders deterministic partial-stage failure detail", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await page.goto("/api/health");
   await seedCapabilityUi(page, "partial");
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await page.getByRole("button", { name: "设置", exact: true }).click();
   const gate = page
@@ -1137,11 +1353,11 @@ test("settings renders deterministic partial-stage failure detail", async ({
 test("settings explains that an expired cache must re-probe before Agent admission", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await page.goto("/api/health");
   await seedCapabilityUi(page, "expired");
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await page.getByRole("button", { name: "设置", exact: true }).click();
   const gate = page
@@ -1156,7 +1372,7 @@ test("390px uses a tabbed temporary-card sheet and a collapsible handle", async 
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await openExploration(page);
   const concepts = page.locator(".concept-term");
   await concepts.filter({ hasText: "希尔伯特空间" }).first().click();
   let sheet = page.locator(".temp-sheet:visible");
@@ -1186,7 +1402,7 @@ test("390px mobile mode switch and ghost preview can be edited before starting",
       modelRequests.push(request.url());
   });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await openExploration(page);
   await page.getByRole("button", { name: "更多输入设置" }).click();
   await page.getByRole("button", { name: /回答依据：通用探索/ }).click();
   await page.getByRole("button", { name: "更多输入设置" }).click();
@@ -1196,6 +1412,7 @@ test("390px mobile mode switch and ghost preview can be edited before starting",
   await page.keyboard.press("Escape");
   await seedPriorDaySignal(page);
   await page.reload();
+  await continueExploration(page);
   await page
     .locator(".mini-nav")
     .getByRole("button", { name: /查看幽灵分支/ })
@@ -1225,8 +1442,9 @@ test("answer-mode chip changes the next real request and child cards inherit it"
     if (!request.url().includes("/api/llm/stream")) return;
     requests.push(request.postDataJSON());
   });
-  await page.goto("/");
+  await openExploration(page);
   await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
   await expect(
     page.getByRole("button", { name: /回答依据：通用探索/ }),
   ).toBeVisible();
@@ -1266,8 +1484,9 @@ test("sources-only root cards refuse locally instead of sending an unsupported r
   page.on("request", (request) => {
     if (request.url().includes("/api/llm/stream")) requests.push(request.url());
   });
-  await page.goto("/");
+  await openExploration(page);
   await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
   await page.getByRole("button", { name: /回答依据：通用探索/ }).click();
   await page
     .getByRole("textbox", { name: "提问输入框" })
@@ -1282,12 +1501,13 @@ test("sources-only root cards refuse locally instead of sending an unsupported r
 test("workspace becomes interactive only after hydration and a new project survives refresh", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(
     page.getByRole("button", { name: /CozAI · papertable-test-model/ }),
   ).toBeVisible();
 
   await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
   await expect(
     page.getByRole("heading", { name: "未命名卡片", exact: true }),
   ).toBeVisible();
@@ -1296,6 +1516,7 @@ test("workspace becomes interactive only after hydration and a new project survi
   await page.waitForTimeout(220);
 
   await page.reload();
+  await continueExploration(page);
   await expect(
     page.getByRole("heading", { name: "未命名卡片", exact: true }),
   ).toBeVisible();
@@ -1313,10 +1534,11 @@ test("a read-only library uses bounded tools, renders a controlled citation, and
     if (request.url().includes("/api/llm/stream"))
       streams.push(request.postDataJSON());
   });
-  await page.goto("/");
+  await openExploration(page);
   // Use an empty project so the sources-only half of this test does not get
   // unrelated demo references as legitimate frozen evidence.
   await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
   await importReadOnlyFixture(page);
 
   await page
@@ -1359,7 +1581,7 @@ test("a card attachment stays scoped, promotes explicitly, and keeps frozen evid
     if (request.url().includes("/api/llm/stream"))
       streams.push(request.postDataJSON());
   });
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await page.getByTestId("attachment-file-input").setInputFiles(
     Array.from({ length: 26 }, (_, index) => ({
@@ -1468,10 +1690,11 @@ test("继续深挖 adds budget and resumes the persisted run after reload", asyn
     const body = request.postDataJSON();
     if (body?.task === "agent") agentRequests.push(body);
   });
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await seedSameRunResumeFixture(page);
   await page.reload();
+  await continueExploration(page);
 
   const status = page.getByTestId("agent-resume-e2e-resumable-turn");
   await expect(status).toContainText("本轮达到预算边界");
@@ -1479,6 +1702,7 @@ test("继续深挖 adds budget and resumes the persisted run after reload", asyn
   // The resumable checkpoint itself must survive a second hydration before
   // any continuation request is made.
   await page.reload();
+  await continueExploration(page);
   await expect(status).toContainText("完整历史已保存");
   const before = await workspaceCounts(page);
 
@@ -1588,6 +1812,7 @@ test("继续深挖 adds budget and resumes the persisted run after reload", asyn
   ).toHaveLength(1);
 
   await page.reload();
+  await continueExploration(page);
   await expect(
     page.getByText("我已阅读本轮检索到的资料，并据此给出回答。"),
   ).toBeVisible();
@@ -1602,10 +1827,11 @@ test("继续深挖 adds budget and resumes the persisted run after reload", asyn
 test("persisted Agent events render after reload, expand safely, and promote through an inherit relation", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await seedSameRunResumeFixture(page);
   await page.reload();
+  await continueExploration(page);
 
   const presentation = page.getByTestId(
     "agent-presentation-e2e-resumable-turn",
@@ -1719,10 +1945,11 @@ test("persisted Agent events render after reload, expand safely, and promote thr
 test("repair, no-progress, interruption, refusal, and failure stay visibly distinct", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(page.getByRole("textbox", { name: "提问输入框" })).toBeVisible();
   await seedTerminalVisibilityFixtures(page);
   await page.reload();
+  await continueExploration(page);
 
   const failed = page.getByTestId("agent-presentation-e2e-protocol-failed");
   await expect(failed).toContainText("失败");
@@ -1763,7 +1990,7 @@ test("390px keeps read-only Harness citations reachable without horizontal overf
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await openExploration(page);
   await importReadOnlyFixture(page);
   await page
     .getByRole("textbox", { name: "提问输入框" })
@@ -1780,11 +2007,12 @@ test("390px keeps read-only Harness citations reachable without horizontal overf
 test("stopping a stream keeps partial content after reload", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(
     page.getByRole("button", { name: /CozAI · papertable-test-model/ }),
   ).toBeVisible();
   await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
   await page
     .getByRole("textbox", { name: "提问输入框" })
     .fill("请生成一段用于停止测试的说明");
@@ -1796,6 +2024,7 @@ test("stopping a stream keeps partial content after reload", async ({
   await expect(page.getByText("已停止，已保留生成内容。")).toBeVisible();
   await page.waitForTimeout(650);
   await page.reload();
+  await continueExploration(page);
   await expect(page.getByText("已停止，已保留生成内容。")).toBeVisible();
   await expect(page.getByText("第一句已经完成")).toBeVisible();
 });
@@ -1808,7 +2037,7 @@ test("switching projects keeps the first answer running and allows a second gene
     if (request.url().includes("/api/llm/stream"))
       chatRequests.push(request.postData() ?? "");
   });
-  await page.goto("/");
+  await openExploration(page);
   await page
     .getByRole("textbox", { name: "提问输入框" })
     .fill("停止测试：请在后台继续生成");
@@ -1818,6 +2047,7 @@ test("switching projects keeps the first answer running and allows a second gene
   await page
     .getByRole("button", { name: "AI Agent 的上下文管理", exact: true })
     .click();
+  await continueExploration(page);
   await expect(page.getByLabel("量子计算机与极低温正在后台生成")).toBeVisible();
   await expect(page.getByLabel(/另有 1 张卡片正在后台生成/)).toBeVisible();
 
@@ -1834,14 +2064,185 @@ test("switching projects keeps the first answer running and allows a second gene
   await page
     .getByRole("button", { name: "量子计算机与极低温", exact: true })
     .click();
+  await continueExploration(page);
   await expect(page.getByText(/后面还有很长的内容/).first()).toBeVisible();
   await expect(page.getByText(/^已停止/)).toHaveCount(0);
+});
+
+test("reroute persists first, waits for confirmation, then injects the confirmed tombstone", async ({
+  page,
+}) => {
+  const tombstone = {
+    id: "e2e-tombstone",
+    projectId: "p-quantum",
+    verdictType: "tombstone",
+    sourceKind: "edge",
+    sourceId: "e2e-edge",
+    content: "旧方向依赖被裁掉对话中的旧前提，不再作为默认答案。",
+    concepts: ["second-round"],
+    status: "confirmed",
+    idempotencyKey: "e2e-key",
+    supersedesMemoryId: null,
+  };
+  let confirmAttempts = 0;
+  let confirmed = false;
+  await page.route("**/api/verdicts**", async (route) => {
+    const request = route.request();
+    if (request.method() === "POST") {
+      confirmAttempts += 1;
+      if (confirmAttempts === 1)
+        return route.fulfill({
+          contentType: "application/json",
+          body: JSON.stringify({
+            available: false,
+            error: {
+              code: "unavailable",
+              message: "判决簿服务当前不可用，请稍后重试。",
+            },
+          }),
+        });
+      confirmed = true;
+      return route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          data: { verdict: tombstone, created: true },
+        }),
+      });
+    }
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        available: true,
+        data: {
+          verdicts: confirmed ? [tombstone] : [],
+          history: confirmed ? [tombstone] : [],
+        },
+      }),
+    });
+  });
+  const streams: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/llm/stream"))
+      streams.push(request.postData() ?? "");
+  });
+
+  await openExploration(page);
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("补一轮完整问答，供改道裁剪测试。");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText("这是本地验收用的流式回答")).toBeVisible();
+  await expect(page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
+  const before = await workspaceCounts(page);
+  const streamCountBeforeReroute = streams.length;
+
+  await page.getByRole("button", { name: "编辑并改道" }).last().click();
+  const editedQuestion = page.getByRole("textbox", {
+    name: "编辑旧问题并改道",
+  });
+  await editedQuestion.fill("改写第二轮问题，并从上一轮回答后重新开始。");
+  await page.getByRole("button", { name: "保存并改道" }).click();
+
+  const gate = page.getByTestId("reroute-verdict-gate");
+  await expect(gate).toBeVisible();
+  await expect(gate.getByLabel("墓碑草稿")).toHaveValue(tombstone.content);
+  await expect
+    .poll(async () => {
+      const state = await workspaceCounts(page);
+      return {
+        cards: state.cardCount,
+        edges: state.edgeCount,
+        snapshots: state.snapshotCount,
+      };
+    })
+    .toEqual({
+      cards: before.cardCount + 1,
+      edges: before.edgeCount + 1,
+      snapshots: before.snapshotCount + 1,
+    });
+  const proposedState = await workspaceCounts(page);
+  expect(JSON.stringify(proposedState.cards)).not.toContain(tombstone.content);
+  expect(JSON.stringify(proposedState.turns)).not.toContain(tombstone.content);
+  expect(confirmAttempts).toBe(0);
+  expect(streams).toHaveLength(streamCountBeforeReroute);
+
+  await gate.getByRole("button", { name: "确认并继续" }).click();
+  await expect(gate).toContainText("判决簿服务当前不可用，请稍后重试。");
+  expect(streams).toHaveLength(streamCountBeforeReroute);
+  await gate.getByRole("button", { name: "确认并继续" }).click();
+  await expect(gate).toHaveCount(0);
+  await expect.poll(() => streams.length).toBe(streamCountBeforeReroute + 1);
+  expect(streams.at(-1)).toContain(tombstone.content);
+  await expect(page.getByText("判决审计 · 注入 1 条")).toBeVisible();
+});
+
+test("the bottom-left reroute action cuts the selected round and becomes eligible", async ({
+  page,
+}) => {
+  await page.route("**/api/verdicts**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        available: true,
+        data: { verdicts: [], history: [] },
+      }),
+    });
+  });
+  await openExploration(page);
+
+  await page.getByRole("button", { name: /^改道/ }).click();
+  const branchPicker = page.getByRole("dialog", { name: "选择分支点" });
+  await branchPicker.getByRole("button", { name: /第 1 轮/ }).click();
+
+  const gate = page.getByTestId("reroute-verdict-gate");
+  await expect(gate).toBeVisible();
+  await expect(gate.getByLabel("墓碑草稿")).toHaveValue(
+    "旧方向依赖被裁掉对话中的旧前提，不再作为默认答案。",
+  );
+  await expect
+    .poll(async () => {
+      const state = await workspaceCounts(page);
+      const cards = state.cards as Array<{
+        id: string;
+        title: string;
+        createdAt: number;
+      }>;
+      const target = cards
+        .filter((card) => card.title.endsWith("· 另一条路径"))
+        .sort((left, right) => right.createdAt - left.createdAt)[0];
+      const edge = (
+        state.edges as Array<{
+          targetCardId: string;
+          contextCutoffTurnId?: string | null;
+        }>
+      ).find((candidate) => candidate.targetCardId === target?.id);
+      const eligible = (
+        state.interactionEvents as Array<{
+          type: string;
+          targetCardId?: string;
+        }>
+      ).filter(
+        (event) =>
+          event.type === "reroute-eligible" &&
+          event.targetCardId === target?.id,
+      );
+      return {
+        cutoff: edge?.contextCutoffTurnId,
+        eligible: eligible.length,
+      };
+    })
+    .toEqual({ cutoff: null, eligible: 1 });
+
+  await gate.getByRole("button", { name: "跳过并继续" }).click();
+  await expect(gate).toHaveCount(0);
+  await expect(page.getByText("这是本地验收用的流式回答")).toBeVisible();
 });
 
 test("a ghost branch only opens a preview, then materializes once with an edited question", async ({
   page,
 }) => {
-  await page.goto("/");
+  await openExploration(page);
   await expect(
     page.getByRole("button", { name: /CozAI · papertable-test-model/ }),
   ).toBeVisible();
@@ -1854,6 +2255,7 @@ test("a ghost branch only opens a preview, then materializes once with an edited
       modelRequests.push(request.url());
   });
   await page.reload();
+  await continueExploration(page);
   const morning = page.getByLabel("次日探索提示");
   await expect(morning).toBeVisible();
   expect(modelRequests).toHaveLength(0);
@@ -1945,6 +2347,7 @@ test("closing a second tab must not destroy the first tab's proposals", async ({
     // tabB 先水合，它的内存里一条提案都没有。
     const tabB = await context.newPage();
     await tabB.goto("/");
+    await continueExploration(tabB);
     await expect(
       tabB.getByRole("button", { name: /CozAI · papertable-test-model/ }),
     ).toBeVisible();
@@ -1952,8 +2355,10 @@ test("closing a second tab must not destroy the first tab's proposals", async ({
     // tabA 生成并落盘一条提案。
     const tabA = await context.newPage();
     await tabA.goto("/");
+    await continueExploration(tabA);
     await seedPriorDaySignal(tabA);
     await tabA.reload();
+    await continueExploration(tabA);
     await expect(tabA.getByLabel("次日探索提示")).toBeVisible();
     await expect
       .poll(async () => (await workspaceCounts(tabA)).proposals.length)
@@ -1984,10 +2389,12 @@ test("deleting a project also removes rows the deleting tab never saw", async ({
   try {
     const tabA = await context.newPage();
     await tabA.goto("/");
+    await continueExploration(tabA);
     await expect(
       tabA.getByRole("button", { name: /CozAI · papertable-test-model/ }),
     ).toBeVisible();
     await tabA.getByRole("button", { name: "新建项目" }).click();
+    await continueExploration(tabA);
     await tabA
       .getByRole("textbox", { name: "提问输入框" })
       .fill("第一个标签页的问题");
@@ -2027,6 +2434,7 @@ test("deleting a project also removes rows the deleting tab never saw", async ({
     // tabB 现在打开，基线包含 tabA 到此为止建的行。
     const tabB = await context.newPage();
     await tabB.goto("/");
+    await continueExploration(tabB);
     await expect(
       tabB.getByRole("button", { name: /CozAI · papertable-test-model/ }),
     ).toBeVisible();
@@ -2111,11 +2519,12 @@ async function askInNewProject(
   page: import("@playwright/test").Page,
   question: string,
 ) {
-  await page.goto("/");
+  await openExploration(page);
   await expect(
     page.getByRole("button", { name: /CozAI · papertable-test-model/ }),
   ).toBeVisible();
   await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
   await page.getByRole("textbox", { name: "提问输入框" }).fill(question);
   await page.getByRole("button", { name: "发送" }).click();
 }
@@ -2131,6 +2540,7 @@ test("a gateway reasoning preamble is never displayed nor persisted", async ({
   expectClean(await persistedBlob(page));
 
   await page.reload();
+  await continueExploration(page);
   await expect(page.getByText("量子退相干是指系统与环境纠缠")).toBeVisible();
   await expect(page.locator("body")).not.toContainText("Since the user");
   expectClean(await persistedBlob(page));
@@ -2145,6 +2555,7 @@ test("stopping mid-draft flushes nothing to disk", async ({ page }) => {
   expectClean(await persistedBlob(page));
 
   await page.reload();
+  await continueExploration(page);
   await expect(page.getByText(/^已停止/)).toBeVisible();
   const state = await workspaceCounts(page);
   // 只看这次被停止的轮次；demo 种子数据里也有 ai 轮次。

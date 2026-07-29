@@ -159,6 +159,20 @@ import {
   type AttachmentPreflight,
   type AttachmentProgress,
 } from "./lib/attachments";
+import {
+  adoptGoldTurn,
+  buildVerdictQuery,
+  draftRerouteTombstone,
+  extractCutRerouteRounds,
+  isGoldEligible,
+  loadVerdictContext,
+  normalizeGoldDraft,
+  rerouteDraftMaterial,
+  rewriteRatio,
+  verdictLine,
+  verdictContextFromTrace,
+  verdicts,
+} from "./lib/verdicts";
 
 const uid = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 const defaultSettings: AppSettings = {
@@ -414,6 +428,24 @@ export interface CreateCardInput {
   contextThroughTurnId?: string | null;
 }
 
+export interface PendingRerouteVerdict {
+  cardId: string;
+  status: "drafting" | "proposed" | "writing" | "draft-failed" | "write-failed";
+  draft: string;
+  error?: string;
+}
+
+interface PendingRerouteOperation {
+  cardId: string;
+  projectId: string;
+  edgeId: string;
+  material: string;
+  concepts: string[];
+  originalDraft: string;
+  writing?: boolean;
+  startGeneration: () => void | Promise<void>;
+}
+
 interface Toast {
   id: string;
   text: string;
@@ -470,6 +502,7 @@ interface Ctx {
   attachmentImport: AttachmentProgress | null;
   attachmentConfirmation: AttachmentConfirmation | null;
   attachmentDragActive: boolean;
+  pendingRerouteVerdict: PendingRerouteVerdict | null;
 
   cardById: (id: string) => Card | undefined;
   setActiveProject: (id: string) => void;
@@ -488,8 +521,18 @@ interface Ctx {
     turnId: string,
     text: string,
   ) => string;
+  confirmRerouteVerdict: (content: string) => Promise<void>;
+  retryRerouteVerdictDraft: () => void;
+  skipRerouteVerdict: () => void;
   deleteCard: (id: string) => void;
   toggleFavoriteCard: (id: string) => void;
+  draftGold: (cardId: string, turnId: string) => Promise<string>;
+  confirmGold: (
+    cardId: string,
+    turnId: string,
+    conclusion: string,
+    conceptHandle: string,
+  ) => Promise<string>;
   toggleCollapse: (id: string) => void;
   markRead: (id: string) => void;
   cacheConceptPreview: (
@@ -636,6 +679,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [attachmentConfirmation, setAttachmentConfirmation] =
     useState<AttachmentConfirmation | null>(null);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
+  const [pendingRerouteVerdict, setPendingRerouteVerdict] =
+    useState<PendingRerouteVerdict | null>(null);
+  const pendingRerouteOperationRef = useRef<PendingRerouteOperation | null>(
+    null,
+  );
   const attachmentAbortRef = useRef<AbortController | null>(null);
   const vaultTimer = useRef<number | null>(null);
   const [streamingTurnsByCard, setStreamingTurnsByCard] = useState<
@@ -1497,8 +1545,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         Parameters<typeof makeInteractionEvent>[0],
         "sessionId" | "createdAt"
       >,
+      required = false,
     ) => {
-      if (!hydrated || settings.attentionPaused) return undefined;
+      if (!hydrated || (settings.attentionPaused && !required))
+        return undefined;
       const now = Date.now();
       const current = attentionRef.current;
       const transition = ensureProjectSession(
@@ -1860,13 +1910,38 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         flush: throttle.flush,
       });
       try {
+        const question =
+          [...target.turns].reverse().find((turn) => turn.role === "user")
+            ?.content ?? "";
+        const verdictContext = existingTurn?.verdictTrace
+          ? {
+              trace: existingTurn.verdictTrace,
+              items: verdictContextFromTrace(existingTurn.verdictTrace),
+            }
+          : await loadVerdictContext({
+              host: verdicts,
+              projectId: target.projectId,
+              question,
+              title: target.title,
+              concepts: target.concepts,
+            });
+        const auditedAiTurn = {
+          ...aiTurn,
+          verdictTrace: verdictContext.trace,
+        };
+        updateCard(input.cardId, (card) => ({
+          ...card,
+          turns: card.turns.map((turn) =>
+            turn.id === aiId ? auditedAiTurn : turn,
+          ),
+        }));
         // TASK-005 budget events reference the turn row. Commit that one row
         // before the first append-only Agent event instead of racing the
         // ordinary 500 ms streaming autosave.
         await applyChanges({
           projects: { upserts: [] },
           cards: { upserts: [] },
-          turns: { upserts: [{ ...aiTurn, cardId: input.cardId }] },
+          turns: { upserts: [{ ...auditedAiTurn, cardId: input.cardId }] },
           edges: { upserts: [] },
           anchors: { upserts: [] },
           snapshots: { upserts: [] },
@@ -1883,6 +1958,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           snapshots: input.snapshotsSnapshot ?? snapshots,
           references: input.references,
           currentCardId: input.cardId,
+          verdicts: verdictContext.items,
         });
         agentAudit.objective =
           [...built.messages]
@@ -2296,6 +2372,38 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [activeProjectId, cards, interactionEvents, recordInteraction, updateCard],
   );
 
+  const requestRerouteVerdictDraft = useCallback(
+    (operation: PendingRerouteOperation) => {
+      pendingRerouteOperationRef.current = operation;
+      setPendingRerouteVerdict({
+        cardId: operation.cardId,
+        status: "drafting",
+        draft: operation.originalDraft,
+      });
+      void draftRerouteTombstone(operation.material).then(
+        (draft) => {
+          if (pendingRerouteOperationRef.current !== operation) return;
+          operation.originalDraft = draft;
+          setPendingRerouteVerdict({
+            cardId: operation.cardId,
+            status: "proposed",
+            draft,
+          });
+        },
+        () => {
+          if (pendingRerouteOperationRef.current !== operation) return;
+          setPendingRerouteVerdict({
+            cardId: operation.cardId,
+            status: "draft-failed",
+            draft: operation.originalDraft,
+            error: "墓碑起草失败。你可以重试，或跳过后继续生成。",
+          });
+        },
+      );
+    },
+    [],
+  );
+
   const createCard = useCallback(
     (input: CreateCardInput) => {
       const source = requireLiveSourceCard(
@@ -2435,6 +2543,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         newCard.turns.length === 1 && newCard.turns[0].role === "user"
           ? newCard.turns[0].content
           : "";
+      const cutRounds =
+        input.type === "branch"
+          ? extractCutRerouteRounds(
+              source.turns,
+              input.contextThroughTurnId,
+              input.sourceTurnId,
+            )
+          : [];
       if (prompt)
         void persistCreatedCardBeforeGeneration({
           upsert: createdCardPersistenceUpsert({
@@ -2444,15 +2560,45 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             anchor,
           }),
           persist: applyChanges,
-          startGeneration: () =>
-            streamAnswer({
+          startGeneration: () => {
+            const startGeneration = () =>
+              streamAnswer({
+                cardId,
+                cardsSnapshot: nextCards,
+                edgesSnapshot: [...edges, edge],
+                snapshotsSnapshot: [...snapshots, snapshot],
+                references: [],
+                relation: input.type,
+              });
+            if (!cutRounds.length) return startGeneration();
+            recordInteraction(
+              {
+                projectId: activeProjectId,
+                type: "reroute-eligible",
+                targetCardId: cardId,
+                sourceCardId: source.id,
+                targetTurnId: input.sourceTurnId,
+                relation: "branch",
+              },
+              true,
+            );
+            requestRerouteVerdictDraft({
               cardId,
-              cardsSnapshot: nextCards,
-              edgesSnapshot: [...edges, edge],
-              snapshotsSnapshot: [...snapshots, snapshot],
-              references: [],
-              relation: input.type,
-            }),
+              projectId: activeProjectId,
+              edgeId,
+              material: rerouteDraftMaterial(source.title, cutRounds),
+              concepts: [
+                buildVerdictQuery(prompt, newCard.title, newCard.concepts),
+                ...source.concepts.map((concept) =>
+                  buildVerdictQuery(concept, "", []),
+                ),
+              ]
+                .filter(Boolean)
+                .slice(0, 16),
+              originalDraft: "",
+              startGeneration,
+            });
+          },
         }).catch(() => {
           showToast({
             text: "新卡片尚未保存成功，已停止生成；请稍后重试。",
@@ -2465,6 +2611,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       cards,
       edges,
       recordInteraction,
+      requestRerouteVerdictDraft,
       showToast,
       snapshots,
       streamAnswer,
@@ -2928,6 +3075,67 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     },
     [activeProjectId, cards, recordInteraction, updateCard],
   );
+  const draftGold = useCallback(
+    async (cardId: string, turnId: string) => {
+      const card = cards.find(
+        (candidate) =>
+          candidate.id === cardId &&
+          candidate.projectId === activeProjectId &&
+          !candidate.trashed,
+      );
+      const turn = card?.turns.find((candidate) => candidate.id === turnId);
+      if (!turn || !isGoldEligible(turn))
+        throw new Error("只有已完成且非空的 AI 回答可以采纳。");
+      const result = await generateModel({
+        task: "verdict-draft",
+        messages: [
+          {
+            role: "system",
+            content: `根据这一轮 AI 回答，起草一条可独立复用的结论。只输出一句、不换行、不超过 500 字；不要复制整篇回答。\n${SENTINEL_INSTRUCTION}`,
+          },
+          { role: "user", content: turn.content.slice(0, 6_000) },
+        ],
+        temperature: 0.1,
+      });
+      return normalizeGoldDraft(visibleModelOutput(result));
+    },
+    [activeProjectId, cards],
+  );
+  const confirmGold = useCallback(
+    async (
+      cardId: string,
+      turnId: string,
+      conclusion: string,
+      conceptHandle: string,
+    ) => {
+      const card = cards.find(
+        (candidate) =>
+          candidate.id === cardId &&
+          candidate.projectId === activeProjectId &&
+          !candidate.trashed,
+      );
+      const turn = card?.turns.find((candidate) => candidate.id === turnId);
+      if (!card || !turn) throw new Error("找不到要采纳的回答，未写入判决簿。");
+      const written = await adoptGoldTurn({
+        host: verdicts,
+        projectId: card.projectId,
+        cardId: card.id,
+        turn,
+        conclusion,
+        conceptHandle,
+      });
+      updateCard(card.id, (current) => ({
+        ...current,
+        turns: current.turns.map((candidate) =>
+          candidate.id === turn.id
+            ? { ...candidate, favorite: true, verdictId: written.id }
+            : candidate,
+        ),
+      }));
+      return written.id;
+    },
+    [activeProjectId, cards, updateCard],
+  );
   const renameCard = useCallback(
     (id: string, title: string) => {
       // UI validation is not an integrity boundary: imports, keyboard paths
@@ -2992,6 +3200,111 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       });
     },
     [activeProjectId, cards, createCard],
+  );
+  const continuePendingReroute = useCallback(
+    (operation: PendingRerouteOperation) => {
+      if (pendingRerouteOperationRef.current !== operation) return;
+      pendingRerouteOperationRef.current = null;
+      setPendingRerouteVerdict(null);
+      void operation.startGeneration();
+    },
+    [],
+  );
+  const retryRerouteVerdictDraft = useCallback(() => {
+    const operation = pendingRerouteOperationRef.current;
+    if (!operation || operation.writing) return;
+    requestRerouteVerdictDraft(operation);
+  }, [requestRerouteVerdictDraft]);
+  const skipRerouteVerdict = useCallback(() => {
+    const operation = pendingRerouteOperationRef.current;
+    if (!operation || operation.writing) return;
+    recordInteraction(
+      {
+        projectId: operation.projectId,
+        type: "tombstone-abandoned",
+        targetCardId: operation.cardId,
+        relation: "branch",
+      },
+      true,
+    );
+    continuePendingReroute(operation);
+  }, [continuePendingReroute, recordInteraction]);
+  const confirmRerouteVerdict = useCallback(
+    async (content: string) => {
+      const operation = pendingRerouteOperationRef.current;
+      const line = verdictLine(content);
+      if (!operation || !line) {
+        setPendingRerouteVerdict((current) =>
+          current
+            ? {
+                ...current,
+                status: "write-failed",
+                error: "墓碑必须是 1 到 500 字的单行文本。",
+              }
+            : current,
+        );
+        return;
+      }
+      if (operation.writing) return;
+      operation.writing = true;
+      setPendingRerouteVerdict({
+        cardId: operation.cardId,
+        status: "writing",
+        draft: line,
+      });
+      const result = await verdicts
+        .confirm({
+          projectId: operation.projectId,
+          verdictType: "tombstone",
+          sourceKind: "edge",
+          sourceId: operation.edgeId,
+          content: line,
+          concepts: operation.concepts,
+        })
+        .catch(() => null);
+      if (!result) {
+        operation.writing = false;
+        setPendingRerouteVerdict({
+          cardId: operation.cardId,
+          status: "write-failed",
+          draft: line,
+          error: "判决簿服务当前不可用，请重试或明确跳过。",
+        });
+        return;
+      }
+      if (!result.available) {
+        operation.writing = false;
+        setPendingRerouteVerdict({
+          cardId: operation.cardId,
+          status: "write-failed",
+          draft: line,
+          error: result.error.message,
+        });
+        return;
+      }
+      recordInteraction(
+        {
+          projectId: operation.projectId,
+          type: "tombstone-confirmed",
+          targetCardId: operation.cardId,
+          relation: "branch",
+        },
+        true,
+      );
+      if (line !== operation.originalDraft)
+        recordInteraction(
+          {
+            projectId: operation.projectId,
+            type: "tombstone-rewritten",
+            targetCardId: operation.cardId,
+            relation: "branch",
+            editRatio: rewriteRatio(operation.originalDraft, line),
+          },
+          true,
+        );
+      continuePendingReroute(operation);
+    },
+    [continuePendingReroute, recordInteraction],
   );
   const markRead = useCallback(
     (id: string) => updateCard(id, (card) => ({ ...card, unread: false })),
@@ -3852,6 +4165,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     generationTasksRef.current.clear();
     streamingTurnsRef.current = {};
     setStreamingTurnsByCard({});
+    pendingRerouteOperationRef.current = null;
+    setPendingRerouteVerdict(null);
     await clearWorkspace();
     const next = seedSnapshot();
     await saveWorkspace(next);
@@ -3921,6 +4236,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       attachmentImport,
       attachmentConfirmation,
       attachmentDragActive,
+      pendingRerouteVerdict,
       cardById,
       setActiveProject,
       renameProject,
@@ -3933,8 +4249,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setCardAnswerMode,
       renameCard,
       rerouteEditedQuestion,
+      confirmRerouteVerdict,
+      retryRerouteVerdictDraft,
+      skipRerouteVerdict,
       deleteCard,
       toggleFavoriteCard,
+      draftGold,
+      confirmGold,
       toggleCollapse,
       markRead,
       cacheConceptPreview,
@@ -4027,6 +4348,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       attachmentImport,
       attachmentConfirmation,
       attachmentDragActive,
+      pendingRerouteVerdict,
       cardById,
       setActiveProject,
       renameProject,
@@ -4039,8 +4361,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setCardAnswerMode,
       renameCard,
       rerouteEditedQuestion,
+      confirmRerouteVerdict,
+      retryRerouteVerdictDraft,
+      skipRerouteVerdict,
       deleteCard,
       toggleFavoriteCard,
+      draftGold,
+      confirmGold,
       toggleCollapse,
       markRead,
       cacheConceptPreview,

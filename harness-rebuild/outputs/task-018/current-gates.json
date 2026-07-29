@@ -1,0 +1,19 @@
+{
+  "observedAt": "2026-07-29T16:05:04+08:00",
+  "ab": {
+    "status": "in_progress",
+    "reason": "用户选定的 10 个真实老问题及冻结复发判定表尚未提供，未运行真实模型，不以占位题冒充。"
+  },
+  "events": {
+    "source": "/Users/qinshu/Library/Application Support/com.papertable.app/papertable.sqlite3",
+    "eligible": 3,
+    "confirmed": 1,
+    "rewritten": 0,
+    "abandoned": 2,
+    "confirmationRate": 0.3333333333333333,
+    "confirmationGate": "in_progress",
+    "firstTenSettled": 3,
+    "firstTenMajorRewriteOrAbandoned": 2,
+    "draftQualityGate": "in_progress"
+  }
+}

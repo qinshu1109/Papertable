@@ -43,6 +43,8 @@ const project = (): PortableProject => ({
           content: "答案",
           createdAt: 2,
           status: "complete",
+          favorite: true,
+          verdictId: "gold-1",
           citations: [
             {
               chunkId: "chunk-quantum",
@@ -61,6 +63,15 @@ const project = (): PortableProject => ({
             searchQueries: ["量子"],
             hitCount: 1,
             readChunkIds: ["chunk-quantum"],
+          },
+          verdictTrace: {
+            promptVersion: "verdict-v1",
+            injectionEnabled: true,
+            query: "量子 子卡",
+            availability: "available",
+            verdicts: [
+              { id: "v1", verdictType: "gold", snapshot: "保留可核证据" },
+            ],
           },
         },
       ],
@@ -114,6 +125,12 @@ test("native project package preserves graph, snapshots and cards", async () => 
     "chunk-quantum",
   );
   assert.equal(restored.cards[1].turns[0].agentRun?.mode, "unavailable");
+  assert.equal(
+    restored.cards[1].turns[0].verdictTrace?.verdicts[0].snapshot,
+    "保留可核证据",
+  );
+  assert.equal(restored.cards[1].turns[0].favorite, true);
+  assert.equal(restored.cards[1].turns[0].verdictId, "gold-1");
 });
 
 test("Markdown 和 Canvas 导出给人可读的笔记引用，但不公开 answerMode frontmatter", async () => {
@@ -125,6 +142,8 @@ test("Markdown 和 Canvas 导出给人可读的笔记引用，但不公开 answe
   assert.match(markdown, /\*\*量子笔记\*\*/);
   assert.match(markdown, /`notes\/quantum\.md`/);
   assert.match(markdown, /此处是冻结的来源片段/);
+  assert.doesNotMatch(markdown, /verdictTrace|保留可核证据/);
+  assert.doesNotMatch(markdown, /gold-1|verdictId/);
 
   const [canvas] = await formatAdapters.canvas.export(portable);
   const zip = await JSZip.loadAsync(await canvas.blob.arrayBuffer());
@@ -132,7 +151,9 @@ test("Markdown 和 Canvas 导出给人可读的笔记引用，但不公开 answe
     file.name.includes("子卡-child.md"),
   );
   assert.ok(child);
-  assert.match(await child!.async("text"), /### 本轮引用的笔记/);
+  const childText = await child!.async("text");
+  assert.match(childText, /### 本轮引用的笔记/);
+  assert.doesNotMatch(childText, /verdictTrace|保留可核证据/);
 });
 
 test("normal exports exclude experimental attention events and ghost proposals", async () => {

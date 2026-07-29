@@ -1,0 +1,31 @@
+{
+  "order": [
+    "persist card, edge, snapshot, anchor and seed turn in one transaction",
+    "record eligible reroute",
+    "run non-streaming verdict-draft without tools",
+    "wait for confirm, rewrite-confirm, retry or skip",
+    "start first answer"
+  ],
+  "proposed": {
+    "storage": "React transient state only",
+    "sqlite": false,
+    "indexedDb": false,
+    "memos": false
+  },
+  "draftFailure": {
+    "branchRemains": true,
+    "memosWrite": false,
+    "actions": ["retry draft", "skip"]
+  },
+  "writeFailure": {
+    "branchRemains": true,
+    "draftRemains": true,
+    "generationStarts": false,
+    "actions": ["retry write", "skip"]
+  },
+  "confirmed": {
+    "memosWriteCompletesBeforeGeneration": true,
+    "firstAnswerUsesTask015Lookup": true,
+    "newTombstoneInjectedInSameRun": true
+  }
+}

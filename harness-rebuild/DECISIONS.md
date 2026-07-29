@@ -9,5 +9,8 @@
 | [ADR-005](decisions/ADR-005-作用域宿主冻结与双侧校验.md)   | 宿主冻结作用域与双侧校验       | accepted |
 | [ADR-006](decisions/ADR-006-事件溯源与工作集分离.md)       | 事件溯源与工作集分离           | accepted |
 | [ADR-007](decisions/ADR-007-协议修复分类与确定性边界.md)   | 分类修复与确定性边界           | accepted |
+| [ADR-008](decisions/ADR-008-判决簿.md)                     | 用户判决作为唯一耐久层         | accepted |
 
-用户已在 [INPUT-20260728-003](sources/INPUT-20260728-003.md) 明确统一接受上述 ADR。
+ADR-001～007 由用户在
+[INPUT-20260728-003](sources/INPUT-20260728-003.md) 统一接受；ADR-008 由用户在
+[INPUT-20260729-001](sources/INPUT-20260729-001.md) 确认。

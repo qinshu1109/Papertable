@@ -93,7 +93,7 @@ export interface ProviderConfig {
 }
 
 export type ModelTask =
-  "chat" | "agent" | "concept-preview" | "title" | "concepts";
+  "chat" | "agent" | "concept-preview" | "title" | "concepts" | "verdict-draft";
 
 /** OpenAI-compatible function schema.  Only the Harness owns the two names. */
 export interface ProviderTool {
