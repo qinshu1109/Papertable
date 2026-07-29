@@ -1,7 +1,7 @@
 ---
 id: TASK-019
 title: AI 调用性能基线与分段计时
-status: in_progress
+status: done
 depends_on: []
 parallelizable: false
 isolation: outputs/task-019/
@@ -54,3 +54,4 @@ verify: 不改变 Agent、工具、引用和判决语义即可重复记录 prefl
 - 2026-07-29T17:39:00+08:00：数据最小化白名单测试通过，性能对象只允许 `preflightMs`、`firstVisibleMs`、`totalMs` 三个数值字段，不接收或传播提示词、工具参数、密钥、绝对路径和笔记正文。
 - 2026-07-29T17:41:00+08:00：首次 `pnpm verify` 在 ESLint 停止，原因为基线 runner 的 `_event` 参数未使用；生产代码和测试未失败，删除无用参数/类型导入后从头复跑。
 - 2026-07-29T17:43:00+08:00：候选验收门全部通过：`pnpm verify`（232 Node/TS/server、94 Rust、Web build）、默认 E2E 36/36、500ms 延迟场景 1/1、Desktop build、Rust fmt/clippy 与 `git diff --check`；命令、失败修正和基线汇总见 `outputs/task-019/verification.md`。本卡保持 `in_progress`，等待监督者验收。
+- 2026-07-29T17:57:12+08:00：监督者独立复核通过并合入 PR #19（merge `19b1c86`）；本地 `pnpm verify`、36/36 Playwright、Desktop build、严格 clippy/fmt 全绿，远端 `verify` 与 `rust` 亦通过，本卡标记 `done`。

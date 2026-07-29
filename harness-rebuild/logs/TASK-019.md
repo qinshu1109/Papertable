@@ -81,3 +81,12 @@
 ## Verification
 
 - See `outputs/task-019/verification.md`.
+
+## Supervisor acceptance
+
+- `2026-07-29T17:57:12+08:00` — Independently reviewed the complete diff and
+  reran `pnpm verify`, `pnpm test:e2e` (36/36), `pnpm build:desktop`, strict
+  Clippy, Rust formatting, and `git diff --check`; all passed.
+- PR #19 merged as `19b1c86`. GitHub `verify` and `rust` checks both passed;
+  the Desktop job is intentionally skipped by workflow policy.
+- TASK-019 is accepted and marked `done`; TASK-020 is now unlocked.
