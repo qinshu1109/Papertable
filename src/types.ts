@@ -247,6 +247,16 @@ export interface VerdictTrace {
   unavailableCode?: string;
 }
 
+export type AgentPhase = "searching" | "reading" | "answering";
+
+export interface AgentProgress {
+  phase: AgentPhase;
+  round: number;
+  searchCount: number;
+  hitCount: number;
+  readCount: number;
+}
+
 export interface Turn {
   id: string;
   role: TurnRole;
@@ -266,7 +276,9 @@ export interface Turn {
   /** Only chunks actually read in this run can appear here. */
   citations?: NoteCitation[];
   /** Transient, user-visible Harness phase; persisted only to survive refresh. */
-  agentPhase?: "searching" | "reading" | "answering";
+  agentPhase?: AgentPhase;
+  /** Safe live counters only; cleared when the Turn leaves streaming state. */
+  agentProgress?: AgentProgress;
   /** Frozen host-side verdict audit for this answer; never citation evidence. */
   verdictTrace?: VerdictTrace;
 }

@@ -885,6 +885,78 @@ test("desktop flow creates a real streamed card without an API key", async ({
   ).toBeVisible();
 });
 
+test("send renders an AI Turn within 100ms while verdict preflight is still pending", async ({
+  page,
+}) => {
+  await openExploration(page);
+  await page.getByRole("button", { name: "新建项目" }).click();
+  await continueExploration(page);
+
+  let verdictReleased = false;
+  let modelCrossedPendingVerdict = false;
+  await page.route("**/api/verdicts?**", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    verdictReleased = true;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        available: true,
+        data: { verdicts: [], history: [] },
+      }),
+    });
+  });
+  page.on("request", (request) => {
+    if (request.url().includes("/api/llm/stream") && !verdictReleased)
+      modelCrossedPendingVerdict = true;
+  });
+  await page
+    .getByRole("textbox", { name: "提问输入框" })
+    .fill("发送后立刻显示进行中状态。");
+  await page.evaluate(() => {
+    const state = { startedAt: performance.now(), visibleAt: 0 };
+    (
+      window as Window & {
+        __task021Visibility?: typeof state;
+      }
+    ).__task021Visibility = state;
+    const observer = new MutationObserver(() => {
+      const status = [...document.querySelectorAll('[role="status"]')].find(
+        (element) => element.textContent?.includes("正在"),
+      );
+      if (!status || state.visibleAt) return;
+      state.visibleAt = performance.now();
+      observer.disconnect();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  });
+  await page.getByRole("button", { name: "发送" }).click();
+  const visibleMs = await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const state = (
+          window as Window & {
+            __task021Visibility?: { startedAt: number; visibleAt: number };
+          }
+        ).__task021Visibility;
+        return state?.visibleAt ? state.visibleAt - state.startedAt : null;
+      }),
+    )
+    .not.toBeNull()
+    .then(() =>
+      page.evaluate(() => {
+        const state = (
+          window as Window & {
+            __task021Visibility?: { startedAt: number; visibleAt: number };
+          }
+        ).__task021Visibility!;
+        return state.visibleAt - state.startedAt;
+      }),
+    );
+  expect(visibleMs).toBeLessThanOrEqual(100);
+  expect(modelCrossedPendingVerdict).toBe(false);
+  await expect(page.getByText("这是本地验收用的流式回答")).toBeVisible();
+});
+
 test("web adopts a completed turn only after explicit gold confirmation", async ({
   page,
 }) => {

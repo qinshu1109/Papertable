@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "kind": "post-task-021-preflight",
+  "model": "papertable-test-model",
+  "capabilityCache": "warm",
+  "fakeProviderDelayMs": 500,
+  "hostFixture": {
+    "verdictReadMs": 40,
+    "verdictTurnPersistenceMs": 20,
+    "libraryAndAttachmentReadMs": 40,
+    "libraryMetadataAndLiveScopeMs": 30
+  },
+  "cases": [
+    {
+      "caseId": "q1",
+      "preflightMs": 95,
+      "firstVisibleMs": 1866,
+      "totalMs": 1867,
+      "independentHostStartSpreadMs": 0,
+      "verdictPersistedBeforeModel": true,
+      "scopeFrozenBeforeModel": true,
+      "modelRequests": 3,
+      "toolCalls": 2,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    },
+    {
+      "caseId": "q2",
+      "preflightMs": 93,
+      "firstVisibleMs": 1850,
+      "totalMs": 1850,
+      "independentHostStartSpreadMs": 0,
+      "verdictPersistedBeforeModel": true,
+      "scopeFrozenBeforeModel": true,
+      "modelRequests": 3,
+      "toolCalls": 2,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    },
+    {
+      "caseId": "q3",
+      "preflightMs": 93,
+      "firstVisibleMs": 1851,
+      "totalMs": 1851,
+      "independentHostStartSpreadMs": 0,
+      "verdictPersistedBeforeModel": true,
+      "scopeFrozenBeforeModel": true,
+      "modelRequests": 3,
+      "toolCalls": 2,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    },
+    {
+      "caseId": "q4",
+      "preflightMs": 94,
+      "firstVisibleMs": 1849,
+      "totalMs": 1849,
+      "independentHostStartSpreadMs": 0,
+      "verdictPersistedBeforeModel": true,
+      "scopeFrozenBeforeModel": true,
+      "modelRequests": 3,
+      "toolCalls": 2,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    },
+    {
+      "caseId": "q5",
+      "preflightMs": 94,
+      "firstVisibleMs": 1851,
+      "totalMs": 1851,
+      "independentHostStartSpreadMs": 0,
+      "verdictPersistedBeforeModel": true,
+      "scopeFrozenBeforeModel": true,
+      "modelRequests": 3,
+      "toolCalls": 2,
+      "terminalResult": "completed",
+      "terminalReason": "none"
+    }
+  ],
+  "median": {
+    "preflightMs": 94,
+    "firstVisibleMs": 1851,
+    "totalMs": 1851
+  }
+}

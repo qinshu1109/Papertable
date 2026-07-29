@@ -85,6 +85,7 @@ export function recoverInterruptedTurns(cards: Card[]): {
         streaming: false,
         status: "interrupted" as const,
         agentPhase: undefined,
+        agentProgress: undefined,
       };
     });
     if (!cardChanged) return card;

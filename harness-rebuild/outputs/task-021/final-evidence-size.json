@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "fixture": "src/lib/agent.test.ts exhausted-round final synthesis",
+  "comparison": "JSON.stringify(value) versus JSON.stringify(value, null, 2)",
+  "fieldOrder": [
+    "schemaVersion",
+    "objective",
+    "answerMode",
+    "stop",
+    "evidenceBoundary",
+    "verifiedReadChunks"
+  ],
+  "parsedFieldEquivalent": true,
+  "compactIsCanonicalJson": true,
+  "compactChars": 344,
+  "prettyChars": 469,
+  "compactBytes": 426,
+  "prettyBytes": 551,
+  "savedBytes": 125,
+  "reductionPercent": 22.69,
+  "estimatedTokens": {
+    "method": "ceil(chars/1.7), matching the repository context estimate",
+    "compact": 203,
+    "pretty": 276,
+    "saved": 73
+  }
+}

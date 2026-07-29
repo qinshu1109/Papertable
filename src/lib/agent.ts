@@ -1,4 +1,6 @@
 import type {
+  AgentPhase,
+  AgentProgress,
   AgentRunTrace,
   BuiltContext,
   NoteCitation,
@@ -59,7 +61,7 @@ import {
 const MAX_READS = 4;
 const MAX_SEARCH = 8;
 
-export type AgentPhase = "searching" | "reading" | "answering";
+export type { AgentPhase, AgentProgress } from "../types";
 
 export interface AgentOutcome {
   trace: AgentRunTrace;
@@ -111,7 +113,7 @@ export interface AgentTurnInput {
   libraryScopes?: Array<{ id: string; name: string }>;
   capability?: ProviderCapability;
   signal: AbortSignal;
-  onPhase: (phase: AgentPhase) => void;
+  onPhase: (progress: AgentProgress) => void;
   /** Receives only final-answer raw tokens; never tools / planning output. */
   onToken: (event: Extract<ProviderStreamEvent, { type: "token" }>) => void;
   /** Local dispatch boundary; called immediately before each provider request. */
@@ -552,8 +554,26 @@ function strictNoEvidenceOutcome(
   );
 }
 
+function reportProgress(input: {
+  onPhase: AgentTurnInput["onPhase"];
+  trace: AgentRunTrace;
+  phase: AgentPhase;
+  round: number;
+  readCount: number;
+  searchCount?: number;
+}) {
+  input.onPhase({
+    phase: input.phase,
+    round: Math.max(1, input.round),
+    searchCount: input.searchCount ?? input.trace.searchQueries.length,
+    hitCount: input.trace.hitCount,
+    readCount: input.readCount,
+  });
+}
+
 async function executeToolCalls(input: {
   calls: ToolCall[];
+  round: number;
   runId?: string;
   projectId: string;
   libraryIds: string[];
@@ -674,7 +694,12 @@ async function executeToolCalls(input: {
         const query = typeof args.query === "string" ? args.query.trim() : "";
         if (!query || query.length > 100) throw new Error("检索词格式不正确。");
         const requested = typeof args.limit === "number" ? args.limit : 4;
-        input.onPhase("searching");
+        reportProgress({
+          ...input,
+          phase: "searching",
+          readCount: input.readChunks.length,
+          searchCount: input.trace.searchQueries.length + 1,
+        });
         if (input.audit)
           await appendAgentSearchRequested(
             input.audit,
@@ -697,6 +722,11 @@ async function executeToolCalls(input: {
         });
         input.trace.searchQueries.push(query);
         input.trace.hitCount += hits.length;
+        reportProgress({
+          ...input,
+          phase: "searching",
+          readCount: input.readChunks.length,
+        });
         for (const hit of hits) {
           input.readableIds.add(hit.chunk.id);
           if (
@@ -750,7 +780,11 @@ async function executeToolCalls(input: {
           .slice(0, MAX_READS);
         if (!ids.length)
           throw new Error("请求片段已经在本 run 的已读工作集中。");
-        input.onPhase("reading");
+        reportProgress({
+          ...input,
+          phase: "reading",
+          readCount: input.readChunks.length,
+        });
         if (input.audit)
           await appendAgentReadRequested(
             input.audit,
@@ -775,6 +809,11 @@ async function executeToolCalls(input: {
           if (!current.has(chunk.id)) input.readChunks.push(chunk);
         }
         input.trace.readChunkIds = input.readChunks.map((chunk) => chunk.id);
+        reportProgress({
+          ...input,
+          phase: "reading",
+          readCount: input.readChunks.length,
+        });
         if (input.audit)
           await appendAgentReadCompleted(
             input.audit,
@@ -1023,11 +1062,7 @@ function freezeFinalSynthesisSnapshot(input: {
     cleanContext,
     evidenceMessage: {
       role: "user",
-      content: `finalEvidence（宿主冻结，只读）：\n${JSON.stringify(
-        finalEvidence,
-        null,
-        2,
-      )}`,
+      content: `finalEvidence（宿主冻结，只读）：\n${JSON.stringify(finalEvidence)}`,
     },
     finalizationInstruction: [
       FINAL_SYNTHESIS_INSTRUCTION,
@@ -1174,6 +1209,8 @@ async function runNativeStateMachine(
   const completedReadChunkIds = new Set(
     input.resume?.completedReadChunkIds ?? [],
   );
+  const resumedRoundOffset = input.resume?.ledger.used.rounds ?? 0;
+  let currentRound = resumedRoundOffset + 1;
   let auditSequence = input.resume?.auditSequenceStart ?? 0;
   const nextAuditSequence = () => {
     auditSequence += 1;
@@ -1231,7 +1268,14 @@ async function runNativeStateMachine(
           };
           break;
         }
-        input.onPhase("searching");
+        currentRound = resumedRoundOffset + state.round + 1;
+        reportProgress({
+          onPhase: input.onPhase,
+          trace,
+          phase: "searching",
+          round: currentRound,
+          readCount: readChunks.length,
+        });
         let output: NativeRoundOutput;
         try {
           output = await classifiedProviderRequest({
@@ -1426,6 +1470,7 @@ async function runNativeStateMachine(
       case "executing-tools": {
         const execution = await executeToolCalls({
           calls: state.calls,
+          round: currentRound,
           runId: input.audit?.runId,
           projectId: input.projectId,
           libraryIds: input.libraryIds,
@@ -1745,7 +1790,13 @@ async function runNativeStateMachine(
           );
           if (strict) return strict;
         }
-        input.onPhase("answering");
+        reportProgress({
+          onPhase: input.onPhase,
+          trace,
+          phase: "answering",
+          round: currentRound,
+          readCount: readChunks.length,
+        });
         const snapshot: FinalSynthesisSnapshot =
           state.snapshot ??
           freezeFinalSynthesisSnapshot({
@@ -1979,7 +2030,13 @@ export async function runAgentTurn(
     if (!input.libraryIds.length && !input.attachmentCardId) {
       const strictOutcome = strictNoEvidenceOutcome(input, trace, []);
       if (strictOutcome) return strictOutcome;
-      input.onPhase("answering");
+      reportProgress({
+        onPhase: input.onPhase,
+        trace,
+        phase: "answering",
+        round: 1,
+        readCount: 0,
+      });
       const directRequest = () => {
         let emitted = false;
         return streamRound({

@@ -410,6 +410,7 @@ export function recoverTurnFromAgentAudit(
       streaming: false,
       status: "interrupted",
       agentPhase: undefined,
+      agentProgress: undefined,
       agentRun: trace,
     };
   const terminal = latestTerminalEvent(audit);
@@ -419,6 +420,7 @@ export function recoverTurnFromAgentAudit(
       streaming: false,
       status: "interrupted",
       agentPhase: undefined,
+      agentProgress: undefined,
       agentRun: trace,
     };
   const failed = terminal.terminal.result === "failed";
@@ -429,6 +431,7 @@ export function recoverTurnFromAgentAudit(
     status: failed ? "error" : "complete",
     ...(failed ? { error: "Agent run 在中断前已进入失败终态。" } : {}),
     agentPhase: undefined,
+    agentProgress: undefined,
     agentRun: trace,
     citations: terminal.citations,
   };
