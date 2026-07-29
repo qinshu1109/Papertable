@@ -206,6 +206,14 @@ export interface AgentRunTrace {
   retrievalEvidence?: HistoricalRetrievalEvidence[];
   /** Persisted four-dimensional per-run budget ledger. */
   budget?: AgentBudgetLedger;
+  /** Optional user-perceived run timing. Durations and stage names only. */
+  performance?: AgentRunPerformance;
+}
+
+export interface AgentRunPerformance {
+  preflightMs?: number;
+  firstVisibleMs: number;
+  totalMs: number;
 }
 
 export interface BuiltContext {

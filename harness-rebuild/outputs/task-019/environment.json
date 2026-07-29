@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-29T17:23:24+08:00",
+  "gitHead": "41c915e",
+  "branch": "task/TASK-019-performance-baseline",
+  "os": "Darwin 25.5.0 arm64",
+  "cpu": "Apple M4",
+  "memoryBytes": 17179869184,
+  "node": "v24.18.0",
+  "pnpm": "11.17.0",
+  "model": "claude-opus-5",
+  "provider": "configured OpenAI-compatible host",
+  "questionSet": "frozen-questions.json q1-q5",
+  "runOrder": "serial",
+  "capabilityCache": "warm",
+  "noteFixture": "TASK-013 synthetic evidence through real native-tool model calls"
+}
