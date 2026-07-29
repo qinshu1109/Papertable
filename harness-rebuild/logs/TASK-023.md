@@ -136,3 +136,15 @@ src/lib/provider/capabilityGate.test.ts` — 15/15 passed.
   diff review, push, remote CI, and merge.
 - Task status deliberately remains `in_progress` until those supervisor gates
   complete.
+
+## Supervisor closeout
+
+- `2026-07-29T21:20:06+08:00` — Independently reviewed the complete diff
+  against integrated base `f8b84bf`; no blocking correctness, secrecy,
+  concurrency, timeout, cleanup, or scope findings.
+- Pushed commits `90e509d` and `e5aed59` in PR #23. Remote `rust` passed in
+  1m37s and `verify` passed in 3m3s; the workflow's Desktop job was skipped by
+  design because the signed installed-candidate gate is recorded above.
+- Merged PR #23 as `13f5ada293e3e09a8b0359343dadfad9ec658040`.
+  With review, commit, push, installation verification, and merge complete,
+  the supervisor changed TASK-023 to `done`.
